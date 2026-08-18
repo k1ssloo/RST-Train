@@ -104,12 +104,14 @@ The derived datasets are published:
 
 | dataset | contents |
 |---|---|
-| [`NiuNiu0110/RST-SFT-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-SFT-Qwen3.5-27B) | SFT conversations, configs `cap10` (10,778 ex) and `cap8` (8,886 ex) |
+| [`NiuNiu0110/RST-SFT-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-SFT-Qwen3.5-27B) | configs `cap10` (10,778 ex), `cap8` (8,886, ablation), `cap10_pretokenized` (`input_ids`+`loss_mask`) |
 | `NiuNiu0110/RST-RL-Taskset` (private) | GRPO task selection metadata, 5,140 `sweet`-tier tasks |
 
 ```python
 from datasets import load_dataset
 ds = load_dataset("NiuNiu0110/RST-SFT-Qwen3.5-27B", "cap10", split="train")
+# or, with the verified loss mask already applied (what the verl path consumes):
+ds = load_dataset("NiuNiu0110/RST-SFT-Qwen3.5-27B", "cap10_pretokenized", split="train")
 ```
 
 The RL taskset is metadata only — task *bodies* are rebuilt from upstream with

@@ -56,6 +56,12 @@ configs:
     path: data/cap8/train.parquet
   - split: holdout
     path: data/cap8/holdout.parquet
+- config_name: cap10_pretokenized
+  data_files:
+  - split: train
+    path: data/cap10_pretokenized/train.parquet
+  - split: holdout
+    path: data/cap10_pretokenized/holdout.parquet
 ---
 
 # RST SFT trajectories for Qwen3.5-27B
@@ -89,6 +95,7 @@ this filtering, not as proof.
 |---|---|---|---|---|---|
 | `cap10` (default) | **10,778** | 10,578 / 200 | 99.9 M | 1,329 | 82 |
 | `cap8` (ablation) | 8,886 | 8,686 / 200 | 82.4 M | 1,327 | 67 |
+| `cap10_pretokenized` | 10,778 | 10,578 / 200 | 99.9 M | 1,329 | 82 |
 
 Group-capping is the point: successes per group are median 28, max 284, so
 uncapped training would be dominated by a handful of lineages.
@@ -128,6 +135,50 @@ order.
 detected before JSON object`. Normalizing the assistant turn without stripping
 that preamble trains the model to accept "you had warnings" feedback for clean
 output. **50,169 observations needed this repair** in `cap10`.
+
+## `cap10_pretokenized`: the same data with the mask already applied
+
+| field | type | meaning |
+|---|---|---|
+| `input_ids` | `list[int]` | the exact tokens of the whole-conversation render |
+| `loss_mask` | `list[int]` | 1 = train on this token, 0 = context only. Aligned 1:1 with `input_ids`. |
+
+Same 10,778 examples, 99,939,485 tokens, **32,402,050 trained tokens (32.42 %)**.
+It is *smaller* than the `messages` version (75 MB vs 87 MB) because token ids
+compress better than JSON text.
+
+To get `labels`, set `labels[i] = input_ids[i]` where `loss_mask[i] == 1` else
+`-100`. Do **not** shift — HuggingFace models shift internally.
+
+### Why you may want this instead of `messages`
+
+Building the mask yourself is the easiest place in this pipeline to be silently
+wrong: a bad mask still trains, the loss still falls, and the model just comes out
+worse. Two concrete traps:
+
+**1. Do not let a trainer re-tokenize turn-by-turn.** verl's `MultiTurnSFTDataset`
+templates each message separately and concatenates. Measured on 200 rows of this
+dataset, **200/200 disagree** with the whole-conversation render, because the Qwen3.5
+template injects an empty `<think>\n\n</think>\n\n` before the **last** assistant
+turn — so turn-by-turn building makes every turn "last" and a 21-turn conversation
+ends up with 21 think blocks instead of 1. verl's `ignore_input_ids_mismatch: True`
+silences the assertion, not the bug. Using `cap10_pretokenized` avoids this entirely.
+
+**2. Budget for the logits, not the model.** This tokenizer's vocab is 248,320, and
+the loss upcasts logits to fp32. Measured on one H100-80GB with **Qwen3.5-0.8B**
+(0.75 B params!), a real forward/backward over these rows:
+
+| sequence length | peak, unfused CE | peak, fused CE (Liger) |
+|---|---|---|
+| 4,096 | 14.98 GiB | 5.52 GiB |
+| 8,192 | 28.43 GiB | 6.75 GiB |
+| ~16,000 | 48.34 GiB | 8.57 GiB |
+| 32,329 | **out of memory** | 13.14 GiB |
+
+At 32,329 tokens the unfused cross-entropy asks for a single **29.85 GiB** tensor
+(`seq × 248,320 × 4 bytes`) and dies. That term is independent of model size, so a
+fused/chunked cross-entropy is effectively required at long sequence length
+regardless of which model you train.
 
 ## Loss masking
 
@@ -282,6 +333,13 @@ def main() -> int:
         (root / "sft-v1/rst_sft_train.parquet", "data/cap8/train.parquet"),
         (root / "sft-v1/rst_sft_holdout.parquet", "data/cap8/holdout.parquet"),
         (root / "sft-v1/manifest.json", "manifest_cap8.json"),
+        # Pre-tokenized variant of cap10: input_ids + loss_mask with the verified
+        # qwen3_5 mask already applied. Smaller than the messages version (token ids
+        # compress better than JSON) and it removes any chance of a consumer
+        # recomputing the mask differently.
+        (root / "sft-v1-cap10/pretokenized_train.parquet", "data/cap10_pretokenized/train.parquet"),
+        (root / "sft-v1-cap10/pretokenized_holdout.parquet", "data/cap10_pretokenized/holdout.parquet"),
+        (root / "sft-v1-cap10/pretokenized_train_manifest.json", "manifest_cap10_pretokenized.json"),
     ]
     # The local jsonl carries absolute `task_dir` paths from whatever machine built
     # it. Publish a portable copy instead: `tasks/<task_id>`, to be resolved against
