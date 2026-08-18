@@ -288,3 +288,58 @@ Two asymmetries this introduces, both handled in code:
   once. `RST_MAX_SANDBOXES` also stops being a local-resource number and becomes the
   provider's concurrency quota; exceed it and the 429s are (correctly) classified as
   infrastructure failures and dropped.
+
+### What they cost for this workload
+
+Published rates, read 2026-08-18. Priced against the sandbox shape
+`12_run_grpo.sh` actually asks for — **2 vCPU / 4 GiB per rollout**, 64 rollouts per
+GRPO step (`rollout-batch-size 8 × n-samples-per-prompt 8`), 3–14 min per rollout
+measured from the reference trajectories (§4), so 3.2–14.9 sandbox-hours per step
+with 8.5 at the midpoint.
+
+| | rate for 2 vCPU + 4 GiB | per GRPO step (mid) | 200 steps | free credit | concurrency |
+|---|---|---|---|---|---|
+| **E2B** | $0.0504/vCPU-h + $0.0162/GiB-h = **$0.166/h** | **$1.41** ($0.53–2.47) | ~$283 | $100 one-time (Hobby) | 20 (Hobby) / 100 (Pro $150/mo) |
+| **Modal** *Sandbox* | $0.1419/core-h + $0.0240/GiB-h = **$0.238/h** | **$2.03** ($0.76–3.55) | ~$406 | $30/mo (Starter) / $100/mo (Team $250/mo) | 100 containers (Starter) |
+| **Modal** *standard Function* | $0.0472/core-h + $0.0080/GiB-h = **$0.079/h** | **$0.68** | ~$135 | same | same |
+| **Daytona** | **$0.0858/vCPU-h ⇒ $0.172/h, UNVERIFIED**, plus unpublished RAM + disk | ≥$1.46 | ≥$293 | $200; up to $50k startup credits | pooled, see below |
+
+E2B: `$0.000014/vCPU/s` and `$0.0000045/GiB/s`; Hobby caps a session at 1 h, which is
+above our longest measured rollout but will kill a hung one — acceptable, since
+`rl/generate.py` classifies that as an infrastructure abort rather than reward 0.
+
+Modal bills a **physical core = 2 vCPU**, so our 2-vCPU rollout is one core. Note the
+two rate cards: `$0.00003942/core/s` for Sandboxes vs `$0.0000131/core/s` for standard
+Functions — the same compute is **3× cheaper outside the Sandbox product**, so if the
+Harbor `modal` backend can be pointed at a Function-shaped runner that is the single
+largest saving available anywhere in this table. Do not pin a region (1.5–1.75×) or
+ask for non-preemptible (3×). Volumes are $0.09/GiB/mo with 1 TiB/mo free, which
+covers the image cache outright.
+
+Daytona is what the RST paper used, and it is the one whose bill you cannot predict
+from public pages. Three things are documented and matter more than the rate:
+
+- **Billing is on *reserved* resources, not consumed** — a mostly-idle rollout costs
+  the same as a busy one, so oversizing the sandbox is pure waste.
+- **A *stopped* sandbox still bills disk**; only `archived` (containers) is free, and
+  **a deleted sandbox's snapshots keep billing for storage**. This is the real trap
+  for us: Harbor's daytona backend builds one content-hash snapshot per distinct task
+  environment (`harbor__<env_hash>__snapshot`), and a run that walks 1,600 distinct
+  tasks leaves 1,600 snapshots of multi-GiB task images behind at an unpublished
+  per-GiB rate. Delete them between runs; do not merely stop sandboxes.
+- **Resources are a pooled tier, not a sandbox count.** Tier 1 is 10 vCPU / 30 GiB
+  disk, which at 2 vCPU per rollout is **5 concurrent sandboxes, not 16** — Tier 2
+  (100 vCPU / 200 GiB / 300 GiB) is the first tier that fits `RST_MAX_SANDBOXES=16`.
+  The docs' own two tables disagree on Tier 1 RAM (10 vs 20 GiB).
+
+The `$0.0858/vCPU/h` figure sits next to an OS/Windows selector on the pricing page,
+and no RAM or disk rate is published anywhere, so treat any Daytona total as a floor
+and get a quote before committing a long run. The docs also warn charges can lag
+usage by up to 48 h, so a runaway will not show up in the dashboard promptly.
+
+Two cost items apply to every provider. The first rollout per distinct task image pays
+a provider-side build (99 % of these Dockerfiles `apt`/`pip install`), which is tens of
+dollars over a full run, not hundreds — but it is billed compute, and it is why §2's
+prebuild step being skipped is a cost note as well as a correctness note. And none of
+this applies to the DPO fallback (`DPO_PLAN.md`): it needs no container at all, so its
+marginal cloud cost is zero.

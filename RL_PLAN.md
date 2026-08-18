@@ -101,7 +101,11 @@ source scripts/00b_setup_sandbox.sh                  # picks one from available 
 ```
 
 Those backends build the task's own Dockerfile provider-side, so this pod needs zero
-container privilege. Terminus-2 is a host-side agent, so the agent loop and every
+container privilege. They cost money per rollout-hour, and `BACKENDS.md` prices the
+three managed ones against this exact sandbox shape: roughly **$1.4–2.0 per GRPO
+step**, a few hundred dollars for a 200-step run, plus one trap each (Modal's Sandbox
+rate is 3× its Function rate; Daytona bills reserved disk on *stopped* sandboxes and
+keeps billing snapshots after deletion). Terminus-2 is a host-side agent, so the agent loop and every
 model call still run here against the local shim — nothing inbound to the pod, and
 `--network none` inside the task container still holds. `BACKENDS.md` has the full
 table plus the two behavioural differences: proxy handling inverts, and §2 below is
