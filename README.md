@@ -20,6 +20,9 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | Eval harness (`06_eval.py`, 3 runs, mean±std, infra-separated) | ⏳ written, needs cluster |
 | Report generator + anomaly checks | ✅ **tested** on synthetic healthy/faulty runs |
 | Multi-model registry (5 models) | ✅ **tested**: all rows resolve, 4 negative tests reject |
+| Pre-tokenized export (backend-agnostic) | ✅ **run**: 10,578 rows, 0 drops, 32.42 % trained |
+| verl+FSDP SFT path | ⚠️ dataset core unit-tested; launcher not executed |
+| verl Harbor AgentLoop | ⚠️ assembly logic tested; never run against verl |
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
@@ -54,6 +57,7 @@ render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged
 
 ```
 PLAN.md                        SFT plan; hardware decision tables; risk register
+BACKENDS.md                    slime+Megatron vs verl+FSDP; why others were rejected
 RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates
 OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
@@ -72,6 +76,9 @@ scripts/
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
   14_make_report.py            markdown report + mechanical anomaly checks
   20_run_all.sh                one command: preflight -> ... -> train -> eval -> report
+  15_export_pretokenized.py    bake the verified mask into input_ids+loss_mask
+  30_run_sft_verl.sh           alternative backend: verl + FSDP (no Megatron)
+verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
 configs/models.json            the model registry
 rl/generate.py                 slime --custom-generate-function-path implementation

@@ -1,11 +1,3 @@
-# Operator prompt
-
-Copy everything inside the fence into the cluster agent's first message.
-Replace the `<...>` placeholders first.
-
----
-
-````text
 You are operating a 4-node × 8×A100 cluster (32 GPUs) to fine-tune a Qwen3.5 model
 on synthesized terminal-agent trajectories, then benchmark it and write a report.
 Five model sizes are supported (0.8B … 35B-A3B); see "Pick a model first" below.
@@ -20,7 +12,8 @@ You are starting from an EMPTY directory. Bootstrap first:
 Then READ THESE THREE FILES BEFORE RUNNING ANYTHING:
   - README.md    — status table: what is already verified vs. never executed
   - PLAN.md      — the SFT spec: measured facts, hardware decision tables, risk register
-  - RL_PLAN.md   — phase 2 only; do not act on it yet
+  - RL_PLAN.md   — the RL phase: prerequisites, gates, unverified assumptions
+  - BACKENDS.md  — ONLY if the Megatron stack defeats you: the verl+FSDP fallback
 
 Everything in PLAN.md marked "measured" was verified against the real data and the
 real upstream source trees. Everything marked UNVERIFIED has not been run and is
@@ -183,6 +176,15 @@ Rules when you do:
 2. `--qwen-gdn-backend fla`. A100 is SM80; FlashQLA requires SM90+. Do not install
    FlashQLA, and do not "fix" a GDN error by switching to flashqla.
 3. No FP8 anywhere. A100 has no FP8 tensor cores. Never run convert_hf_to_fp8.py.
+3b. If the Megatron/TE/apex stack simply will not build, you have a documented
+   fallback: verl + FSDP via `scripts/30_run_sft_verl.sh`. Read BACKENDS.md first.
+   Two things there are mandatory, not optional: `model.use_liger=True` (without a
+   fused cross-entropy the 248,320-row logits alone are 16-33 GB at 32K and you will
+   OOM), and pre-tokenized data via `scripts/15_export_pretokenized.py` (verl's
+   built-in multi-turn dataset mismatches the Qwen3.5 render on 100% of our rows,
+   producing one empty <think> block per assistant turn instead of one per
+   conversation). Do not set `ignore_input_ids_mismatch: True` to make it pass.
+   Switching backends is a deviation: record it and say so in the report.
 4. Do not upgrade the pinned versions in scripts/01_setup_env.sh (torch
    2.11.0+cu129, flash_attn 2.8.3, transformer_engine 2.16.1,
    flash-linear-attention 0.4.2, SGLang v0.5.15.post1, Megatron 1dcf0daf). That
@@ -355,4 +357,3 @@ Final summary must contain:
 
 State plainly what you verified versus what you assumed. Never report success for a
 step you skipped.
-````
