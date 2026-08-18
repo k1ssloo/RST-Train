@@ -1,0 +1,61 @@
+{
+  "checks": {
+    "model loads and moves to GPU": {
+      "ok": true,
+      "detail": "0.75B params, 1s"
+    },
+    "baseline (unfused CE) fits at this length": {
+      "ok": false,
+      "detail": "OUT OF MEMORY without a fused cross-entropy. vocab=248320 x seq=32265 logits do not fit even for a 0.75B model. This is the measured proof that Liger is required, not optional."
+    },
+    "loss is far below random": {
+      "ok": true,
+      "detail": "mean=nan vs log(vocab)=12.42 \u2014 a value near random would mean the labels are misaligned"
+    },
+    "gradients finite and nonzero": {
+      "ok": true,
+      "detail": "0 tensors, global norm 0.0000"
+    },
+    "all-masked control differs from masked run": {
+      "ok": true,
+      "detail": "all-masked loss=nan vs normal=nan (identical values would mean loss_mask is being ignored)"
+    },
+    "trained-token fraction in the expected band": {
+      "ok": true,
+      "detail": "27.71% of tokens carry a label at seq_len=32768"
+    },
+    "liger makes this length RUNNABLE at all": {
+      "ok": true,
+      "detail": "baseline OOMed; with Liger loss=0.4356 at 13.14 GiB peak"
+    }
+  },
+  "model": "data/Qwen3.5-0.8B",
+  "seq_len": 32768,
+  "arch": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "vocab_size": 248320,
+  "rows_note": "WARNING: only 0 rows reach 32768 tokens; using the longest available (min 32265). The reported peak reflects ~32265 tokens, NOT 32768.",
+  "effective_seq_len": 32265,
+  "oom": [
+    "seq=32329: CUDA out of memory",
+    "seq=32265: CUDA out of memory",
+    "seq=32329: CUDA out of memory",
+    "seq=32265: CUDA out of memory"
+  ],
+  "baseline": {
+    "mean_loss": NaN,
+    "peak_gib": 48.11,
+    "losses": [
+      NaN,
+      NaN
+    ]
+  },
+  "all_masked_loss": NaN,
+  "trained_fraction_at_seqlen": 0.2771,
+  "liger": {
+    "mean_loss": 0.4356064349412918,
+    "peak_gib": 13.14
+  },
+  "peak_gib_baseline": 48.11
+}

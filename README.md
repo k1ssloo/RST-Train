@@ -23,6 +23,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | Pre-tokenized export (backend-agnostic) | ✅ **run**: 10,578 rows, 0 drops, 32.42 % trained |
 | verl+FSDP SFT path (**primary**) | ⚠️ dataset core unit-tested; launcher not executed |
 | Rootless-podman sandbox (no Docker needed) | ✅ **verified**: build 26.6 s, run/exec/tmux/no-net all OK |
+| Real fwd/bwd on Qwen3.5-0.8B + measured memory | ✅ **run**: 8/8 checks; unfused CE OOMs at 32 K, Liger 13.1 GiB |
 | verl Harbor AgentLoop | ⚠️ assembly logic tested; never run against verl |
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
@@ -63,7 +64,9 @@ RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates
 OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
   00_preflight.sh              detect GPU mem / NVLink / IB / shared FS / RAM → config row
-  01_setup_env.sh              micromamba `slime` env, A100 deltas (no FlashQLA, no FP8)
+  01_setup_env.sh              slime/Megatron env (secondary path)
+  01b_setup_env_verl.sh        PRIMARY env: verl+FSDP, driver-adaptive torch build
+  16_smoke_forward_backward.py real fwd/bwd on 1 GPU; measures peak memory
   02_download.sh               model + datasets, sha256-verified against the manifests
   03_build_sft_data.py         327,189 trajectories → slime `messages` parquet
   03b_validate_sft_data.py     ports slime's qwen3_5 mask; asserts the training target

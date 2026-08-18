@@ -26,3 +26,6 @@ wandb/
 *.swp
 .idea/
 .vscode/
+
+# local GPU test env + smoke-test model weights
+.venv-gpu/

@@ -83,7 +83,7 @@ verl's FSDP engine shards parameters, not the sequence. One GPU must hold a whol
 |---|---|
 | params + grads + Adam, sharded | 444.8 GB / 32 = **13.9 GB/GPU** |
 | activations (full recompute, 64 layers) | **21.5 GB/GPU** |
-| logits, bf16 | **16.3 GB** — and ~32.6 GB if the loss upcasts to fp32 |
+| logits | **~29.9 GB measured** (the loss upcasts to fp32; independent of model size) |
 | working set | ~2 GB |
 
 So `model.use_liger=True` is load-bearing, not an optimization: Liger-Kernel ships
@@ -92,6 +92,33 @@ the sequence and never materializes full logits. With it, ~37 GB/GPU → comfort
 on 80 GB. Without it you OOM. On 40 GB cards this does not fit; use optimizer CPU
 offload and/or 16 K sequences, and say so in the report because it changes what the
 run means.
+
+### Measured on real data, one GPU, Qwen3.5-0.8B (0.75 B params)
+
+`scripts/16_smoke_forward_backward.py` runs a real forward/backward over the
+pre-tokenized rows and reports peak memory. Results on an H100-80GB (sm90) with
+torch 2.13+cu130, `attn_implementation=sdpa`, gradient checkpointing on:
+
+| sequence length | peak, unfused CE | peak, Liger fused CE | outcome |
+|---|---|---|---|
+| 4,096 | 14.98 GiB | 5.52 GiB | −63 % |
+| 8,192 | 28.43 GiB | 6.75 GiB | −76 % |
+| ~16,000 | 48.34 GiB | 8.57 GiB | −82 % |
+| **32,329** | **OUT OF MEMORY** | **13.14 GiB** | Liger is the difference between running and not |
+
+At 32,329 tokens the unfused cross-entropy tried to allocate a single
+**29.85 GiB** tensor (`32,048,676,864` bytes) on top of 48.11 GiB already held, and
+died. Note what that number is: `≈ seq × vocab × 4 bytes` = 32,268 × 248,320 × 4.
+The loss upcasts logits to fp32, and **this term does not depend on model size** —
+FSDP shards parameters, not logits. So on the 27.8 B model the same 29.85 GiB
+appears, with *more* activation memory beside it.
+
+That is why `model.use_liger=True` is stated as mandatory rather than recommended.
+It is not a throughput optimization; without it a 32 K sequence does not fit on an
+80 GB card even for a 0.75 B model.
+
+Liger's loss also matches the unfused loss where both run (0.4505 vs 0.4495 at 4 K;
+0.3745 vs 0.3742 at 16 K), so the saving costs no accuracy.
 
 `fla` is *not* required on the FSDP path: transformers' qwen3_5 declares
 `@use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")`, so there

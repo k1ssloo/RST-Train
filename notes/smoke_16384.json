@@ -1,0 +1,57 @@
+{
+  "checks": {
+    "model loads and moves to GPU": {
+      "ok": true,
+      "detail": "0.75B params, 1s"
+    },
+    "loss is finite": {
+      "ok": true,
+      "detail": "losses=[0.3625, 0.386]"
+    },
+    "loss is far below random": {
+      "ok": true,
+      "detail": "mean=0.3742 vs log(vocab)=12.42 \u2014 a value near random would mean the labels are misaligned"
+    },
+    "gradients finite and nonzero": {
+      "ok": true,
+      "detail": "320 tensors, global norm 7.6056"
+    },
+    "all-masked control differs from masked run": {
+      "ok": true,
+      "detail": "all-masked loss=nan vs normal=0.3742 (identical values would mean loss_mask is being ignored)"
+    },
+    "trained-token fraction in the expected band": {
+      "ok": true,
+      "detail": "36.78% of tokens carry a label at seq_len=16384"
+    },
+    "liger loss matches baseline": {
+      "ok": true,
+      "detail": "liger=0.3745 vs baseline=0.3742"
+    },
+    "liger reduces peak memory": {
+      "ok": true,
+      "detail": "8.57 GiB vs 48.34 GiB (82% lower)"
+    }
+  },
+  "model": "data/Qwen3.5-0.8B",
+  "seq_len": 16384,
+  "arch": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "vocab_size": 248320,
+  "baseline": {
+    "mean_loss": 0.3742324262857437,
+    "peak_gib": 48.34,
+    "losses": [
+      0.36247098445892334,
+      0.3859938681125641
+    ]
+  },
+  "all_masked_loss": NaN,
+  "trained_fraction_at_seqlen": 0.3678,
+  "liger": {
+    "mean_loss": 0.3745163679122925,
+    "peak_gib": 8.57
+  },
+  "peak_gib_baseline": 48.34
+}

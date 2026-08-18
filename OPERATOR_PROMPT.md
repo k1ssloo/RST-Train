@@ -55,10 +55,26 @@ marked first_batch=true in the registry. Nothing else is authorized yet.
     MODEL_KEY=qwen3.5-27b RUN_RL=1 bash scripts/20_run_all.sh
     MODEL_KEY=qwen3.5-9b  RUN_RL=1 bash scripts/20_run_all.sh
 
-A smaller model has already been used locally to shake out simple bugs in this
-repo's own code (data pipeline, pre-tokenized export, mask semantics, the container
-runtime path). Those fixes are in. What has NOT been exercised anywhere is the
-cluster-scale path: multi-node FSDP, checkpoint conversion, and the RL bridge.
+Qwen3.5-0.8B has already been run locally on one GPU against the real
+pre-tokenized data (`scripts/16_smoke_forward_backward.py`), and it found real bugs
+that are now fixed. What it established, which you can rely on:
+
+  * the model loads and the gated-delta-net path executes (18 linear + 6 full
+    attention layers at 0.8B)
+  * the loss_mask -> labels conversion is correct: loss 0.45 vs log(vocab)=12.42,
+    and an all-masked control yields NaN rather than the same number, which is what
+    proves the mask reaches the loss
+  * 27-29% of tokens carry a label, matching the dataset manifest
+  * Liger's loss matches the unfused loss (0.4505 vs 0.4495)
+  * MEASURED memory: at 32,329 tokens the UNFUSED cross-entropy OOMs on an 80GB
+    card even at 0.75B params, attempting a single 29.85 GiB allocation
+    (= seq x 248,320 vocab x 4 bytes, fp32). With Liger the same run peaks at
+    13.14 GiB. That term is independent of model size, so it is worse at 27.8B.
+
+Still unexercised anywhere: multi-node FSDP, the checkpoint export path, and the RL
+bridge. Run `16_smoke_forward_backward.py` yourself on your hardware before the
+cluster run -- it takes minutes and its memory numbers are what you should size
+`configs/models.json` from.
 
 Optional but strongly advised first: one throwaway qwen3.5-0.8b SFT run
 (`MODEL_KEY=qwen3.5-0.8b`, ~5 min/epoch, 2 GPUs). Same architecture as 27B, so it
@@ -248,6 +264,61 @@ Rules when you do:
      a different LR, dropped examples -- say so explicitly in the report. A silent
      scope reduction reads as a clean result and is the worst outcome here.
 
+## Adapt to the machine you actually have
+
+The versions in this repo were chosen on a different machine. Yours will differ in
+driver, CUDA, kernel, glibc, podman, GPU generation and available packages. When
+something fails, **first identify what your system actually is, then adapt** — do
+not retry the same command hoping for a different result, and do not import a
+version from these docs that your system cannot run.
+
+Establish the facts before changing anything:
+
+    nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total --format=csv
+    python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_capability())"
+    python -c "import transformers;print(transformers.__version__)"
+    podman --version; uname -r; ldd --version | head -1
+    bash scripts/00_preflight.sh
+
+Then adapt along these axes. Each has a hard floor that is NOT negotiable and a
+choice above it that is yours:
+
+  * torch CUDA build <- driver version. Floor: torch must report
+    `cuda.is_available() == True`. A wheel newer than the driver fails at init with
+    an unhelpful message. `01b_setup_env_verl.sh` maps driver>=570 -> cu128,
+    >=550 -> cu126, >=525 -> cu121; if that mapping is wrong for your driver, change
+    the mapping.
+  * kernels <- compute capability. Floor: A100 is sm80, so bf16 only, FA2 not FA3,
+    no FP8, no FlashQLA, GDN via fla-Triton or the pure-PyTorch fallback. If
+    flash-attn will not build, `sdpa` is correct and slower -- take it and say so.
+  * transformers >= 5.15.0. This is a FLOOR, not a preference: older versions do not
+    know `qwen3_5` at all.
+  * podman >= 4.4 for task images (31% use Dockerfile heredocs). Below that,
+    install the static build; do not work around it by skipping tasks silently.
+  * sequence length and parallelism <- measured memory, not the tables here. Run
+    `scripts/16_smoke_forward_backward.py --seq-len N` on ONE GPU first: it reports
+    real peak memory and exits nonzero on a failed check. Edit
+    `configs/models.json` from what you measure.
+  * data layout <- whatever the trainer you end up using actually wants. The
+    training target is already fixed and verified in `input_ids` + `loss_mask`
+    (scripts/15_export_pretokenized.py), so reshaping it into another container --
+    packed, padded, `labels` with -100, a different column naming, a webdataset --
+    is a mechanical transform you may do freely. What you must NOT do is recompute
+    the mask with a different implementation, or let a trainer re-tokenize from
+    `messages`, because that reintroduces exactly the bug the pre-tokenization
+    exists to remove.
+
+Rules while adapting:
+  1. Change one variable at a time and record what you observed. "Upgraded three
+     things and it works now" is not a result anyone can act on later.
+  2. Prefer the smallest, most local change: a flag over a version bump, a version
+     bump over a code edit, a code edit over a redesign.
+  3. Write every adaptation into notes/DEVIATIONS.md with the system fact that
+     forced it (e.g. "driver 535 -> cu121 wheel, cu128 failed at cuda init").
+  4. If an adaptation changes what the numbers mean -- shorter sequences, fewer eval
+     runs, dropped tasks, sdpa instead of FA2 -- state it in the report. That is the
+     difference between an adapted experiment and an unreported one.
+
 ## Hard rules — these are the exceptions to the above
 
 1. `--loss-mask-type qwen3_5`. NEVER the default `qwen`. The default mis-segments
@@ -264,11 +335,18 @@ Rules when you do:
    producing one empty <think> block per assistant turn instead of one per
    conversation). Do not set `ignore_input_ids_mismatch: True` to make it pass.
    Switching backends is a deviation: record it and say so in the report.
-4. Do not upgrade the pinned versions in scripts/01_setup_env.sh (torch
-   2.11.0+cu129, flash_attn 2.8.3, transformer_engine 2.16.1,
-   flash-linear-attention 0.4.2, SGLang v0.5.15.post1, Megatron 1dcf0daf). That
-   combination is version-sensitive. If a pin fails to install, report it — do not
-   resolve it by bumping versions.
+4. Version policy differs by backend, deliberately:
+   * slime path (`01_setup_env.sh`): DO NOT change the pins (torch 2.11.0+cu129,
+     flash_attn 2.8.3, transformer_engine 2.16.1, flash-linear-attention 0.4.2,
+     SGLang v0.5.15.post1, Megatron 1dcf0daf). That FA2/TE/Megatron combination is
+     genuinely fragile; if a pin will not install, report it rather than bumping it.
+   * verl path (`01b_setup_env_verl.sh`): the opposite. It DETECTS the driver and
+     compute capability and picks the torch CUDA build accordingly, then verifies by
+     importing. You are expected to adjust it if detection is wrong on your machine.
+     Two invariants there: never install FlashQLA (sm90+ only) and never enable FP8
+     on A100, and never let a dependency silently replace the driver-matched torch —
+     the script guards that, because `pip install liger-kernel` did exactly that
+     during local validation (swapped cu128 for PyPI's cu130).
 5. `messages[0]` has role `user`, not `system`. That is how Terminus-2 delivers the
    harness prompt, so it keeps training and serving identical.
 6. `max-tokens-per-gpu × CP ≥ max-seq-len` must hold or the longest sequence cannot
@@ -306,7 +384,13 @@ STEP 1 — Preflight. GATE: host RAM must have headroom for Adam CPU offload (~3
   fp32 state, sharded across DP). If not, drop `--optimizer-cpu-offload`, raise CP,
   and say so.
 
-STEP 2 — Environment + download (`01_setup_env.sh`, `02_download.sh`). GATE:
+STEP 2 — Environment + download. Use the backend-matched script:
+    verl (default):  bash scripts/01b_setup_env_verl.sh
+    slime (only if you can change cuDNN): bash scripts/01_setup_env.sh
+  They are NOT interchangeable and must not share one env: 01_setup_env.sh builds
+  apex + TransformerEngine + Megatron, which is the part that needs the cuDNN swap.
+  01b installs none of that. `20_run_all.sh` picks the right one from $BACKEND.
+  Then `bash scripts/02_download.sh`. GATE:
   02_download.sh sha256-verifies every dataset shard against the published manifest
   and exits non-zero on mismatch. Do not proceed past a mismatch.
 

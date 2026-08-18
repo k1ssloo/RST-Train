@@ -63,6 +63,11 @@ includes `Qwen3_5ForConditionalGeneration`.
 | Framework | slime (Ray + Megatron-LM backend) + SGLang for eval/rollout |
 | Debug | 1 shared H100 (SM90) — data + conversion + 1-GPU smoke only |
 
+> **Backend note.** verl + FSDP is the primary path (`scripts/01b_setup_env_verl.sh`,
+> `scripts/30_run_sft_verl.sh`) because building Megatron on A100 needs a cuDNN swap
+> a shared cluster will not permit. See `BACKENDS.md`. The slime/Megatron notes below
+> remain accurate for that secondary path.
+
 **A100-specific deltas from slime's upstream `build_conda.sh` (both handled in
 `scripts/01_setup_env.sh`):**
 
@@ -213,7 +218,7 @@ export BASE_FOLDER=/shared/rst SLIME_DIR=$BASE_FOLDER/slime
 export MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile
 export MEM_CLASS=auto WANDB_KEY=<key>        # omit key → offline
 bash scripts/00_preflight.sh --hostfile $HOSTFILE   # do this first, read it
-bash scripts/01_setup_env.sh
+bash scripts/01b_setup_env_verl.sh   # verl (primary); 01_setup_env.sh only for slime/Megatron
 bash scripts/02_download.sh
 bash scripts/04_convert_ckpt.sh to_dist      # 20–40 min, CPU-bound, ~120 GB RAM
 bash scripts/05_run_sft.sh

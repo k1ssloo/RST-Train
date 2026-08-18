@@ -16,6 +16,7 @@ set -uo pipefail
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+BACKEND="${BACKEND:-verl}"                 # verl (primary) | slime (needs a cuDNN swap on A100)
 MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"      # python scripts/model_registry.py --list
 RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-sft-v1}"
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
@@ -64,7 +65,14 @@ echo "=== est ${EST_EPOCH_MINUTES} min/epoch, vision=$HAS_VISION moe=$IS_MOE"
 stage preflight bash scripts/00_preflight.sh ${HOSTFILE:+--hostfile "$HOSTFILE"}
 
 # ------------------------------------------------------------------- 2. env
-stage env bash scripts/01_setup_env.sh
+# The two backends need DIFFERENT environments and they are not compatible in one
+# env: the slime recipe builds apex + TransformerEngine + Megatron (the part that
+# needs a cuDNN swap on A100), while verl needs none of that.
+case "$BACKEND" in
+  verl)  stage env bash scripts/01b_setup_env_verl.sh ;;
+  slime) stage env bash scripts/01_setup_env.sh ;;
+  *) echo "unknown BACKEND=$BACKEND (want verl|slime)" >&2; exit 2 ;;
+esac
 
 # --------------------------------------------------------------- 3. download
 stage download env DOWNLOAD_REFERENCE="$EVAL_REFERENCE" MODEL_KEY="$MODEL_KEY" bash scripts/02_download.sh
@@ -89,11 +97,25 @@ build_data() {
 stage data build_data
 
 # ------------------------------------------------------------- 5. convert ckpt
-stage convert env MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_dist
+# Megatron needs an HF -> torch_dist conversion. verl/FSDP loads the HF checkpoint
+# directly, so this whole stage (and its ~120GB RAM requirement, and the open
+# question about whether the text-only spec tolerates the ViT/MTP tensors) simply
+# does not exist on the verl path.
+if [[ "$BACKEND" == "slime" ]]; then
+  stage convert env MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_dist
+else
+  echo "=== SKIP convert (verl/FSDP loads the HF checkpoint directly)"
+fi
 
 # ----------------------------------------------------------------- 6. train
-stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" MODEL_KEY="$MODEL_KEY" \
-  MEM_CLASS="$MEM_CLASS" bash scripts/05_run_sft.sh
+if [[ "$BACKEND" == "slime" ]]; then
+  stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" MODEL_KEY="$MODEL_KEY" \
+    MEM_CLASS="$MEM_CLASS" bash scripts/05_run_sft.sh
+else
+  stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" MODEL_KEY="$MODEL_KEY" \
+    MEM_CLASS="$MEM_CLASS" NNODES="${ACTOR_NUM_NODES:-4}" NGPUS="${ACTOR_NUM_GPUS_PER_NODE:-8}" \
+    bash scripts/30_run_sft_verl.sh
+fi
 
 # ---------------------------------------------------------------- 7. export
 export_ckpt() {
@@ -101,7 +123,16 @@ export_ckpt() {
   latest=$(find "$BASE_FOLDER/$RUN_NAME" -maxdepth 1 -type d -name 'iter_*' | sort | tail -1)
   [[ -n "$latest" ]] || { echo "no iter_* checkpoint under $BASE_FOLDER/$RUN_NAME" >&2; return 1; }
   echo "exporting $latest"
-  MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf" || return 1
+  if [[ "$BACKEND" == "slime" ]]; then
+    MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf" || return 1
+  else
+    # verl's checkpointer can already emit HF format (save_contents includes
+    # hf_model). Find it rather than assuming a layout.
+    hf=$(find "$latest" -maxdepth 2 -type d -name 'huggingface' | head -1)
+    [[ -n "$hf" ]] || hf=$(find "$latest" -maxdepth 2 -name 'config.json' -printf '%h\n' | head -1)
+    [[ -n "$hf" ]] || { echo "no HF-format dir under $latest; check verl checkpoint.save_contents" >&2; return 1; }
+    rm -rf "$BASE_FOLDER/out-hf"; cp -r "$hf" "$BASE_FOLDER/out-hf"
+  fi
   if [[ "$HAS_VISION" == "1" ]]; then
     # The text-only round trip drops model.visual.* / mtp.*; without restoring them
     # the checkpoint will not load as a ConditionalGeneration model.
@@ -190,6 +221,7 @@ stage eval_reference eval_reference
 cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
 {
   "run_name": "$RUN_NAME",
+  "backend": "$BACKEND",
   "model_key": "$MODEL_KEY",
   "hf_repo": "$HF_REPO",
   "params_b": ${PARAMS_B},
