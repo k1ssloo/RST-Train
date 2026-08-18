@@ -177,9 +177,13 @@ def main() -> int:
             "input_ids": "list[int] — the exact tokens, whole-conversation render",
             "loss_mask": "list[int] — 1 = train on this token, 0 = context only",
         },
-        "note": "loss_mask is aligned 1:1 with input_ids. Trainers that want `labels` "
-                "should set labels[i] = input_ids[i] where loss_mask[i]==1 else -100, "
-                "and must apply the usual shift-by-one themselves.",
+        "note": "loss_mask is aligned 1:1 with input_ids: mask[i] refers to token i, "
+                "with no offset applied. To get `labels`, set "
+                "labels[i] = input_ids[i] where loss_mask[i]==1 else -100, and do NOT "
+                "shift — every HuggingFace CausalLM (and Liger's fused CE) shifts "
+                "internally, so shifting here misaligns the supervision by one token. "
+                "Shift only if you hand-write the cross-entropy against unshifted "
+                "logits, in which case shift logits and labels together as usual.",
     }
     (args.out.parent / (args.out.stem + "_manifest.json")).write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
