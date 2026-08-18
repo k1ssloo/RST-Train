@@ -277,6 +277,124 @@ def check_vs_base(findings: Findings, evals: dict[str, dict | None], tolerance: 
                          f"{cm} vs base {bm} ({delta:+.2f})")
 
 
+def scored_benchmarks(evals: dict[str, dict | None]) -> list[str]:
+    """Every label/benchmark pair that actually produced a number."""
+    out = []
+    for label, data in evals.items():
+        for name, b in ((data or {}).get("benchmarks") or {}).items():
+            if b.get("status") == "scored":
+                out.append(f"{label}/{name}")
+    return out
+
+
+def check_benchmark_coverage(findings: Findings, evals: dict[str, dict | None],
+                             offline: dict | None) -> None:
+    """FAIL when nothing was benchmarked at all.
+
+    This exists because the earlier version only WARNed, and a WARN does not
+    block. Worse, 20_run_all.sh always PASSES --eval paths whether or not those
+    files exist, so `if not evals` was never even true -- a run whose eval stage
+    never happened produced a report with no numbers and a green in_range. That is
+    the single worst output this tool can emit: it converts "we could not measure
+    the checkpoint" into "the checkpoint is fine".
+
+    The offline eval does NOT lift the FAIL. It is teacher-forced agreement with
+    recorded trajectories; it cannot yield a pass rate, and RL on top of an
+    unmeasured checkpoint is exactly what this gate is for. On a pod that cannot
+    run containers the point is moot anyway -- RL needs the same sandbox eval
+    does, so nothing is being blocked that could have run.
+    """
+    scored = scored_benchmarks(evals)
+    if scored:
+        findings.add(OK, "eval", "benchmark coverage",
+                     f"{len(scored)} scored benchmark(s): {', '.join(scored[:6])}")
+        return
+    supplied = [k for k, v in evals.items() if v]
+    detail = (
+        "NO benchmark produced a score, so this checkpoint is unmeasured. "
+        + (f"Eval files were supplied ({', '.join(supplied)}) but contain no scored "
+           f"benchmark -- check 06_eval.py's own output for why. "
+           if supplied else
+           "No eval results file exists at all; the eval stage did not run. ")
+        + ("The container-free offline eval IS present, which is the right fallback "
+           "-- but it measures agreement with recorded trajectories, not task "
+           "success, so it does not clear this gate. "
+           if offline else
+           "Not even the container-free fallback ran: `python "
+           "scripts/06b_eval_offline.py --model-path <ckpt> --holdout "
+           "<pretokenized_holdout.parquet> --out <dir>`. ")
+        + "Report this checkpoint as NOT EVALUATED. To proceed anyway, set RUN_RL=0 "
+          "and make that call explicitly, rather than letting a green verdict imply "
+          "a measurement that does not exist."
+    )
+    findings.add(FAIL, "eval", "benchmark coverage", detail)
+
+
+def check_offline_eval(findings: Findings, offline: dict | None) -> None:
+    """Sanity-check the container-free metrics. Weak signal, but real failure modes."""
+    if not offline:
+        return
+    scoring = offline.get("scoring") or {}
+    loss, top1 = scoring.get("loss"), scoring.get("top1_accuracy")
+    findings.add(INFO, "offline", "held-out loss",
+                 f"loss={loss} ppl={scoring.get('perplexity')} top1={top1} over "
+                 f"{scoring.get('supervised_tokens')} supervised tokens in "
+                 f"{scoring.get('rows')} rows")
+    if isinstance(loss, (int, float)) and not math.isfinite(loss):
+        findings.add(FAIL, "offline", "held-out loss",
+                     "held-out loss is not finite; the checkpoint is broken")
+
+    delta = offline.get("delta_vs_base") or {}
+    if isinstance(delta.get("loss"), (int, float)):
+        if delta["loss"] >= 0:
+            findings.add(FAIL, "offline", "loss vs base",
+                         f"held-out NLL did not improve over the base model "
+                         f"({delta['loss']:+.4f}). On the fine-tune's own training "
+                         f"distribution that means it did not take: suspect the loss "
+                         f"mask, the LR, or a train/serve template mismatch.")
+        else:
+            findings.add(OK, "offline", "loss vs base",
+                         f"held-out NLL improved by {-delta['loss']:.4f} over base")
+    elif scoring:
+        findings.add(WARN, "offline", "loss vs base",
+                     "no --base-model was scored, so the held-out loss is an absolute "
+                     "number with nothing to compare it against. Re-run 06b with "
+                     "--base-model <the un-finetuned checkpoint>.")
+
+    actions = offline.get("actions") or {}
+    if actions.get("available") is False:
+        findings.add(WARN, "offline", "action protocol",
+                     f"not probed: {actions.get('reason')}")
+        return
+    if not actions:
+        return
+    attempted = actions.get("actions_attempted") or 0
+    parse = actions.get("parsed_rate")
+    trunc = actions.get("truncated_rate") or 0
+    findings.add(INFO, "offline", "action agreement",
+                 f"parse={parse} commands_exact={actions.get('commands_exact_rate')} "
+                 f"first_keystrokes={actions.get('first_keystrokes_exact_rate')} "
+                 f"over {attempted} turns")
+    # Terminus-2 discards any turn it cannot parse, so a low parse rate is a hard
+    # defect whatever the agreement numbers say -- but only once truncation is ruled
+    # out, otherwise the finding is about --gen-tokens rather than the model.
+    if isinstance(parse, (int, float)) and attempted >= 20:
+        if trunc > 0.2:
+            findings.add(WARN, "offline", "action protocol",
+                         f"{trunc:.0%} of probes hit the generation cap "
+                         f"({actions.get('gen_tokens')} tokens), so parse={parse} is a "
+                         f"floor, not a measurement. Raise --gen-tokens and re-run.")
+        elif parse < 0.9:
+            findings.add(FAIL, "offline", "action protocol",
+                         f"only {parse:.0%} of generated turns parse as an RST action "
+                         f"object, and truncation does not explain it. Terminus-2 drops "
+                         f"every unparseable turn, so this checkpoint would waste most "
+                         f"of its rollout budget. {actions.get('note')}")
+        else:
+            findings.add(OK, "offline", "action protocol",
+                         f"{parse:.0%} of generated turns parse as an RST action")
+
+
 def check_eval(findings: Findings, label: str, data: dict | None, is_reference: bool,
                model_key: str | None = None) -> None:
     comparable = has_paper_reference(model_key)
@@ -346,7 +464,8 @@ def check_eval(findings: Findings, label: str, data: dict | None, is_reference: 
 
 # -------------------------------------------------------------------- render
 
-def render(args, config, manifest, training, evals, findings: Findings) -> str:
+def render(args, config, manifest, training, evals, findings: Findings,
+           offline: dict | None = None) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     L: list[str] = []
     A = L.append
@@ -396,6 +515,53 @@ def render(args, config, manifest, training, evals, findings: Findings) -> str:
     A("> LHTB is not scorable with this harness: upstream withholds its verifiers")
     A("> (0/46 tasks ship `tests/`). A blank or `unscorable` cell there is correct;")
     A("> a number would be fabricated.\n")
+
+    if not scored_benchmarks(evals):
+        A("### ⚠️ This checkpoint was NOT benchmarked\n")
+        A("Every cell above is `not run` or `unscorable`. **There is no pass rate for this")
+        A("checkpoint.** Say exactly that when reporting it. Do not describe it as")
+        A("promising, working, or good: none of those words are supported by anything")
+        A("measured here.\n")
+        A("The usual cause is that agentic eval needs to build a task Dockerfile and drive")
+        A("a tmux session inside it, and this machine could not. `bash")
+        A("scripts/00b_setup_sandbox.sh --diagnose` names the specific reason and the")
+        A("single change that fixes it; `BACKENDS.md` lists the backends that run the")
+        A("container somewhere else, which need no local container privilege at all.\n")
+
+    # ---- offline (container-free) eval
+    if offline:
+        s = offline.get("scoring") or {}
+        a = offline.get("actions") or {}
+        d = offline.get("delta_vs_base") or {}
+        A("## Offline eval (container-free) — a weaker signal, reported as such\n")
+        A("From `scripts/06b_eval_offline.py`. Teacher-forced scoring against held-out")
+        A("expert trajectories plus greedy action-protocol agreement. **This is not a")
+        A("benchmark and must never be quoted as one**: it cannot observe whether the")
+        A("agent recovers from a wrong command, which is most of the difficulty.\n")
+        A("| metric | value | reads as |")
+        A("|---|---|---|")
+        A(f"| held-out loss | {s.get('loss', '—')} | lower is better; "
+          f"ppl {s.get('perplexity', '—')} |")
+        A(f"| next-token top-1 | {s.get('top1_accuracy', '—')} | over "
+          f"{s.get('supervised_tokens', '—')} supervised tokens only |")
+        if d:
+            A(f"| Δ loss vs base | {d.get('loss', '—'):+} | {d.get('reading', '')} |"
+              if isinstance(d.get("loss"), (int, float)) else
+              f"| Δ loss vs base | — | {d.get('reading', '')} |")
+        if a.get("available") is False:
+            A(f"| action protocol | not probed | {a.get('reason', '')} |")
+        elif a:
+            A(f"| action parse rate | {a.get('parsed_rate', '—')} | Terminus-2 discards "
+              f"any turn it cannot parse |")
+            A(f"| commands exact | {a.get('commands_exact_rate', '—')} | same keystroke "
+              f"list as the expert |")
+            A(f"| first keystrokes | {a.get('first_keystrokes_exact_rate', '—')} | same "
+              f"opening move |")
+            A(f"| truncated | {a.get('truncated_rate', '—')} | hit the "
+              f"{a.get('gen_tokens', '—')}-token cap; inflates every miss above |")
+        A("")
+        if a.get("note"):
+            A(f"> {a['note']}\n")
 
     # ---- findings
     A("## Findings\n")
@@ -481,9 +647,12 @@ def render(args, config, manifest, training, evals, findings: Findings) -> str:
             if b.get("status") != "scored":
                 A(f"- **{name}**: unscorable — {b.get('reason')}")
                 continue
-            A(f"- **{name}**: {b['pass_rate_mean']} ± {b['pass_rate_std']} % "
-              f"(per-run {b['per_run_pass_rate']}), pass@{b['runs']} = {b.get('pass_at_k')}%, "
-              f"infra {b['infra_failure_rate']}%")
+            # .get, not [...]: this tool's contract is that a report is produced even
+            # when the run went wrong, so a results.json missing a key must degrade
+            # to a gap in one line rather than take the whole report down.
+            A(f"- **{name}**: {b.get('pass_rate_mean')} ± {b.get('pass_rate_std')} % "
+              f"(per-run {b.get('per_run_pass_rate')}), pass@{b.get('runs')} = "
+              f"{b.get('pass_at_k')}%, infra {b.get('infra_failure_rate')}%")
             never = b.get("tasks_never_solved") or []
             if never:
                 A(f"  - never solved in any run ({len(never)}): "
@@ -516,6 +685,10 @@ def main() -> int:
     p.add_argument("--data-manifest", type=Path, default=None)
     p.add_argument("--eval", action="append", default=[], metavar="LABEL=PATH",
                    help="repeatable, e.g. --eval mine=.../results.json --eval reference=...")
+    p.add_argument("--offline-eval", type=Path, default=None,
+                   help="offline_results.json from 06b_eval_offline.py -- the "
+                        "container-free fallback. Reported as a weaker signal; it "
+                        "never substitutes for a benchmark score.")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--verdict-json", type=Path, default=None,
                    help="also write a small machine-readable verdict for orchestration")
@@ -533,19 +706,22 @@ def main() -> int:
         label, path = item.split("=", 1)
         evals[label] = read_json(Path(path))
 
+    offline = read_json(args.offline_eval)
+
     findings = Findings()
     check_config(findings, config)
     check_data(findings, manifest)
     check_training(findings, training, manifest, config)
-    if not evals:
-        findings.add(WARN, "eval", "any results", "no --eval supplied; nothing was benchmarked")
     model_key = args.model_key or (config or {}).get("model_key")
     for label, data in evals.items():
         check_eval(findings, label, data, is_reference=("ref" in label.lower()), model_key=model_key)
     check_vs_base(findings, evals)
+    check_benchmark_coverage(findings, evals, offline)
+    check_offline_eval(findings, offline)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render(args, config, manifest, training, evals, findings), encoding="utf-8")
+    args.out.write_text(render(args, config, manifest, training, evals, findings, offline),
+                        encoding="utf-8")
 
     # "In range" is deliberately narrow: no FAIL findings at all. WARNs are for a
     # human to weigh; FAILs mean a number is either wrong or untrustworthy, and

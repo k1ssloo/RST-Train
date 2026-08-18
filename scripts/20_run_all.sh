@@ -147,11 +147,19 @@ export_ckpt() {
 stage export export_ckpt
 
 # ------------------------------------------------------------------ 8. eval
-# Eval needs a container runtime; SFT did not. Rootless podman is the primary path
-# on clusters without Docker permission -- it serves the Docker API Harbor speaks.
+# Eval needs somewhere to run task containers; SFT did not. 00b picks that place:
+# rootless podman locally when this machine may mount(2), otherwise an off-machine
+# backend (daytona/e2b/modal, a remote daemon, or k8s sibling pods). Only if there
+# is no place at all does agentic eval become impossible.
+SANDBOX_OK=1
 if ! source scripts/00b_setup_sandbox.sh; then
-  echo "=== EVAL SKIPPED: no container runtime. SFT results stand, but they are"
-  echo "    UNMEASURED. Do not describe the checkpoint as good; say eval was blocked."
+  SANDBOX_OK=0
+  echo "=== AGENTIC EVAL BLOCKED: nowhere to run task containers."
+  echo "    SFT results stand. The benchmark numbers do not exist, and must be"
+  echo "    reported as not-run -- never as a checkpoint that 'looks good'."
+  echo "    Falling back to the container-free eval, which is a WEAKER signal but"
+  echo "    is not nothing: held-out loss, token accuracy, next-action agreement,"
+  echo "    tool-call parse rate. See scripts/06b_eval_offline.py."
   SKIP_STAGES="$SKIP_STAGES eval_candidate eval_reference eval_base"
 fi
 export EVAL_TP="${EVAL_TP:-$SERVE_TP}"
@@ -215,6 +223,33 @@ eval_reference() {
 }
 stage eval_reference eval_reference
 
+# The container-free fallback. Runs whenever agentic eval could not, so that a
+# checkpoint is never simply unmeasured. Deliberately NOT a substitute: it scores
+# the model against recorded trajectories, which cannot tell you whether the agent
+# would have solved the task.
+eval_offline() {
+  # Prefer the messages-shaped holdout, not the pretokenized one. Both give the
+  # same loss (the export's mask is re-derived by importing qwen3_5_mask, verified
+  # identical supervised-token counts), but only the messages shape carries the
+  # assistant text the action probe needs -- and next-action agreement is the more
+  # informative half. --base-model doubles the load time and is worth it: the
+  # base-vs-tuned delta is the only offline number that answers "did SFT do
+  # anything at all", and 14_make_report.py WARNs when it is missing.
+  local args=(--model-path "$BASE_FOLDER/out-hf-full"
+              --base-model "$BASE_FOLDER/$MODEL_DIR_NAME"
+              --out "$BASE_FOLDER/eval/offline")
+  if [[ -f "$DATA_DIR/rst_sft_holdout.parquet" ]]; then
+    args+=(--holdout "$DATA_DIR/rst_sft_holdout.parquet"
+           --tokenizer "$BASE_FOLDER/$MODEL_DIR_NAME")
+  else
+    args+=(--holdout "$DATA_DIR/pretokenized_holdout.parquet")
+  fi
+  python scripts/06b_eval_offline.py "${args[@]}"
+}
+if [[ "$SANDBOX_OK" == "0" || "${FORCE_OFFLINE_EVAL:-0}" == "1" ]]; then
+  stage eval_offline eval_offline
+fi
+
 # ----------------------------------------------------------------- 9. report
 # Capture the config the run actually used, so the report checks facts rather than
 # intentions.
@@ -253,6 +288,7 @@ python scripts/14_make_report.py \
   --eval "mine=$BASE_FOLDER/eval/mine/results.json" \
   --eval "base=$BASE_FOLDER/eval/base/results.json" \
   --eval "reference=$BASE_FOLDER/eval/reference/results.json" \
+  --offline-eval "$BASE_FOLDER/eval/offline/offline_results.json" \
   --out "$BASE_FOLDER/REPORT.md" \
   --verdict-json "$BASE_FOLDER/verdict.json"
 REPORT_RC=$?
@@ -312,6 +348,7 @@ EOF_PY
       --eval "sft=$BASE_FOLDER/eval/mine/results.json" \
       --eval "base=$BASE_FOLDER/eval/base/results.json" \
       --eval "reference=$BASE_FOLDER/eval/reference/results.json" \
+      --offline-eval "$BASE_FOLDER/eval/offline/offline_results.json" \
       --out "$BASE_FOLDER/REPORT_RL.md" \
       --verdict-json "$BASE_FOLDER/verdict_rl.json"
     echo "rl report : $BASE_FOLDER/REPORT_RL.md"
