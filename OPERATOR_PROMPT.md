@@ -6,171 +6,225 @@ Replace the `<...>` placeholders first.
 ---
 
 ````text
-You are operating a 4-node × 8×A100 cluster (32 GPUs) to run a supervised
-fine-tune of Qwen3.5-27B on synthesized terminal-agent trajectories.
+You are operating a 4-node × 8×A100 cluster (32 GPUs) to fine-tune Qwen3.5-27B on
+synthesized terminal-agent trajectories, then benchmark it and write a report.
 
-The repository at <REPO_PATH> already contains a complete, partially-verified
-plan. READ THESE TWO FILES BEFORE RUNNING ANYTHING:
-  - PLAN.md   — the spec: measured facts, hardware decision tables, risk register
-  - README.md — status table of what is already done vs. not
+You are starting from an EMPTY directory. Bootstrap first:
 
-Everything in PLAN.md marked "measured" was verified against the real data and
-the real upstream source trees. Everything marked UNVERIFIED has not been run
-yet and is your job to validate. Do not assume anything else.
+    export BASE_FOLDER=<shared-scratch-dir>      # >= 400 GB free, ideally shared across nodes
+    mkdir -p "$BASE_FOLDER" && cd "$BASE_FOLDER"
+    git clone https://github.com/k1ssloo/RST-Train.git
+    cd RST-Train
+
+Then READ THESE THREE FILES BEFORE RUNNING ANYTHING:
+  - README.md    — status table: what is already verified vs. never executed
+  - PLAN.md      — the SFT spec: measured facts, hardware decision tables, risk register
+  - RL_PLAN.md   — phase 2 only; do not act on it yet
+
+Everything in PLAN.md marked "measured" was verified against the real data and the
+real upstream source trees. Everything marked UNVERIFIED has not been run and is
+your job to validate. Do not assume anything beyond that.
 
 ## Mission
 
-Produce a Qwen3.5-27B checkpoint fine-tuned on the RST trajectories, evaluated
-on Terminal-Bench-Hard (and TB2 / LHTB if task sets are available), using
-slime + Megatron for training and SGLang + Harbor + Terminus-2 for evaluation.
+An HF-format checkpoint that loads under SGLang, benchmarked on Terminal-Bench-Hard
+and Terminal-Bench 2, plus `$BASE_FOLDER/REPORT.md` with your analysis. Training and
+evaluation are chained automatically; you supervise and diagnose.
 
-Success = an HF-format checkpoint that loads under SGLang, plus a scored eval
-report, plus a written record of every deviation you had to make.
+Reference numbers (paper Tables 3–4, pass rate %, tb-hard / tb2):
+  Qwen3.5-27B base   22.67 / 41.20
+  paper SFT round 1  23.00 / 42.32   <- the fair target for a single SFT pass
+  paper SFT round 3  28.33 / 47.94   <- three cumulative synthesis rounds, not one
+Beating round 1 is the goal. Do not expect round 3.
 
-Reference numbers to orient by (paper Tables 3–4, pass-rate %, TB2/TB-Hard/LHTB):
-  base model     41.20 / 22.67 / 18.10
-  paper SFT rd.1 42.32 / 23.00 / 21.32   <- the fair comparison for a single SFT pass
-  paper SFT rd.3 47.94 / 28.33 / 22.44   <- three cumulative synthesis rounds
-Beating round 1 is the goal. Do not expect round 3 from one pass.
+## The one-command path
 
-## Environment facts you must discover, not assume
+    export MASTER_ADDR=<head-node-ip>
+    export HOSTFILE="$BASE_FOLDER/hostfile"          # one node IP per line, head first
+    export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock   # dedicated daemon, see below
+    export WANDB_KEY=<key>                           # omit -> offline mode automatically
+    bash scripts/20_run_all.sh 2>&1 | tee "$BASE_FOLDER/run_all.log"
 
-GPU memory per card (80GB vs 40GB), NVLink presence, InfiniBand vs Ethernet, and
-whether there is a shared filesystem are ALL UNKNOWN to whoever wrote the plan.
-Do not ask a human. Run:
+That runs: preflight → env → download → build data → convert checkpoint → train →
+export → eval (yours + the reference checkpoint) → report. Every stage writes a
+marker in `$BASE_FOLDER/.stage/` and is skipped if already done, so re-running
+resumes. Delete a marker to force a stage; `SKIP_STAGES="env download"` to skip by
+name.
 
-    bash scripts/00_preflight.sh --hostfile <HOSTFILE>
+**Run stages 1–5 individually the first time** (see "Order" below). The wrapper is
+for resuming and for the long unattended stretch, not for hiding the risky steps.
 
-and read its output. It prints the config row to use. scripts/05_run_sft.sh
-auto-detects the same things; you may override with MEM_CLASS=80GB|40GB|40GB-alt.
-Log which row you selected and why.
+## Getting the data: download, don't rebuild
+
+The training data is already built and validated. Prefer downloading it:
+
+    hf download NiuNiu0110/RST-SFT-Qwen3.5-27B --repo-type dataset \
+      --local-dir "$BASE_FOLDER/sft-hf"
+    mkdir -p "$BASE_FOLDER/sft-v1-cap10"
+    cp "$BASE_FOLDER/sft-hf/data/cap10/train.parquet"   "$BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet"
+    cp "$BASE_FOLDER/sft-hf/data/cap10/holdout.parquet" "$BASE_FOLDER/sft-v1-cap10/rst_sft_holdout.parquet"
+    cp "$BASE_FOLDER/sft-hf/manifest_cap10.json"        "$BASE_FOLDER/sft-v1-cap10/manifest.json"
+
+`cap10` = 10,778 examples (the paper's exact count); `cap8` = 8,886 (ablation).
+Then `SKIP_STAGES="data"` so the wrapper does not rebuild it.
+
+If you do rebuild (`scripts/03_build_sft_data.py`), you MUST then run
+`scripts/03b_validate_sft_data.py`. It must print `contract failures : 0` and
+`user-turn leakage : 0`. Anything else is a stop condition — the training target
+would be wrong and no amount of training fixes that.
 
 ## Hard rules — violating any of these silently corrupts the run
 
 1. `--loss-mask-type qwen3_5`. NEVER the default `qwen`. The default mis-segments
    this chat template and trains on terminal output and the harness prompt.
-2. `--qwen-gdn-backend fla`. A100 is SM80; FlashQLA requires SM90+. Do not
-   install FlashQLA, and do not "fix" a GDN error by switching to flashqla.
-3. No FP8 anywhere. A100 has no FP8 tensor cores. Never run
-   tools/convert_hf_to_fp8.py.
-4. Do not upgrade the pinned versions in scripts/01_setup_env.sh
-   (torch 2.11.0+cu129, flash_attn 2.8.3, transformer_engine 2.16.1,
-   flash-linear-attention 0.4.2, SGLang v0.5.15.post1, Megatron 1dcf0daf).
-   That combination is version-sensitive. If a pin fails to install, report it —
-   do not resolve it by bumping versions.
-5. `messages[0]` has role `user`, not `system`. That is how Terminus-2 actually
-   delivers the harness prompt, so it keeps training and serving identical.
-   Do not "improve" this.
-6. `max-tokens-per-gpu × CP ≥ max-seq-len` must hold, or the longest sequence
-   cannot be placed. 05_run_sft.sh asserts it; do not weaken the assert.
+2. `--qwen-gdn-backend fla`. A100 is SM80; FlashQLA requires SM90+. Do not install
+   FlashQLA, and do not "fix" a GDN error by switching to flashqla.
+3. No FP8 anywhere. A100 has no FP8 tensor cores. Never run convert_hf_to_fp8.py.
+4. Do not upgrade the pinned versions in scripts/01_setup_env.sh (torch
+   2.11.0+cu129, flash_attn 2.8.3, transformer_engine 2.16.1,
+   flash-linear-attention 0.4.2, SGLang v0.5.15.post1, Megatron 1dcf0daf). That
+   combination is version-sensitive. If a pin fails to install, report it — do not
+   resolve it by bumping versions.
+5. `messages[0]` has role `user`, not `system`. That is how Terminus-2 delivers the
+   harness prompt, so it keeps training and serving identical.
+6. `max-tokens-per-gpu × CP ≥ max-seq-len` must hold or the longest sequence cannot
+   be placed. 05_run_sft.sh asserts it; do not weaken the assert.
 7. After converting back to HF you MUST run scripts/07_restore_vision.py. A
    text-only Megatron round trip drops `model.visual.*` and `mtp.*`, and the
    checkpoint will not load as Qwen3_5ForConditionalGeneration without them.
-8. Never size memory from the trajectory parquet's `input_tokens` column. It is
-   a sum over turns (context is re-sent each turn), roughly 2× the true
-   sequence length.
+8. Never size memory from the trajectory parquet's `input_tokens` column — it is a
+   sum over turns, roughly 2× the true sequence length.
+9. Evaluation needs a DEDICATED (ideally rootless) Docker daemon. Benchmark tasks
+   build untrusted third-party Dockerfiles; do not build them on the host's default
+   daemon.
 
-## Execute in this order. Each step is a gate.
+## Environment facts you must discover, not assume
 
-The compute is cheap (~1.5–3 h per epoch); the integration is what fails. Steps
-1–3 cost almost nothing and de-risk the expensive ones. Do not skip ahead.
+GPU memory per card (80GB vs 40GB), NVLink, InfiniBand vs Ethernet, and whether
+there is a shared filesystem are ALL UNKNOWN to whoever wrote the plan. Do not ask
+a human. Run:
 
-STEP 1 — Preflight. `bash scripts/00_preflight.sh --hostfile <HOSTFILE>` on all
-  nodes. Record: GPU mem class, compute cap, NVLink, IB, shared FS, host RAM,
-  Docker, egress. GATE: host RAM must have headroom for Adam CPU offload
-  (~334 GB of fp32 state, sharded across DP). If it does not, drop
-  `--optimizer-cpu-offload` and raise CP, and say so.
+    bash scripts/00_preflight.sh --hostfile "$HOSTFILE"
 
-STEP 2 — Environment. `bash scripts/01_setup_env.sh`, then `bash scripts/02_download.sh`.
-  GATE: 02_download.sh sha256-verifies every dataset shard against the published
-  manifest and exits non-zero on mismatch. Do not proceed past a mismatch.
+It prints the parallelism row to use. 05_run_sft.sh auto-detects the same things;
+override with MEM_CLASS=80GB|40GB|40GB-alt. Log which row you used and why.
 
-STEP 3 — Checkpoint conversion. `bash scripts/04_convert_ckpt.sh to_dist`.
-  This is the HIGHEST-RISK UNVERIFIED STEP: the text-only slime spec must
-  tolerate the ViT (`model.visual.*`) and MTP (`mtp.*`) tensors present in the HF
-  checkpoint. It is CPU/RAM-bound (~120 GB RAM, 20–40 min), so run it before
-  booking all 32 GPUs. GATE: conversion completes and the output dir is ~52 GiB.
-  If it fails on unexpected keys, report the exact keys and stop.
+## Order. Each step is a gate.
 
-STEP 4 — Single-node smoke. `ACTOR_NUM_NODES=1` with TP4/PP2/CP1/DP1 on a
-  200-example slice. GATE: loss decreases over ~20 steps and no NaN. This proves
-  slime + Megatron + the GDN Triton kernels + the loss mask actually step.
+Compute is cheap (~1.5–3 h per epoch); integration is what fails. Steps 1–3 cost
+almost nothing and de-risk the expensive ones. Do not skip ahead.
 
-STEP 5 — Context-parallel correctness check. UNVERIFIED and important: the 48
-  gated-delta-net layers carry recurrent state across the sequence, so context
-  parallelism is not obviously sound for them. slime ships CP4 as the default for
-  this exact model, which is suggestive but not proof. Train the SAME 200-example
-  slice for 20 steps at CP1 and at CP2 and compare loss curves.
-  GATE: curves agree to within noise. If they diverge, CP is broken for this
-  architecture — fall back to CP1, which requires MEM_CLASS=80GB with
+STEP 1 — Preflight. GATE: host RAM must have headroom for Adam CPU offload (~334 GB
+  fp32 state, sharded across DP). If not, drop `--optimizer-cpu-offload`, raise CP,
+  and say so.
+
+STEP 2 — Environment + download (`01_setup_env.sh`, `02_download.sh`). GATE:
+  02_download.sh sha256-verifies every dataset shard against the published manifest
+  and exits non-zero on mismatch. Do not proceed past a mismatch.
+
+STEP 3 — Checkpoint conversion (`04_convert_ckpt.sh to_dist`). HIGHEST-RISK
+  UNVERIFIED STEP: the text-only slime spec must tolerate the ViT
+  (`model.visual.*`) and MTP (`mtp.*`) tensors in the HF checkpoint. CPU/RAM-bound
+  (~120 GB RAM, 20–40 min), so run it BEFORE booking all 32 GPUs. GATE: completes,
+  output ~52 GiB. If it fails on unexpected keys, report the exact keys and stop.
+
+STEP 4 — Single-node smoke. `ACTOR_NUM_NODES=1`, TP4/PP2/CP1/DP1, ~200 examples.
+  GATE: loss decreases over ~20 steps, no NaN. Proves slime + Megatron + the GDN
+  Triton kernels + the loss mask actually step.
+
+STEP 5 — Context-parallel correctness. UNVERIFIED and important: the 48
+  gated-delta-net layers carry recurrent state across the sequence, so CP is not
+  obviously sound for them. slime ships CP4 as the default for this exact model,
+  which is suggestive, not proof. Train the SAME slice for 20 steps at CP1 and CP2
+  and compare loss curves. GATE: curves agree within noise. If they diverge, CP is
+  broken here — fall back to CP1, which needs MEM_CLASS=80GB with
   `--max-tokens-per-gpu 32768`. Report the comparison either way.
 
-STEP 6 — Full run. `bash scripts/05_run_sft.sh` on 4 nodes. Defaults: the
-  10,778-example set (data/sft-v1-cap10), 1 epoch, GBS 128, LR 3e-6→3e-7 cosine,
-  max-seq-len 32768 → 82 optimizer steps. Watch in wandb: loss over only ~82
-  points (log every step), trained tokens/step ≈ 32.6M/82 ≈ 397K, grad norm, and
-  per-GPU memory. If WANDB_KEY is unset the script goes offline automatically;
-  sync afterwards. On OOM use the fallback ladder in PLAN.md §1 in order
-  (① halve max-tokens-per-gpu ② CP 2→4 ③ PP 2→4 ④ only as last resort reduce
-  max-seq-len, since that drops the long-horizon examples the data exists to teach).
+STEP 6 — Full run + automatic eval + report: `bash scripts/20_run_all.sh`.
+  Defaults: cap10 (10,778 ex), 1 epoch, GBS 128, LR 3e-6→3e-7 cosine, seq 32768 →
+  ~82 optimizer steps. Watch in wandb: loss over ~82 points, trained tokens/step
+  ≈ 32.6M/82 ≈ 397K, grad norm, per-GPU memory. On OOM apply the fallback ladder in
+  PLAN.md §1 IN ORDER (① halve max-tokens-per-gpu ② CP 2→4 ③ PP 2→4 ④ only as a
+  last resort reduce max-seq-len, which drops the long-horizon examples the data
+  exists to teach).
 
-STEP 7 — Export. `04_convert_ckpt.sh to_hf <iter_dir> <out>` then
-  `07_restore_vision.py`. GATE: 07_restore_vision.py refuses to write if zero
-  trained tensors matched — that would mean the round trip silently failed.
+## Evaluation (automatic, but understand it)
 
-STEP 8 — Evaluate. `bash scripts/06_eval.sh <out-hf-full> 4`, Docker backend.
-  GATE FIRST: run the same harness against the authors' released checkpoint
-  `Zhongzhi1228/Qwen3.5-27B-SFT` (`DOWNLOAD_REFERENCE=1` in 02_download.sh). If it
-  does not reproduce roughly 47.9 on TB2, your harness is wrong — fix the harness
-  before drawing any conclusion about your own checkpoint.
+`scripts/06_eval.py` serves the checkpoint under SGLang and drives Harbor with
+Terminus-2 on Docker, 3 independent runs, reporting mean ± std.
 
-## Data
+- **tb-hard** 100 tasks, verifiers ship → scored
+- **tb2** 89 tasks, verifiers ship → scored
+- **lhtb** 46 tasks, verifiers are WITHHELD upstream (0/46 ship `tests/`) →
+  reported as `unscorable`. **Do not produce an LHTB number.** If you find a way to
+  score it, say exactly how; otherwise leaving it blank is the correct answer.
 
-data/sft-v1-cap10/ (10,778 examples) and data/sft-v1/ (8,886, ablation) are
-already built AND validated: slime's qwen3_5 mask contract passes with 0 failures
-and 0 user-turn leakage, 32.6% of tokens trained. Prefer copying them over
-rebuilding. If they are absent on this cluster, rebuild with
-scripts/03_build_sft_data.py and then ALWAYS verify with
-scripts/03b_validate_sft_data.py — it must print `contract failures : 0` and
-`user-turn leakage : 0`. Treat a nonzero value as a stop condition.
+Infrastructure failures are excluded from the pass-rate denominator and reported as
+their own rate. A Docker build failure is not a wrong answer. Never "fix" a low
+score by counting infra failures as model failures, or vice versa.
+
+**The reference eval is what makes your number interpretable.** 20_run_all.sh also
+scores the authors' released `Zhongzhi1228/Qwen3.5-27B-SFT` through the SAME
+harness. If it does not land near 28.33 / 47.94, THE HARNESS IS WRONG, not your
+training — fix the harness before interpreting anything about your own checkpoint.
+Do not skip this to save time.
+
+## The report — your main deliverable
+
+`scripts/14_make_report.py` runs automatically and writes `$BASE_FOLDER/REPORT.md`:
+a results table against the paper's numbers, a findings table from mechanical
+checks (loss mask, GDN backend, parallelism arithmetic, sequence placement, data
+provenance, NaN/grad-norm/step-count, infra-failure rate, regression vs base,
+reference-harness validity), and an empty **Analysis** section.
+
+**You must fill in the Analysis section.** The tool reports what it can check; it
+does not diagnose. For every 🔴 FAIL and 🟡 WARN:
+
+- Name the evidence — log line, file path, command output. If you are guessing,
+  write "hypothesis:" and say what would confirm it. Never present speculation as
+  fact.
+- Say explicitly whether you are claiming a **correctness** problem or an
+  **infrastructure** problem. Do not describe a correctness bug as flakiness.
+- If a check is a false positive, say why its threshold is wrong in this case
+  rather than silently ignoring it.
+- State plainly whether the headline numbers are trustworthy.
+
+Then re-run the generator so the report on disk includes your analysis, and report
+the final verdict. The generator exits 2 when any FAIL finding exists — a non-zero
+exit with a written explanation is a perfectly good outcome; a clean exit you
+achieved by disabling a check is not.
 
 ## When something fails
 
-- A GATE failure is a stop-and-report condition, not something to work around.
-  Never disable a correctness check to make a step pass.
-- An infrastructure failure (NCCL timeout, OOM, image pull, disk) is yours to
-  retry and fix; apply the documented fallback ladder rather than inventing a new
-  configuration.
-- Distinguish these two in your report. Do not describe a correctness problem as
-  a flaky infra problem.
-- If you must deviate from PLAN.md, write the deviation, the reason, and the
-  evidence into notes/DEVIATIONS.md as you go.
+- A GATE failure is stop-and-report. Never disable a correctness check to make a
+  step pass.
+- An infrastructure failure (NCCL timeout, OOM, image pull, disk) is yours to retry
+  and fix; apply the documented fallback ladder rather than inventing a new config.
+- Distinguish the two in everything you write.
+- Log deviations to `notes/DEVIATIONS.md` as you go, and per-step progress to
+  `notes/RUN_LOG.md`.
 
-## Phase 2 (do NOT start until SFT is done and evaluated)
+## Phase 2 (do NOT start on your own initiative)
 
-RL is specified in RL_PLAN.md with working code (rl/generate.py,
-scripts/10..12). It is agentic GRPO: Harbor + Terminus-2 drive a Docker sandbox
-per rollout, slime's OpenAIAdapter captures the exact sampled tokens, and reward
-comes from each task's own verifier. It needs a dedicated rootless Docker daemon
-and a prebuilt image pool. Two things there are load-bearing and unverified:
-whether Harbor's LiteLLM client forwards the session id as an `Authorization:
-Bearer` header, and whether token capture round-trips. RL_PLAN.md names the smoke
-test for each. Do not begin phase 2 on your own initiative -- report SFT results
-and wait.
+RL is specified in RL_PLAN.md with working code (rl/generate.py, scripts/10–12):
+agentic GRPO where Harbor + Terminus-2 drive a Docker sandbox per rollout, slime's
+OpenAIAdapter captures exact sampled tokens, and reward comes from each task's own
+verifier. Two load-bearing things there are unverified: whether Harbor's LiteLLM
+client forwards the session id as an `Authorization: Bearer` header, and whether
+token capture round-trips. RL_PLAN.md names the smoke test for each. Report SFT
+results and wait for instruction.
 
 ## Report back
 
-Append to notes/RUN_LOG.md after every step: command run, wall-clock, outcome,
-and any deviation. At the end produce a summary containing:
-  1. the detected hardware and the parallelism row you used;
+Final summary must contain:
+  1. detected hardware and the parallelism row used;
   2. the STEP 5 CP1-vs-CP2 comparison result;
-  3. final loss, step count, wall-clock, and peak per-GPU memory;
-  4. eval pass rates for the reference checkpoint AND your checkpoint, side by
-     side, so the harness is independently validated;
+  3. final loss, step count, wall-clock, peak per-GPU memory;
+  4. eval table for BOTH your checkpoint and the reference, side by side;
   5. every deviation from PLAN.md;
-  6. anything in PLAN.md that turned out to be wrong — that matters more than a
+  6. anything in PLAN.md that turned out to be WRONG — that matters more than a
      clean run, because the plan's author could not test these steps.
 
-State plainly what you verified versus what you assumed. Do not report success
-for a step you skipped.
+State plainly what you verified versus what you assumed. Never report success for a
+step you skipped.
 ````

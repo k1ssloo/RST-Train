@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# End-to-end: preflight -> env -> data -> train -> export -> eval -> report.
+#
+#   export BASE_FOLDER=/shared/rst MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile
+#   export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
+#   bash scripts/20_run_all.sh 2>&1 | tee $BASE_FOLDER/run_all.log
+#
+# Resumable: every stage writes a marker under $BASE_FOLDER/.stage/ and is skipped
+# if already done. Delete a marker to force a re-run. Set SKIP_STAGES to skip by
+# name, e.g. SKIP_STAGES="env download" .
+#
+# The report is generated even when a stage fails, because a report explaining a
+# failure is more useful than no report. The exit code still reflects the failure.
+set -uo pipefail
+
+: "${BASE_FOLDER:?set BASE_FOLDER}"
+SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+RUN_NAME="${RUN_NAME:-qwen35-27b-rst-sft-v1}"
+DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
+PER_GROUP="${PER_GROUP:-10}"
+EVAL_RUNS="${EVAL_RUNS:-3}"
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-tb-hard,tb2}"
+EVAL_REFERENCE="${EVAL_REFERENCE:-1}"   # also score the released SFT ckpt to validate the harness
+STAGE_DIR="$BASE_FOLDER/.stage"
+mkdir -p "$STAGE_DIR" "$BASE_FOLDER/logs"
+SKIP_STAGES="${SKIP_STAGES:-}"
+FAILED_STAGE=""
+
+stage() {  # stage <name> <command...>
+  local name="$1"; shift
+  if [[ " $SKIP_STAGES " == *" $name "* ]]; then echo "=== SKIP $name (SKIP_STAGES)"; return 0; fi
+  if [[ -f "$STAGE_DIR/$name.done" ]]; then echo "=== SKIP $name (already done)"; return 0; fi
+  echo "=== STAGE $name  $(date -Is)"
+  if "$@"; then
+    date -Is > "$STAGE_DIR/$name.done"; echo "=== DONE $name"; return 0
+  fi
+  echo "=== FAILED $name" >&2
+  [[ -z "$FAILED_STAGE" ]] && FAILED_STAGE="$name"
+  return 1
+}
+
+cd "$REPO_DIR"
+
+# ---------------------------------------------------------------- 1. preflight
+stage preflight bash scripts/00_preflight.sh ${HOSTFILE:+--hostfile "$HOSTFILE"}
+
+# ------------------------------------------------------------------- 2. env
+stage env bash scripts/01_setup_env.sh
+
+# --------------------------------------------------------------- 3. download
+stage download env DOWNLOAD_REFERENCE="$EVAL_REFERENCE" bash scripts/02_download.sh
+
+# ------------------------------------------------------------------ 4. data
+build_data() {
+  python scripts/03_build_sft_data.py \
+    --traj-root "$BASE_FOLDER/rst-trajectories" \
+    --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
+    --out-dir "$DATA_DIR" --per-group "$PER_GROUP" --max-seq-len "${MAX_SEQ_LEN:-32768}" \
+    --workers "${DATA_WORKERS:-16}" || return 1
+  # Hard gate: a nonzero contract failure or user-turn leakage means the training
+  # target is wrong, and no amount of training will fix it.
+  python scripts/03b_validate_sft_data.py \
+    --parquet "$DATA_DIR/rst_sft_train.parquet" \
+    --tokenizer "$BASE_FOLDER/Qwen3.5-27B" --sample 300 --show 0 \
+    | tee "$BASE_FOLDER/logs/validate_data.log"
+  grep -q "contract failures : 0" "$BASE_FOLDER/logs/validate_data.log" \
+    && grep -q "user-turn leakage : 0" "$BASE_FOLDER/logs/validate_data.log" \
+    || { echo "DATA GATE FAILED: mask contract or leakage check nonzero" >&2; return 1; }
+}
+stage data build_data
+
+# ------------------------------------------------------------- 5. convert ckpt
+stage convert bash scripts/04_convert_ckpt.sh to_dist
+
+# ----------------------------------------------------------------- 6. train
+stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" bash scripts/05_run_sft.sh
+
+# ---------------------------------------------------------------- 7. export
+export_ckpt() {
+  local latest
+  latest=$(find "$BASE_FOLDER/$RUN_NAME" -maxdepth 1 -type d -name 'iter_*' | sort | tail -1)
+  [[ -n "$latest" ]] || { echo "no iter_* checkpoint under $BASE_FOLDER/$RUN_NAME" >&2; return 1; }
+  echo "exporting $latest"
+  bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf" || return 1
+  # Restores model.visual.* / mtp.* which the text-only round trip drops; without
+  # this the checkpoint will not load as Qwen3_5ForConditionalGeneration.
+  python scripts/07_restore_vision.py \
+    --trained "$BASE_FOLDER/out-hf" --original "$BASE_FOLDER/Qwen3.5-27B" \
+    --out "$BASE_FOLDER/out-hf-full"
+}
+stage export export_ckpt
+
+# ------------------------------------------------------------------ 8. eval
+export TB_HARD_TASKS="${TB_HARD_TASKS:-$BASE_FOLDER/terminal-bench-hard/tasks}"
+export TB2_TASKS="${TB2_TASKS:-$BASE_FOLDER/terminal-bench-2}"
+export LHTB_TASKS="${LHTB_TASKS:-$BASE_FOLDER/long-horizon-terminal-bench/tasks}"
+
+eval_candidate() {
+  python scripts/06_eval.py --model-path "$BASE_FOLDER/out-hf-full" \
+    --tp "${EVAL_TP:-4}" --served-name rst-sft --label sft \
+    --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
+    --n-concurrent "${EVAL_CONCURRENCY:-8}" \
+    --out "$BASE_FOLDER/eval/mine"
+}
+stage eval_candidate eval_candidate
+
+# Scoring the authors' released checkpoint through the SAME harness is what makes
+# our own number interpretable. If the reference does not land near the paper's
+# 47.94 / 28.33, the harness is wrong -- not the training.
+eval_reference() {
+  [[ "$EVAL_REFERENCE" == "1" ]] || { echo "reference eval disabled"; return 0; }
+  [[ -d "$BASE_FOLDER/ref-Qwen3.5-27B-SFT" ]] || { echo "reference ckpt absent; skipping"; return 0; }
+  python scripts/06_eval.py --model-path "$BASE_FOLDER/ref-Qwen3.5-27B-SFT" \
+    --tp "${EVAL_TP:-4}" --served-name rst-ref --label reference \
+    --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
+    --n-concurrent "${EVAL_CONCURRENCY:-8}" \
+    --out "$BASE_FOLDER/eval/reference"
+}
+stage eval_reference eval_reference
+
+# ----------------------------------------------------------------- 9. report
+# Capture the config the run actually used, so the report checks facts rather than
+# intentions.
+cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
+{
+  "run_name": "$RUN_NAME",
+  "data_dir": "$DATA_DIR",
+  "per_group": ${PER_GROUP},
+  "max_seq_len": ${MAX_SEQ_LEN:-32768},
+  "global_batch_size": ${GLOBAL_BATCH_SIZE:-128},
+  "num_epoch": ${NUM_EPOCH:-1},
+  "lr": "${LR:-3e-6}",
+  "min_lr": "${MIN_LR:-3e-7}",
+  "loss_mask_type": "qwen3_5",
+  "compute_cap": "$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)",
+  "gpu_mem_mib": "$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)",
+  "gdn_backend": "${GDN_BACKEND:-fla}",
+  "tp": ${TP:-4}, "pp": ${PP:-2}, "cp": ${CP:-2}, "dp": ${DP:-2},
+  "total_gpus": $(( ${ACTOR_NUM_NODES:-4} * ${ACTOR_NUM_GPUS_PER_NODE:-8} )),
+  "max_tokens_per_gpu": ${MAX_TOKENS_PER_GPU:-16384},
+  "eval_runs": ${EVAL_RUNS},
+  "eval_benchmarks": "$EVAL_BENCHMARKS",
+  "failed_stage": "${FAILED_STAGE:-none}"
+}
+EOF_CFG
+
+python scripts/14_make_report.py \
+  --run-dir "$BASE_FOLDER/$RUN_NAME" \
+  --run-config "$BASE_FOLDER/run_config.json" \
+  --data-manifest "$DATA_DIR/manifest.json" \
+  --eval "mine=$BASE_FOLDER/eval/mine/results.json" \
+  --eval "reference=$BASE_FOLDER/eval/reference/results.json" \
+  --out "$BASE_FOLDER/REPORT.md"
+REPORT_RC=$?
+
+echo
+echo "================================================================"
+echo "report : $BASE_FOLDER/REPORT.md"
+[[ -n "$FAILED_STAGE" ]] && echo "FAILED STAGE: $FAILED_STAGE (see report + logs)"
+echo "report generator exit: $REPORT_RC  (2 = at least one FAIL finding)"
+echo "================================================================"
+
+[[ -n "$FAILED_STAGE" ]] && exit 1
+exit $REPORT_RC

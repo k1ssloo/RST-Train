@@ -17,7 +17,8 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | Conda env recipe | ✅ written, A100-adapted — ⏳ not yet executed |
 | HF → Megatron conversion | ⏳ **highest-risk unverified step**, run it on the H100 first |
 | 32-GPU SFT launch | ⏳ written, needs cluster |
-| Eval harness (SGLang + Harbor + Docker) | ⏳ written, needs cluster |
+| Eval harness (`06_eval.py`, 3 runs, mean±std, infra-separated) | ⏳ written, needs cluster |
+| Report generator + anomaly checks | ✅ **tested** on synthetic healthy/faulty runs |
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
@@ -36,12 +37,14 @@ scripts/
   03b_validate_sft_data.py     ports slime's qwen3_5 mask; asserts the training target
   04_convert_ckpt.sh           HF ↔ Megatron torch_dist
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
-  06_eval.sh                   SGLang server + Harbor/Terminus-2 on Docker + scoring
+  06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
   07_restore_vision.py         splice trained text weights back into the ViT/MTP checkpoint
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
+  14_make_report.py            markdown report + mechanical anomaly checks
+  20_run_all.sh                one command: preflight -> ... -> train -> eval -> report
 rl/generate.py                 slime --custom-generate-function-path implementation
 data/
   rst-trajectories/            23 GB source release (66 tars, all verified)

@@ -28,7 +28,23 @@ hf download Zhongzhi1228/Recursive-Task-Synthesis-Trajectories --repo-type datas
 hf download Zhongzhi1228/Recursive-Task-Synthesis --repo-type dataset \
   --local-dir "$BASE_FOLDER/rst-tasks" --include "data/*.tar" "metadata/*"
 hf download Zhongzhi1228/Terminal-Bench-Hard --repo-type dataset \
-  --local-dir "$BASE_FOLDER/terminal-bench-hard"
+  --local-dir "$BASE_FOLDER/terminal-bench-hard"        # 100 tasks, verifiers ship
+
+# ---- benchmark task sets for evaluation ------------------------------------
+# Terminal-Bench 2: 89 task dirs at the repo root, each with instruction.md +
+# task.toml + environment/ + solution/ + tests/.
+if [[ ! -d "$BASE_FOLDER/terminal-bench-2/.git" ]]; then
+  git clone --depth 1 https://github.com/harbor-framework/terminal-bench-2.git \
+    "$BASE_FOLDER/terminal-bench-2"
+fi
+
+# Long-Horizon Terminal-Bench: 46 tasks. NOTE its verifiers are WITHHELD upstream
+# (0/46 ship tests/; the card says grading uses "hidden, rebuild-from-artifact
+# verifiers"). We fetch it for inspection, but scripts/06_eval.py correctly reports
+# it as `unscorable` rather than inventing a number.
+hf download IntelligenceLab/Long-Horizon-Terminal-Bench --repo-type dataset \
+  --local-dir "$BASE_FOLDER/long-horizon-terminal-bench" || \
+  echo "WARN: LHTB download failed; it is unscorable anyway"
 
 # ---- verify every shard against the published manifest ----------------------
 python - "$BASE_FOLDER" <<'PY'

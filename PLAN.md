@@ -235,11 +235,17 @@ unset — sync later with `wandb sync $BASE_FOLDER/wandb/offline-*`.
 bash scripts/04_convert_ckpt.sh to_hf $BASE_FOLDER/qwen35-27b-rst-sft-v1/iter_XXXX $BASE_FOLDER/out-hf
 python scripts/07_restore_vision.py --trained $BASE_FOLDER/out-hf \
   --original $BASE_FOLDER/Qwen3.5-27B --out $BASE_FOLDER/out-hf-full
-bash scripts/06_eval.sh $BASE_FOLDER/out-hf-full 4
+python scripts/06_eval.py --model-path $BASE_FOLDER/out-hf-full --tp 4 \
+  --benchmarks tb-hard,tb2 --runs 3 --out $BASE_FOLDER/eval/mine
 ```
 
 The restore step is not optional: a text-only round trip loses `model.visual.*`
 and `mtp.*`, and the checkpoint then won't load as `Qwen3_5ForConditionalGeneration`.
+
+Or just run `bash scripts/20_run_all.sh`, which chains train → export → eval →
+report and writes `$BASE_FOLDER/REPORT.md`. **Only tb-hard (100 tasks) and tb2 (89
+tasks) are locally scorable — LHTB's verifiers are withheld upstream (0/46 tasks
+ship `tests/`), so it is reported as `unscorable` rather than as a number.**
 
 Targets (paper Tables 3–4, pass-rate %): base **41.20 / 22.67 / 18.10** →
 SFT round 3 **47.94 / 28.33 / 22.44** on TB2 / TB-Hard / LHTB. Note those are
@@ -334,7 +340,7 @@ round trip drops; get correctness first, then re-enable for rollout throughput.
   model list, verl `v0.9.0` mcore registry.
 - Data: `Zhongzhi1228/Recursive-Task-Synthesis-Trajectories` (66 tars, 22.4 GiB,
   all sha256-verified), `…/Recursive-Task-Synthesis` (8 tars, 3.55 GiB),
-  `…/Terminal-Bench-Hard` (114 tasks), `…/Recursive-Task-Synthesis-Quality-1K`.
+  `…/Terminal-Bench-Hard` (100 tasks), `…/Recursive-Task-Synthesis-Quality-1K`.
 - **Not** used: the project website repo — it has the viewer/rubric/API adapter
   but none of the synthesis pipeline, operator selection, Daytona orchestration,
   or the SFT/PPO launchers. slime upstream is the real substitute, and it is a
