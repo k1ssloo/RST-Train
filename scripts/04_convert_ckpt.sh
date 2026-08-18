@@ -20,7 +20,9 @@
 set -ex
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
-MODEL_NAME="${MODEL_NAME:-Qwen3.5-27B}"
+MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
+eval "$(python "$(dirname "${BASH_SOURCE[0]}")/model_registry.py" --key "$MODEL_KEY" --shell 2>/dev/null)"
+MODEL_NAME="${MODEL_NAME:-$MODEL_DIR_NAME}"
 export PYTHONPATH="${BASE_FOLDER}/Megatron-LM:${PYTHONPATH:-}"
 
 case "${1:-to_dist}" in
@@ -29,8 +31,7 @@ to_dist)
   # Single-process, CPU-bound; takes roughly 20-40 min. No GPU needed for the
   # conversion itself, but keep one visible so torch initializes cleanly.
   cd "$SLIME_DIR"
-  source "$SLIME_DIR/scripts/models/${MODEL_NAME,,}.sh" 2>/dev/null || \
-    source "$SLIME_DIR/scripts/models/qwen3.5-27B.sh"
+  source "$SLIME_DIR/scripts/models/${SLIME_SPEC}"
   python tools/convert_hf_to_torch_dist.py \
     "${MODEL_ARGS[@]}" \
     --hf-checkpoint "$BASE_FOLDER/$MODEL_NAME" \
@@ -41,7 +42,7 @@ to_hf)
   ITER_DIR="${2:?usage: $0 to_hf <slime_ckpt_dir> <out_hf_dir>}"
   OUT_DIR="${3:?usage: $0 to_hf <slime_ckpt_dir> <out_hf_dir>}"
   cd "$SLIME_DIR"
-  source "$SLIME_DIR/scripts/models/qwen3.5-27B.sh"
+  source "$SLIME_DIR/scripts/models/${SLIME_SPEC}"
   python tools/convert_torch_dist_to_hf.py \
     "${MODEL_ARGS[@]}" \
     --load "$ITER_DIR" \

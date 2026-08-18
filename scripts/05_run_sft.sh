@@ -5,6 +5,7 @@
 #   export SLIME_DIR=$BASE_FOLDER/slime
 #   export MASTER_ADDR=<head node IP>
 #   export HOSTFILE=$BASE_FOLDER/hostfile      # one IP per line, head first
+#   export MODEL_KEY=qwen3.5-27b               # see: python scripts/model_registry.py --list
 #   export MEM_CLASS=80GB                      # or 40GB / 40GB-alt  (or auto)
 #   export WANDB_KEY=...                       # omit for offline mode
 #   bash scripts/05_run_sft.sh
@@ -31,7 +32,8 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 2
 : "${MASTER_ADDR:?set MASTER_ADDR}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
-RUN_NAME="${RUN_NAME:-qwen35-27b-rst-sft-v1}"
+MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
+RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-sft-v1}"
 
 export PYTHONUNBUFFERED=1
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
@@ -60,30 +62,24 @@ if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
   else                                 MEM_CLASS=40GB-alt; fi
 fi
 
-# TP*PP*CP*DP must equal ACTOR_NUM_NODES*ACTOR_NUM_GPUS_PER_NODE.
-# Per-GPU sequence tokens = MAX_SEQ_LEN / CP, so CP is what makes 32K fit.
-case "$MEM_CLASS" in
-  80GB)     TP=4; PP=2; CP=2; MAX_TOKENS_PER_GPU=16384 ;;
-  40GB)     TP=8; PP=2; CP=2; MAX_TOKENS_PER_GPU=8192  ;;  # TP8 needs NVLink
-  40GB-alt) TP=4; PP=2; CP=4; MAX_TOKENS_PER_GPU=8192  ;;  # = slime shipped default
-  *) echo "unknown MEM_CLASS=$MEM_CLASS" >&2; exit 2 ;;
-esac
+# All parallelism comes from configs/models.json via the registry, which validates
+# tp*pp*cp*dp == gpus, tp inside one node, and max_tokens_per_gpu*cp >= max_seq_len.
+# It exits non-zero on an impossible config, so we fail here rather than 40 minutes in.
 TOTAL_GPUS=$(( ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE ))
-DP=$(( TOTAL_GPUS / (TP * PP * CP) ))
-(( TP * PP * CP * DP == TOTAL_GPUS )) || { echo "TP*PP*CP*DP != $TOTAL_GPUS" >&2; exit 2; }
-(( TP <= ACTOR_NUM_GPUS_PER_NODE ))   || { echo "TP must fit in one node" >&2; exit 2; }
-(( MAX_TOKENS_PER_GPU * CP >= MAX_SEQ_LEN )) || {
-  echo "max-tokens-per-gpu*CP ($((MAX_TOKENS_PER_GPU*CP))) < MAX_SEQ_LEN ($MAX_SEQ_LEN):" >&2
-  echo "the longest sequence cannot be placed. Raise CP or MAX_TOKENS_PER_GPU." >&2; exit 2; }
+eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+          --gpus "$TOTAL_GPUS" --gpus-per-node "$ACTOR_NUM_GPUS_PER_NODE" \
+          --max-seq-len "$MAX_SEQ_LEN" --shell)"
 
-echo "=== cc=$COMPUTE_CAP mem=${GPU_MEM_MIB}MiB nvlink=$HAS_NVLINK class=$MEM_CLASS gdn=$GDN_BACKEND"
-echo "=== TP=$TP PP=$PP CP=$CP DP=$DP tokens/gpu=$MAX_TOKENS_PER_GPU seq=$MAX_SEQ_LEN"
+echo "=== model=$MODEL_KEY (${PARAMS_B}B, ${N_LAYERS} layers, moe=$IS_MOE, vision=$HAS_VISION)"
+echo "=== cc=$COMPUTE_CAP mem=${GPU_MEM_MIB}MiB nvlink=$HAS_NVLINK class=$MEM_CLASS_USED gdn=$GDN_BACKEND"
+echo "=== TP=$TP PP=$PP CP=$CP DP=$DP EP=$EP tokens/gpu=$MAX_TOKENS_PER_GPU seq=$MAX_SEQ_LEN"
+echo "=== est. ${EST_EPOCH_MINUTES} min/epoch"
 
-source "${SLIME_DIR}/scripts/models/qwen3.5-27B.sh"
+source "${SLIME_DIR}/scripts/models/${SLIME_SPEC}"
 
 CKPT_ARGS=(
-   --hf-checkpoint "${BASE_FOLDER}/Qwen3.5-27B"
-   --ref-load      "${BASE_FOLDER}/Qwen3.5-27B_torch_dist/"
+   --hf-checkpoint "${BASE_FOLDER}/${MODEL_DIR_NAME}"
+   --ref-load      "${BASE_FOLDER}/${MODEL_DIR_NAME}_torch_dist/"
    --load          "${BASE_FOLDER}/${RUN_NAME}/"
    --save          "${BASE_FOLDER}/${RUN_NAME}/"
    --save-interval 20
@@ -103,21 +99,31 @@ SFT_ARGS=(
    # "qwen", which mis-segments the Qwen3.5 template -> you would train on the
    # terminal output and the harness prompt. Verified locally against
    # slime/utils/mask_utils.py: 32.98% of tokens trained, 0 user-turn leakage.
-   --loss-mask-type qwen3_5
+   --loss-mask-type "${LOSS_MASK_TYPE}"
    --calculate-per-token-loss
    --disable-compute-advantages-and-returns
    --debug-train-only
 )
 
+# The last PP stage also carries the 248320-row lm_head (~1.27B params at
+# hidden 5120), so models with an uneven split give it fewer layers.
+PP_SPLIT_ARGS=()
+if [[ "${PP}" -gt 1 && "${DECODER_LAST_PP_LAYERS}" -gt 0 ]]; then
+  PP_SPLIT_ARGS=(--decoder-last-pipeline-num-layers "${DECODER_LAST_PP_LAYERS}")
+fi
+MOE_ARGS=()
+if [[ "${IS_MOE}" == "1" && -n "${MOE_FLAGS}" ]]; then
+  # shellcheck disable=SC2206
+  MOE_ARGS=(${MOE_FLAGS})
+fi
+
 PERF_ARGS=(
    --tensor-model-parallel-size "${TP}"
    --sequence-parallel
    --pipeline-model-parallel-size "${PP}"
-   # 64 layers over PP2: the last stage also carries the 248320x5120 lm_head
-   # (~1.27B params), so give it fewer layers. Same value slime ships.
-   --decoder-last-pipeline-num-layers 30
    --context-parallel-size "${CP}"
-   --expert-model-parallel-size 1
+   # Expert parallelism is 1 for dense models; the registry sets EP for MoE.
+   --expert-model-parallel-size "${EP}"
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -216,4 +222,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${OPTIMIZER_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
+   "${PP_SPLIT_ARGS[@]}" \
+   "${MOE_ARGS[@]}" \
    "${MISC_ARGS[@]}"

@@ -34,6 +34,16 @@ PAPER = {
 }
 REF_TARGET = {"tb2": 47.94, "tb-hard": 28.33}   # released SFT ckpt should land near here
 
+# The paper only published numbers for Qwen3.5-27B and 122B-A10B. For any other
+# model in configs/models.json there is NO reference point, so the "regression vs
+# base" and "does the reference checkpoint reproduce the paper" checks do not
+# apply -- asserting them anyway would manufacture a finding out of nothing.
+PAPER_MODELS = {"qwen3.5-27b"}
+
+
+def has_paper_reference(model_key: str | None) -> bool:
+    return (model_key or "qwen3.5-27b") in PAPER_MODELS
+
 FAIL, WARN, OK, INFO = "FAIL", "WARN", "OK", "INFO"
 
 
@@ -228,7 +238,9 @@ def check_training(findings: Findings, training: dict, manifest: dict | None, co
                 findings.add(OK, "training", "step count", f"~{observed} steps (expected ~{expected})")
 
 
-def check_eval(findings: Findings, label: str, data: dict | None, is_reference: bool) -> None:
+def check_eval(findings: Findings, label: str, data: dict | None, is_reference: bool,
+               model_key: str | None = None) -> None:
+    comparable = has_paper_reference(model_key)
     if not data:
         findings.add(WARN, "eval", f"{label} results",
                      f"no eval results for '{label}'")
@@ -262,6 +274,12 @@ def check_eval(findings: Findings, label: str, data: dict | None, is_reference: 
             findings.add(WARN, "eval", f"{label}/{name} variance",
                          f"std={std} is high; check for flaky tasks or a saturating timeout")
 
+        if not comparable:
+            findings.add(INFO, "eval", f"{label}/{name} comparability",
+                         f"model_key={model_key!r} has no published reference; the paper only "
+                         f"reports Qwen3.5-27B and 122B-A10B. Regression-vs-base and "
+                         f"reference-reproduction checks are skipped, not passed.")
+            continue
         base = PAPER["base"].get(name)
         if is_reference:
             target = REF_TARGET.get(name)
@@ -294,7 +312,8 @@ def render(args, config, manifest, training, evals, findings: Findings) -> str:
     L: list[str] = []
     A = L.append
 
-    A(f"# RST -> Qwen3.5-27B experiment report\n")
+    model_key = args.model_key or (config or {}).get("model_key") or "qwen3.5-27b"
+    A(f"# RST SFT experiment report — `{model_key}`\n")
     A(f"_Generated {now} by `scripts/14_make_report.py`._\n")
 
     verdict = findings.worst()
@@ -314,6 +333,10 @@ def render(args, config, manifest, training, evals, findings: Findings) -> str:
     cols = ["tb-hard", "tb2", "lhtb"]
     A("| model | " + " | ".join(cols) + " |")
     A("|---|" + "---|" * len(cols))
+    if not has_paper_reference(model_key):
+        A(f"> The paper reports numbers only for Qwen3.5-27B and 122B-A10B. This run is")
+        A(f"> `{model_key}`, so the paper rows below are context, **not a target**, and no")
+        A(f"> regression-vs-base verdict is claimed.\n")
     for key, label in (("base", "Qwen3.5-27B base *(paper)*"),
                        ("sft_r1", "paper SFT round 1"),
                        ("sft_r3", "paper SFT round 3"),
@@ -447,6 +470,8 @@ def render(args, config, manifest, training, evals, findings: Findings) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--model-key", default=None,
+                   help="key in configs/models.json; decides whether paper numbers apply")
     p.add_argument("--run-dir", type=Path, default=None, help="training run dir (for logs)")
     p.add_argument("--run-config", type=Path, default=None, help="run_config.json from 20_run_all.sh")
     p.add_argument("--data-manifest", type=Path, default=None)
@@ -473,8 +498,9 @@ def main() -> int:
     check_training(findings, training, manifest, config)
     if not evals:
         findings.add(WARN, "eval", "any results", "no --eval supplied; nothing was benchmarked")
+    model_key = args.model_key or (config or {}).get("model_key")
     for label, data in evals.items():
-        check_eval(findings, label, data, is_reference=("ref" in label.lower()))
+        check_eval(findings, label, data, is_reference=("ref" in label.lower()), model_key=model_key)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(args, config, manifest, training, evals, findings), encoding="utf-8")

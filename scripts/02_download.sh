@@ -8,8 +8,17 @@ mkdir -p "$BASE_FOLDER"
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 pip install -q "huggingface_hub[hf_transfer]" hf_transfer
 
-# ---- base model: the SFT starting point (51.7 GiB, 18 shards) ---------------
-hf download Qwen/Qwen3.5-27B --local-dir "$BASE_FOLDER/Qwen3.5-27B"
+# ---- base model: whichever the run needs (see configs/models.json) ----------
+MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
+eval "$(python "$(dirname "${BASH_SOURCE[0]}")/model_registry.py" --key "$MODEL_KEY" --shell)"
+echo "base model: $HF_REPO (${PARAMS_B}B, ${bf16_note:-bf16})"
+hf download "$HF_REPO" --local-dir "$BASE_FOLDER/$MODEL_DIR_NAME"
+
+# Extra models to stage in the same pass, e.g. EXTRA_MODEL_KEYS="qwen3.5-0.8b qwen3.5-4b"
+for k in ${EXTRA_MODEL_KEYS:-}; do
+  repo=$(python "$(dirname "${BASH_SOURCE[0]}")/model_registry.py" --key "$k" --json | python -c "import json,sys;print(json.load(sys.stdin)['HF_REPO'])")
+  hf download "$repo" --local-dir "$BASE_FOLDER/$(basename "$repo")"
+done
 
 # ---- reference checkpoints: for eval comparison, NOT for training -----------
 # The authors' own SFT/RL results. Use them as an upper-bound sanity check on

@@ -267,8 +267,14 @@ async def main_async(args) -> int:
             "--tp", str(args.tp), "--port", str(args.port), "--host", "127.0.0.1",
             "--mem-fraction-static", "0.85", "--context-length", str(args.context_length),
             "--disable-radix-cache",              # hybrid KV-cache layouts + prefix caching are unreliable
-            "--mamba-scheduler-strategy", "extra_buffer",   # required for the 48 gated-delta-net layers
+            "--mamba-scheduler-strategy", "extra_buffer",   # required for the gated-delta-net layers
         ]
+        # Some checkpoints ship a template whose *generation* prompt does not match
+        # what training produced (Qwen3.5-0.8B defaults thinking off, so its prompt
+        # already closes the think block while the trained target opens with
+        # "\n</think>\n\n"). Serving with an explicit template fixes the alignment.
+        if args.chat_template:
+            cmd += ["--chat-template", str(args.chat_template)]
         print("[serve] " + " ".join(cmd), flush=True)
         with log.open("wb") as fh:
             server = await asyncio.create_subprocess_exec(*cmd, stdout=fh, stderr=asyncio.subprocess.STDOUT)
@@ -360,6 +366,9 @@ def main() -> int:
     p.add_argument("--harbor-bin", default="harbor")
     p.add_argument("--docker-host", default=os.environ.get("RST_DOCKER_HOST", ""))
     p.add_argument("--keep-jobs", action="store_true")
+    p.add_argument("--chat-template", default=os.environ.get("SERVE_CHAT_TEMPLATE", ""),
+                   help="override the served chat template (see configs/models.json "
+                        "serve_chat_template_repo)")
     p.add_argument("--label", default="candidate", help="e.g. base / sft / reference")
     p.add_argument("--out", required=True)
     args = p.parse_args()

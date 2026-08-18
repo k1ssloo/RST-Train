@@ -6,8 +6,9 @@ Replace the `<...>` placeholders first.
 ---
 
 ````text
-You are operating a 4-node × 8×A100 cluster (32 GPUs) to fine-tune Qwen3.5-27B on
-synthesized terminal-agent trajectories, then benchmark it and write a report.
+You are operating a 4-node × 8×A100 cluster (32 GPUs) to fine-tune a Qwen3.5 model
+on synthesized terminal-agent trajectories, then benchmark it and write a report.
+Five model sizes are supported (0.8B … 35B-A3B); see "Pick a model first" below.
 
 You are starting from an EMPTY directory. Bootstrap first:
 
@@ -31,14 +32,56 @@ An HF-format checkpoint that loads under SGLang, benchmarked on Terminal-Bench-H
 and Terminal-Bench 2, plus `$BASE_FOLDER/REPORT.md` with your analysis. Training and
 evaluation are chained automatically; you supervise and diagnose.
 
-Reference numbers (paper Tables 3–4, pass rate %, tb-hard / tb2):
+Reference numbers below apply to Qwen3.5-27B ONLY (paper Tables 3–4, pass rate %,
+tb-hard / tb2). No other size has published numbers:
   Qwen3.5-27B base   22.67 / 41.20
   paper SFT round 1  23.00 / 42.32   <- the fair target for a single SFT pass
   paper SFT round 3  28.33 / 47.94   <- three cumulative synthesis rounds, not one
 Beating round 1 is the goal. Do not expect round 3.
 
+## Pick a model first
+
+    python scripts/model_registry.py --list
+
+Five models are supported; `MODEL_KEY` selects one and everything else
+(parallelism, loss mask, spec file, vision handling, serving TP) follows from
+configs/models.json, which VALIDATES the config and refuses impossible ones.
+
+  qwen3.5-0.8b      0.87B   ~5 min/epoch    2+ GPUs   pipeline smoke test
+  qwen3.5-4b        4.66B  ~25 min/epoch    8+ GPUs   iteration workhorse
+  qwen3.5-9b        9.65B  ~50 min/epoch    8+ GPUs   primary low-cost result
+  qwen3.5-27b      27.78B ~150 min/epoch   32  GPUs   the paper's model
+  qwen3.5-35b-a3b  35.95B  ~40 min/epoch    8+ GPUs   MoE, ~3B active
+
+RECOMMENDED ORDER, and the reasoning: run qwen3.5-0.8b end-to-end FIRST. It is the
+same architecture as 27B, so it validates the two unverified high-risk steps
+(HF<->Megatron conversion tolerating the ViT/MTP tensors, and CP correctness on the
+gated-delta-net layers) at negligible cost. Then qwen3.5-27b, because it is the
+only model with published numbers and therefore the only one that can validate your
+eval harness. Then 4b/9b/35b-a3b for cheap iteration.
+
+All five share one byte-identical tokenizer AND one training-time chat-template
+render, so the SAME dataset and --loss-mask-type qwen3_5 apply to all of them. Do
+not rebuild the data per model.
+
+TWO MODEL-SPECIFIC THINGS THAT WILL BITE YOU:
+  1. qwen3.5-0.8b must be SERVED with a thinking-on chat template. Its own template
+     defaults thinking off, so its generation prompt already closes the think block
+     while training targets open with "\n</think>\n\n". 20_run_all.sh fetches the
+     right template automatically via the registry -- do not remove that step, and
+     if you serve 0.8B by hand, pass --chat-template.
+  2. qwen3.5-35b-a3b's expert-parallel rows are UNVALIDATED on A100. slime's shipped
+     launcher uses TP2/EP8 on 8 GPUs; ours scale that to 32. If DeepEP misbehaves on
+     SM80, drop --moe-enable-deepep and use --moe-token-dispatcher-type alltoall.
+     Report what you had to change.
+
+Only qwen3.5-27b has published reference numbers. For any other model the report
+SKIPS (does not pass) the regression-vs-base and reference-reproduction checks, and
+says so. Do not invent a target for 4B/9B/35B.
+
 ## The one-command path
 
+    export MODEL_KEY=qwen3.5-0.8b            # start here, then 27b
     export MASTER_ADDR=<head-node-ip>
     export HOSTFILE="$BASE_FOLDER/hostfile"          # one node IP per line, head first
     export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock   # dedicated daemon, see below
@@ -88,10 +131,14 @@ would be wrong and no amount of training fixes that.
 5. `messages[0]` has role `user`, not `system`. That is how Terminus-2 delivers the
    harness prompt, so it keeps training and serving identical.
 6. `max-tokens-per-gpu × CP ≥ max-seq-len` must hold or the longest sequence cannot
-   be placed. 05_run_sft.sh asserts it; do not weaken the assert.
-7. After converting back to HF you MUST run scripts/07_restore_vision.py. A
-   text-only Megatron round trip drops `model.visual.*` and `mtp.*`, and the
-   checkpoint will not load as Qwen3_5ForConditionalGeneration without them.
+   be placed. scripts/model_registry.py asserts this (plus tp·pp·cp·dp == gpus and
+   tp within one node) and exits non-zero. Do not weaken those asserts; fix
+   configs/models.json instead, and say what you changed.
+7. After converting back to HF you MUST run scripts/07_restore_vision.py for any
+   model with a vision tower (all five here do). A text-only Megatron round trip
+   drops `model.visual.*` and `mtp.*`, and the checkpoint will not then load as a
+   ConditionalGeneration model. 20_run_all.sh does this conditionally on the
+   registry's has_vision.
 8. Never size memory from the trajectory parquet's `input_tokens` column — it is a
    sum over turns, roughly 2× the true sequence length.
 9. Evaluation needs a DEDICATED (ideally rootless) Docker daemon. Benchmark tasks

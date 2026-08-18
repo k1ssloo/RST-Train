@@ -16,7 +16,8 @@ set -uo pipefail
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-RUN_NAME="${RUN_NAME:-qwen35-27b-rst-sft-v1}"
+MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"      # python scripts/model_registry.py --list
+RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-sft-v1}"
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
 PER_GROUP="${PER_GROUP:-10}"
 EVAL_RUNS="${EVAL_RUNS:-3}"
@@ -42,6 +43,21 @@ stage() {  # stage <name> <command...>
 
 cd "$REPO_DIR"
 
+# Resolve the model once, up front: this validates the parallelism arithmetic and
+# exits here if the config is impossible, before any GPU time is spent.
+COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
+GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
+  if [[ -n "$GPU_MEM_MIB" && "$GPU_MEM_MIB" -gt 70000 ]]; then MEM_CLASS=80GB; else MEM_CLASS=40GB; fi
+fi
+TOTAL_GPUS=$(( ${ACTOR_NUM_NODES:-4} * ${ACTOR_NUM_GPUS_PER_NODE:-8} ))
+eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+          --gpus "$TOTAL_GPUS" --gpus-per-node "${ACTOR_NUM_GPUS_PER_NODE:-8}" \
+          --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell)"
+export MODEL_KEY MEM_CLASS
+echo "=== model $MODEL_KEY (${PARAMS_B}B) TP$TP/PP$PP/CP$CP/DP$DP/EP$EP @ $MEM_CLASS_USED"
+echo "=== est ${EST_EPOCH_MINUTES} min/epoch, vision=$HAS_VISION moe=$IS_MOE"
+
 # ---------------------------------------------------------------- 1. preflight
 stage preflight bash scripts/00_preflight.sh ${HOSTFILE:+--hostfile "$HOSTFILE"}
 
@@ -49,20 +65,20 @@ stage preflight bash scripts/00_preflight.sh ${HOSTFILE:+--hostfile "$HOSTFILE"}
 stage env bash scripts/01_setup_env.sh
 
 # --------------------------------------------------------------- 3. download
-stage download env DOWNLOAD_REFERENCE="$EVAL_REFERENCE" bash scripts/02_download.sh
+stage download env DOWNLOAD_REFERENCE="$EVAL_REFERENCE" MODEL_KEY="$MODEL_KEY" bash scripts/02_download.sh
 
 # ------------------------------------------------------------------ 4. data
 build_data() {
   python scripts/03_build_sft_data.py \
     --traj-root "$BASE_FOLDER/rst-trajectories" \
-    --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
+    --tokenizer "$BASE_FOLDER/$MODEL_DIR_NAME" \
     --out-dir "$DATA_DIR" --per-group "$PER_GROUP" --max-seq-len "${MAX_SEQ_LEN:-32768}" \
     --workers "${DATA_WORKERS:-16}" || return 1
   # Hard gate: a nonzero contract failure or user-turn leakage means the training
   # target is wrong, and no amount of training will fix it.
   python scripts/03b_validate_sft_data.py \
     --parquet "$DATA_DIR/rst_sft_train.parquet" \
-    --tokenizer "$BASE_FOLDER/Qwen3.5-27B" --sample 300 --show 0 \
+    --tokenizer "$BASE_FOLDER/$MODEL_DIR_NAME" --sample 300 --show 0 \
     | tee "$BASE_FOLDER/logs/validate_data.log"
   grep -q "contract failures : 0" "$BASE_FOLDER/logs/validate_data.log" \
     && grep -q "user-turn leakage : 0" "$BASE_FOLDER/logs/validate_data.log" \
@@ -71,10 +87,11 @@ build_data() {
 stage data build_data
 
 # ------------------------------------------------------------- 5. convert ckpt
-stage convert bash scripts/04_convert_ckpt.sh to_dist
+stage convert env MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_dist
 
 # ----------------------------------------------------------------- 6. train
-stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" bash scripts/05_run_sft.sh
+stage train env DATA_DIR="$DATA_DIR" RUN_NAME="$RUN_NAME" MODEL_KEY="$MODEL_KEY" \
+  MEM_CLASS="$MEM_CLASS" bash scripts/05_run_sft.sh
 
 # ---------------------------------------------------------------- 7. export
 export_ckpt() {
@@ -82,12 +99,17 @@ export_ckpt() {
   latest=$(find "$BASE_FOLDER/$RUN_NAME" -maxdepth 1 -type d -name 'iter_*' | sort | tail -1)
   [[ -n "$latest" ]] || { echo "no iter_* checkpoint under $BASE_FOLDER/$RUN_NAME" >&2; return 1; }
   echo "exporting $latest"
-  bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf" || return 1
-  # Restores model.visual.* / mtp.* which the text-only round trip drops; without
-  # this the checkpoint will not load as Qwen3_5ForConditionalGeneration.
-  python scripts/07_restore_vision.py \
-    --trained "$BASE_FOLDER/out-hf" --original "$BASE_FOLDER/Qwen3.5-27B" \
-    --out "$BASE_FOLDER/out-hf-full"
+  MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf" || return 1
+  if [[ "$HAS_VISION" == "1" ]]; then
+    # The text-only round trip drops model.visual.* / mtp.*; without restoring them
+    # the checkpoint will not load as a ConditionalGeneration model.
+    python scripts/07_restore_vision.py \
+      --trained "$BASE_FOLDER/out-hf" --original "$BASE_FOLDER/$MODEL_DIR_NAME" \
+      --out "$BASE_FOLDER/out-hf-full"
+  else
+    echo "model has no vision tower; using the converted checkpoint directly"
+    ln -sfn "$BASE_FOLDER/out-hf" "$BASE_FOLDER/out-hf-full"
+  fi
 }
 stage export export_ckpt
 
@@ -96,9 +118,24 @@ export TB_HARD_TASKS="${TB_HARD_TASKS:-$BASE_FOLDER/terminal-bench-hard/tasks}"
 export TB2_TASKS="${TB2_TASKS:-$BASE_FOLDER/terminal-bench-2}"
 export LHTB_TASKS="${LHTB_TASKS:-$BASE_FOLDER/long-horizon-terminal-bench/tasks}"
 
+# Some checkpoints need an explicit serving template: Qwen3.5-0.8B defaults
+# thinking OFF, so its generation prompt closes the think block while our training
+# target opens with "\n</think>\n\n". Serving with a thinking-on template realigns
+# train and serve. The registry says which models need this.
+SERVE_TEMPLATE_ARG=()
+if [[ -n "${SERVE_CHAT_TEMPLATE_REPO:-}" ]]; then
+  tmpl="$BASE_FOLDER/chat_templates/$(basename "$SERVE_CHAT_TEMPLATE_REPO").jinja"
+  mkdir -p "$(dirname "$tmpl")"
+  [[ -f "$tmpl" ]] || curl -sSL --fail \
+    "https://huggingface.co/${SERVE_CHAT_TEMPLATE_REPO}/resolve/main/chat_template.jinja" -o "$tmpl"
+  SERVE_TEMPLATE_ARG=(--chat-template "$tmpl")
+  echo "serving with overridden chat template from $SERVE_CHAT_TEMPLATE_REPO"
+fi
+
 eval_candidate() {
   python scripts/06_eval.py --model-path "$BASE_FOLDER/out-hf-full" \
-    --tp "${EVAL_TP:-4}" --served-name rst-sft --label sft \
+    "${SERVE_TEMPLATE_ARG[@]}" \
+    --tp "${EVAL_TP:-$SERVE_TP}" --served-name rst-sft --label sft \
     --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
     --n-concurrent "${EVAL_CONCURRENCY:-8}" \
     --out "$BASE_FOLDER/eval/mine"
@@ -110,9 +147,13 @@ stage eval_candidate eval_candidate
 # 47.94 / 28.33, the harness is wrong -- not the training.
 eval_reference() {
   [[ "$EVAL_REFERENCE" == "1" ]] || { echo "reference eval disabled"; return 0; }
+  [[ -n "${REFERENCE_CHECKPOINT:-}" ]] || {
+    echo "no published reference checkpoint for $MODEL_KEY; skipping (the paper only"
+    echo "reports Qwen3.5-27B and 122B-A10B). Validate the harness once with 27B."
+    return 0; }
   [[ -d "$BASE_FOLDER/ref-Qwen3.5-27B-SFT" ]] || { echo "reference ckpt absent; skipping"; return 0; }
   python scripts/06_eval.py --model-path "$BASE_FOLDER/ref-Qwen3.5-27B-SFT" \
-    --tp "${EVAL_TP:-4}" --served-name rst-ref --label reference \
+    --tp "${EVAL_TP:-$SERVE_TP}" --served-name rst-ref --label reference \
     --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
     --n-concurrent "${EVAL_CONCURRENCY:-8}" \
     --out "$BASE_FOLDER/eval/reference"
@@ -125,6 +166,9 @@ stage eval_reference eval_reference
 cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
 {
   "run_name": "$RUN_NAME",
+  "model_key": "$MODEL_KEY",
+  "hf_repo": "$HF_REPO",
+  "params_b": ${PARAMS_B},
   "data_dir": "$DATA_DIR",
   "per_group": ${PER_GROUP},
   "max_seq_len": ${MAX_SEQ_LEN:-32768},
@@ -132,13 +176,13 @@ cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
   "num_epoch": ${NUM_EPOCH:-1},
   "lr": "${LR:-3e-6}",
   "min_lr": "${MIN_LR:-3e-7}",
-  "loss_mask_type": "qwen3_5",
+  "loss_mask_type": "${LOSS_MASK_TYPE}",
   "compute_cap": "$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)",
   "gpu_mem_mib": "$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)",
   "gdn_backend": "${GDN_BACKEND:-fla}",
-  "tp": ${TP:-4}, "pp": ${PP:-2}, "cp": ${CP:-2}, "dp": ${DP:-2},
+  "tp": ${TP}, "pp": ${PP}, "cp": ${CP}, "dp": ${DP}, "ep": ${EP},
   "total_gpus": $(( ${ACTOR_NUM_NODES:-4} * ${ACTOR_NUM_GPUS_PER_NODE:-8} )),
-  "max_tokens_per_gpu": ${MAX_TOKENS_PER_GPU:-16384},
+  "max_tokens_per_gpu": ${MAX_TOKENS_PER_GPU},
   "eval_runs": ${EVAL_RUNS},
   "eval_benchmarks": "$EVAL_BENCHMARKS",
   "failed_stage": "${FAILED_STAGE:-none}"
@@ -146,6 +190,7 @@ cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
 EOF_CFG
 
 python scripts/14_make_report.py \
+  --model-key "$MODEL_KEY" \
   --run-dir "$BASE_FOLDER/$RUN_NAME" \
   --run-config "$BASE_FOLDER/run_config.json" \
   --data-manifest "$DATA_DIR/manifest.json" \

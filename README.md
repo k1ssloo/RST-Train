@@ -19,9 +19,31 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | 32-GPU SFT launch | ⏳ written, needs cluster |
 | Eval harness (`06_eval.py`, 3 runs, mean±std, infra-separated) | ⏳ written, needs cluster |
 | Report generator + anomaly checks | ✅ **tested** on synthetic healthy/faulty runs |
+| Multi-model registry (5 models) | ✅ **tested**: all rows resolve, 4 negative tests reject |
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
+
+## Supported models
+
+`MODEL_KEY` selects one; parallelism, loss mask, spec file, vision handling and
+serving TP all follow from `configs/models.json`.
+
+```bash
+python scripts/model_registry.py --list
+MODEL_KEY=qwen3.5-9b bash scripts/20_run_all.sh
+```
+
+| key | params | ~min/epoch | min GPUs | note |
+|---|---|---|---|---|
+| `qwen3.5-0.8b` | 0.87 B | ~5 | 2 | smoke test; needs a thinking-on serving template |
+| `qwen3.5-4b` | 4.66 B | ~25 | 8 | four runs fit on four nodes |
+| `qwen3.5-9b` | 9.65 B | ~50 | 8 | primary low-cost result |
+| `qwen3.5-27b` | 27.78 B | ~150 | 32 | the paper's model (only one with published numbers) |
+| `qwen3.5-35b-a3b` | 35.95 B / ~3 B active | ~40 | 8 | MoE; EP rows unvalidated on A100 |
+
+All five share one byte-identical tokenizer **and** one training-time chat-template
+render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged.
 
 ## Layout
 
@@ -45,6 +67,8 @@ scripts/
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
   14_make_report.py            markdown report + mechanical anomaly checks
   20_run_all.sh                one command: preflight -> ... -> train -> eval -> report
+  model_registry.py            resolve+validate a model's launch config
+configs/models.json            the model registry
 rl/generate.py                 slime --custom-generate-function-path implementation
 data/
   rst-trajectories/            23 GB source release (66 tars, all verified)

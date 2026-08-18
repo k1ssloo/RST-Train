@@ -1,0 +1,207 @@
+{
+  "_comment": [
+    "Model registry. scripts/model_registry.py resolves a key + detected hardware into",
+    "a concrete launch config and VALIDATES it (tp*pp*cp*dp == gpus, tp within a node,",
+    "max_tokens_per_gpu*cp >= max_seq_len).",
+    "",
+    "Verified facts behind these entries (measured 2026-08-18):",
+    "  - The tokenizer is BYTE-IDENTICAL across all five Qwen3.5 models",
+    "    (sha256 4b565170da5bed0e), so ONE dataset serves all of them. No re-tokenization.",
+    "  - The TRAINING chat-template render is byte-identical too, so",
+    "    --loss-mask-type qwen3_5 and the published cap10/cap8 datasets are valid",
+    "    unchanged for every entry here.",
+    "  - Qwen3.5-0.8B's chat template differs from the rest in ONE way: it defaults",
+    "    thinking OFF, so its *generation* prompt already closes the think block",
+    "    ('<think>\\n\\n</think>\\n\\n') while 4B/9B/27B/35B end at '<think>\\n'. Training",
+    "    targets start with '\\n</think>\\n\\n', which lines up with the latter. Hence",
+    "    serve_enable_thinking=true for 0.8B only -- otherwise the block is doubled at",
+    "    serving time and eval silently degrades.",
+    "  - Param counts are from each repo's safetensors index total_size / 2 (bf16)."
+  ],
+  "defaults": {
+    "max_seq_len": 32768,
+    "global_batch_size": 128,
+    "num_epoch": 1,
+    "lr": "3e-6",
+    "min_lr": "3e-7",
+    "lr_warmup_fraction": 0.03,
+    "serve_context_length": 65536
+  },
+  "models": {
+    "qwen3.5-0.8b": {
+      "hf_repo": "Qwen/Qwen3.5-0.8B",
+      "slime_spec": "qwen3.5-0.8B.sh",
+      "loss_mask_type": "qwen3_5",
+      "params_b": 0.87,
+      "bf16_gib": 1.6,
+      "n_layers": 24,
+      "hybrid_attention": true,
+      "has_vision": true,
+      "moe": false,
+      "min_gpus": 2,
+      "serve_tp": 1,
+      "serve_enable_thinking": true,
+      "est_epoch_minutes": 5,
+      "paper_reference": null,
+      "role": "pipeline smoke test -- validates conversion / CP / mask / eval end-to-end cheaply",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        }
+      },
+      "serve_chat_template_repo": "Qwen/Qwen3.5-9B",
+      "serve_chat_template_note": "0.8B's own template defaults thinking OFF, so its generation prompt already closes the think block while training targets start with '\\n</think>\\n\\n'. Serving with 9B's template (thinking on by default) makes generation end at '<think>\\n', which is exactly the untrained prefix -- train and serve then line up."
+    },
+    "qwen3.5-4b": {
+      "hf_repo": "Qwen/Qwen3.5-4B",
+      "slime_spec": "qwen3.5-4B.sh",
+      "loss_mask_type": "qwen3_5",
+      "params_b": 4.66,
+      "bf16_gib": 8.7,
+      "n_layers": 32,
+      "hybrid_attention": true,
+      "has_vision": true,
+      "moe": false,
+      "min_gpus": 8,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "est_epoch_minutes": 25,
+      "paper_reference": null,
+      "role": "iteration workhorse -- 8 GPUs, so four independent runs fit on four nodes",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        },
+        "40GB": {
+          "tp": 2,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        }
+      }
+    },
+    "qwen3.5-9b": {
+      "hf_repo": "Qwen/Qwen3.5-9B",
+      "slime_spec": "qwen3.5-9B.sh",
+      "loss_mask_type": "qwen3_5",
+      "params_b": 9.65,
+      "bf16_gib": 18.0,
+      "n_layers": 32,
+      "hybrid_attention": true,
+      "has_vision": true,
+      "moe": false,
+      "min_gpus": 8,
+      "serve_tp": 2,
+      "serve_enable_thinking": false,
+      "est_epoch_minutes": 50,
+      "paper_reference": null,
+      "role": "primary low-cost result model",
+      "parallelism": {
+        "80GB": {
+          "tp": 2,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        },
+        "40GB": {
+          "tp": 4,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        }
+      }
+    },
+    "qwen3.5-27b": {
+      "hf_repo": "Qwen/Qwen3.5-27B",
+      "slime_spec": "qwen3.5-27B.sh",
+      "loss_mask_type": "qwen3_5",
+      "params_b": 27.78,
+      "bf16_gib": 51.7,
+      "n_layers": 64,
+      "hybrid_attention": true,
+      "has_vision": true,
+      "moe": false,
+      "min_gpus": 32,
+      "serve_tp": 4,
+      "serve_enable_thinking": false,
+      "est_epoch_minutes": 150,
+      "decoder_last_pipeline_num_layers": 30,
+      "paper_reference": {
+        "tb-hard": 28.33,
+        "tb2": 47.94,
+        "note": "paper SFT round 3; round 1 is 23.00 / 42.32"
+      },
+      "reference_checkpoint": "Zhongzhi1228/Qwen3.5-27B-SFT",
+      "role": "the paper's model -- the only entry with a published reference to validate the harness against",
+      "parallelism": {
+        "80GB": {
+          "tp": 4,
+          "pp": 2,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384
+        },
+        "40GB": {
+          "tp": 8,
+          "pp": 1,
+          "cp": 4,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "qwen3.5-35b-a3b": {
+      "hf_repo": "Qwen/Qwen3.5-35B-A3B",
+      "slime_spec": "qwen3.5-35B-A3B.sh",
+      "loss_mask_type": "qwen3_5",
+      "params_b": 35.95,
+      "bf16_gib": 67.0,
+      "n_layers": 40,
+      "hybrid_attention": true,
+      "has_vision": true,
+      "moe": true,
+      "num_experts": 256,
+      "num_experts_per_tok": 8,
+      "min_gpus": 8,
+      "serve_tp": 4,
+      "serve_enable_thinking": false,
+      "est_epoch_minutes": 40,
+      "paper_reference": null,
+      "role": "best capability per training hour: memory scales with 36B, compute with ~3B active. Also the best RL candidate.",
+      "moe_flags": [
+        "--moe-token-dispatcher-type",
+        "flex"
+      ],
+      "moe_optional_flags": [
+        "--moe-enable-deepep"
+      ],
+      "unvalidated": "MoE parallelism (EP) for this model has NOT been run on A100. slime's shipped SFT launcher uses TP2/EP8 on 8 GPUs; these rows scale that to 32 and are a starting point, not a verified config. If DeepEP misbehaves on SM80, drop --moe-enable-deepep and use --moe-token-dispatcher-type alltoall.",
+      "parallelism": {
+        "80GB": {
+          "tp": 2,
+          "pp": 1,
+          "cp": 2,
+          "ep": 8,
+          "max_tokens_per_gpu": 16384
+        },
+        "40GB": {
+          "tp": 2,
+          "pp": 1,
+          "cp": 4,
+          "ep": 4,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    }
+  }
+}

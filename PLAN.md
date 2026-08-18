@@ -76,21 +76,35 @@ includes `Qwen3_5ForConditionalGeneration`.
   `v0.5.15.post1`, Megatron `1dcf0daf`). The FA2/TE/Megatron combination is
   version-sensitive; "upgrading" it is the most likely way to lose a day.
 
-### Parallelism table (`TP·PP·CP·DP = 32`)
+### Parallelism (registry-driven)
 
 CP is what makes a 32 K sequence fit: **per-GPU sequence tokens = seq / CP**, so
 `max-tokens-per-gpu × CP ≥ max-seq-len` is a hard constraint (`05_run_sft.sh`
 asserts it). Weights per GPU = 27.8 B / (TP·PP) — CP does *not* shard weights.
 
-| `MEM_CLASS` | TP | PP | CP | DP | `--max-tokens-per-gpu` | weights/GPU | notes |
-|---|---|---|---|---|---|---|---|
-| **80GB** | 4 | 2 | 2 | 2 | 16384 | 6.95 GB | recommended |
-| **40GB** | 8 | 2 | 2 | 1 | 8192 | 3.47 GB | TP8 = whole node, **needs NVLink** |
-| **40GB-alt** | 4 | 2 | 4 | 1 | 8192 | 6.95 GB | = slime's shipped default |
+All parallelism now lives in **`configs/models.json`**, resolved and *validated* by
+`scripts/model_registry.py` (see §8 for the full model list):
 
-`05_run_sft.sh` auto-detects via `nvidia-smi` (`>70 GiB → 80GB`), or force with
-`MEM_CLASS=`. Constraints it enforces: `TP ≤ 8` and TP inside one node; PP/DP may
-cross nodes.
+```bash
+python scripts/model_registry.py --list
+python scripts/model_registry.py --key qwen3.5-27b --mem-class 80GB --gpus 32
+```
+
+For `qwen3.5-27b`:
+
+| `MEM_CLASS` | TP | PP | CP | DP | `--max-tokens-per-gpu` | weights/GPU |
+|---|---|---|---|---|---|---|
+| **80GB** | 4 | 2 | 2 | 2 | 16384 | 6.95 GB |
+| **40GB** | 8 | 1 | 4 | 1 | 8192 | 6.95 GB |
+
+The registry enforces `tp·pp·cp·dp == gpus`, `tp ≤ gpus_per_node`, and
+`max_tokens_per_gpu·cp ≥ max_seq_len`, and exits non-zero with an explanation
+rather than letting an impossible config reach the trainer.
+
+> Corrected: an earlier revision of this table listed 40GB as TP8/PP2/CP2 with
+> `max_tokens_per_gpu 8192`. That gives `8192·2 = 16384 < 32768`, so the longest
+> sequence in the dataset could not be placed and the launcher's own assertion
+> would have rejected it. The row is now TP8/PP1/CP4.
 
 **Fallback ladder** on OOM or GDN/CP trouble: ① halve `--max-tokens-per-gpu`
 ② CP 2→4 (DP down) ③ PP 2→4 ④ *last resort* `--max-seq-len 16384`. Prefer ①–③:
@@ -345,3 +359,50 @@ round trip drops; get correctness first, then re-enable for rollout throughput.
   but none of the synthesis pipeline, operator selection, Daytona orchestration,
   or the SFT/PPO launchers. slime upstream is the real substitute, and it is a
   better one than the website repo would have been.
+
+
+---
+
+## 8. Other models
+
+`configs/models.json` holds every supported model; `scripts/model_registry.py
+--list` prints it. Select one with `MODEL_KEY=` — everything else (parallelism,
+loss mask, spec file, vision handling, serving TP) follows automatically.
+
+| key | params | bf16 | layers | min GPUs | ~min/epoch | role |
+|---|---|---|---|---|---|---|
+| `qwen3.5-0.8b` | 0.87 B | 1.6 GiB | 24 | 2 | ~5 | pipeline smoke test |
+| `qwen3.5-4b` | 4.66 B | 8.7 GiB | 32 | 8 | ~25 | iteration workhorse |
+| `qwen3.5-9b` | 9.65 B | 18.0 GiB | 32 | 8 | ~50 | primary low-cost result |
+| `qwen3.5-27b` | 27.78 B | 51.7 GiB | 64 | 32 | ~150 | the paper's model |
+| `qwen3.5-35b-a3b` | 35.95 B / ~3 B active | 67.0 GiB | 40 | 8 | ~40 | MoE; best capability/hour |
+
+**Why these and not others.** slime ships 39 model specs, but only **four**
+loss-mask implementations (`qwen` = ChatML, `qwen3`, `qwen3_5`, `distill_qwen`).
+Everything above uses `qwen3_5`, so it needs no new mask code. GLM / Llama / MiMo /
+Moonlight would each need a new mask generator plus validation. MiniMax-M2 is
+240 B — full-parameter SFT would need ~2.9 TB of optimizer state, which is not
+sensible on 32 A100s.
+
+**One dataset serves all five.** Measured: the tokenizer is byte-identical across
+them (sha256 `4b565170da5bed0e`) *and* so is the training-time chat-template
+render. The published `cap10`/`cap8` datasets and `--loss-mask-type qwen3_5` apply
+unchanged — no re-tokenization, no re-validation.
+
+**One caveat, on `qwen3.5-0.8b` only.** Its chat template defaults thinking *off*,
+so its **generation** prompt already closes the think block
+(`<think>\n\n</think>\n\n`) while 4B/9B/27B/35B end at `<think>\n`. Training
+targets begin with `\n</think>\n\n`, which lines up with the latter. So 0.8B must
+be *served* with a thinking-on template or the block is doubled and eval silently
+degrades. The registry sets `serve_chat_template_repo` and `20_run_all.sh` fetches
+it automatically.
+
+**Unvalidated:** the MoE (EP) rows for `qwen3.5-35b-a3b` have not been run on
+A100. slime's shipped SFT launcher uses TP2/EP8 on 8 GPUs; our rows scale that to
+32 and are a starting point. If DeepEP misbehaves on SM80, drop
+`--moe-enable-deepep` and use `--moe-token-dispatcher-type alltoall`.
+
+**No reference numbers below 27B.** The paper published scores only for
+Qwen3.5-27B and 122B-A10B. `14_make_report.py` therefore *skips* (does not pass)
+the regression-vs-base and reference-reproduction checks for other models, and the
+report says so. Validate the harness once with 27B, then reuse it.
