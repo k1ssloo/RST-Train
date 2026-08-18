@@ -42,6 +42,7 @@ import shutil
 import statistics
 import sys
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -129,6 +130,59 @@ def discover_tasks(root: Path) -> list[Path]:
     return []
 
 
+def harbor_env_kwargs(args) -> list[str]:
+    """`--environment-kwarg` values, from the flag and from RST_HARBOR_ENV_KWARGS.
+
+    The environment variable is how 00b_setup_sandbox.sh passes backend options
+    it discovered (a k8s namespace, a .sif cache dir) without every caller having
+    to know about them.
+    """
+    pairs = list(args.harbor_env_kwarg or [])
+    pairs += [tok for tok in os.environ.get("RST_HARBOR_ENV_KWARGS", "").split() if "=" in tok]
+    seen: set[str] = set()
+    out = []
+    for pair in pairs:
+        key = pair.split("=", 1)[0]
+        if key not in seen:          # an explicit flag wins over the environment
+            seen.add(key)
+            out.append(pair)
+    return out
+
+
+def harbor_process_env(args) -> dict[str, str]:
+    """Environment for the harbor subprocess.
+
+    Two different situations, and conflating them breaks one of them:
+
+    * `--env docker`: everything is on this host. Proxy variables must be REMOVED,
+      or the agent's calls to the local vLLM endpoint get routed through a proxy
+      that cannot see it.
+    * an off-machine backend (daytona/e2b/modal/k8s): harbor needs outbound HTTPS
+      to reach the provider, which on a locked-down cluster usually means the
+      proxy IS required. Keep it, and put the local endpoint in NO_PROXY instead.
+    """
+    env = dict(os.environ)
+    env.update({
+        "HOSTED_VLLM_API_BASE": args.endpoint,
+        "HOSTED_VLLM_API_KEY": "eval",
+        "OPENAI_BASE_URL": args.endpoint,
+        "OPENAI_API_KEY": "eval",
+    })
+    if args.docker_host:
+        env["DOCKER_HOST"] = args.docker_host
+    proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+    if args.harbor_env == "docker":
+        for key in proxy_keys:
+            env.pop(key, None)
+    elif any(env.get(k) for k in proxy_keys):
+        host = urllib.parse.urlsplit(args.endpoint).hostname or ""
+        extra = [h for h in (host, "127.0.0.1", "localhost") if h]
+        for key in ("NO_PROXY", "no_proxy"):
+            current = [t for t in env.get(key, "").split(",") if t]
+            env[key] = ",".join(dict.fromkeys(current + extra))
+    return env
+
+
 async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.Semaphore,
                    served_name: str) -> TaskOutcome:
     task_id = task_dir.name
@@ -141,20 +195,12 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
     argv = [
         args.harbor_bin, "run", "--path", str(task_dir.resolve()),
         "--agent", "terminus-2", "--model", f"hosted_vllm/{served_name}",
-        "--env", "docker", "--n-attempts", "1", "--n-concurrent", "1",
+        "--env", args.harbor_env, "--n-attempts", "1", "--n-concurrent", "1",
         "--max-retries", "0", "--jobs-dir", str(jobs_dir), "--job-name", job_name, "--quiet",
     ]
-    env = dict(os.environ)
-    env.update({
-        "HOSTED_VLLM_API_BASE": args.endpoint,
-        "HOSTED_VLLM_API_KEY": "eval",
-        "OPENAI_BASE_URL": args.endpoint,
-        "OPENAI_API_KEY": "eval",
-    })
-    if args.docker_host:
-        env["DOCKER_HOST"] = args.docker_host
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        env.pop(key, None)
+    for kwarg in harbor_env_kwargs(args):
+        argv += ["--environment-kwarg", kwarg]
+    env = harbor_process_env(args)
 
     async with sem:
         proc = await asyncio.create_subprocess_exec(
@@ -365,6 +411,14 @@ def main() -> int:
     p.add_argument("--task-timeout", type=int, default=1800)
     p.add_argument("--harbor-bin", default="harbor")
     p.add_argument("--docker-host", default=os.environ.get("RST_DOCKER_HOST", ""))
+    # Where the task container runs. "docker" means a local (or remote) Docker API
+    # endpoint; daytona/e2b/modal build environment/Dockerfile on the provider's
+    # side and need no container privilege here at all. scripts/00b_setup_sandbox.sh
+    # picks one and exports RST_HARBOR_ENV; see it for why that matters.
+    p.add_argument("--harbor-env", default=os.environ.get("RST_HARBOR_ENV", "docker"),
+                   help="harbor --env value: docker|daytona|e2b|modal|gke|ack|openshift|...")
+    p.add_argument("--harbor-env-kwarg", action="append", default=None, metavar="K=V",
+                   help="repeatable; forwarded as harbor --environment-kwarg K=V")
     p.add_argument("--keep-jobs", action="store_true")
     p.add_argument("--chat-template", default=os.environ.get("SERVE_CHAT_TEMPLATE", ""),
                    help="override the served chat template (see configs/models.json "

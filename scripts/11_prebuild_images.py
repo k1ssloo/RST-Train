@@ -22,6 +22,16 @@ DOCKER_HOST.
 
     # size probe first (strongly recommended before committing disk):
     python scripts/11_prebuild_images.py --taskset data/rl-sweet --sample 40
+
+NOT APPLICABLE TO OFF-MACHINE SANDBOXES. With `RST_HARBOR_ENV` set to daytona /
+e2b / modal, Harbor hands the task's Dockerfile to the provider and the image is
+built and cached THERE -- Daytona keyed by a content hash of the build spec, E2B
+as a template, Modal via Image.from_dockerfile. Building the same image locally
+would not populate that cache, and on a pod that cannot mount(2) it cannot even
+be attempted. This script detects that case and exits 0 having built nothing,
+because a warm-cache step that is structurally impossible is not a failure. The
+first rollout of each distinct base image then pays the provider-side build once;
+after that the snapshot is reused. Budget for that in the first sweep.
 """
 
 from __future__ import annotations
@@ -70,6 +80,26 @@ def _build_with_vfs(argv: list[str], timeout: int) -> subprocess.CompletedProces
         [BUILD_CMD, "--root", root, "--storage-driver", "vfs", *argv],
         capture_output=True, text=True, timeout=timeout, check=False,
     )
+
+
+def offmachine_reason() -> str | None:
+    """Is the sandbox somewhere this script cannot pre-warm? Then say so, don't fail.
+
+    Only two of the sandbox locations from 00b_setup_sandbox.sh can be warmed from
+    here: `local` (obviously) and `remote-daemon` (the docker CLI streams the build
+    context over the socket, so the images land on the daemon Harbor will use).
+    Everything else builds on infrastructure we do not address.
+    """
+    location = os.environ.get("RST_SANDBOX_LOCATION", "")
+    harbor_env = os.environ.get("RST_HARBOR_ENV", "")
+    if location in ("local", "remote-daemon"):
+        return None
+    if location in ("managed", "preset"):
+        return (f"sandbox location is {location!r} (harbor --env {harbor_env or '?'}); "
+                f"images are built by the provider, not here")
+    if harbor_env and harbor_env != "docker":
+        return f"RST_HARBOR_ENV={harbor_env} is an off-machine backend; it builds its own images"
+    return None
 
 
 def image_tag(task_id: str) -> str:
@@ -151,7 +181,27 @@ def main() -> int:
     parser.add_argument("--sample", type=int, default=0, help="build only N tasks (size probe)")
     parser.add_argument("--no-pull", action="store_true", help="skip --pull on base images")
     parser.add_argument("--skip-existing", action="store_true", default=True)
+    parser.add_argument("--force-local", action="store_true",
+                        help="build here even if the sandbox backend is off-machine")
     args = parser.parse_args()
+
+    if not args.force_local and (skip := offmachine_reason()):
+        report = {
+            "skipped": True,
+            "reason": skip,
+            "harbor_env": os.environ.get("RST_HARBOR_ENV", ""),
+            "sandbox_location": os.environ.get("RST_SANDBOX_LOCATION", ""),
+        }
+        print(f"[skip] {skip}")
+        print("[skip] The provider builds each task's Dockerfile on its own side and caches")
+        print("[skip] the result, so there is nothing useful to warm locally. The first")
+        print("[skip] rollout per distinct image pays that build once; budget for it.")
+        if args.taskset.is_dir():
+            out = args.taskset / "prebuild_report.json"
+            out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            print(f"[skip] wrote {out}")
+        print("[skip] Pass --force-local if you really do want local images too.")
+        return 0
 
     if not shutil.which(BUILD_CMD):
         sys.exit(f"{BUILD_CMD} not found on PATH (set RST_BUILD_CMD)")

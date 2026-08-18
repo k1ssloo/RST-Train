@@ -55,6 +55,7 @@ import os
 import re
 import shutil
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,31 @@ INFRA_MARKERS = (
 def classify_infra(text: str) -> str | None:
     low = text.lower()
     return next((m for m in INFRA_MARKERS if m in low), None)
+
+
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+
+
+def _apply_proxy_policy(env: dict[str, str], harbor_env: str, shim_url: str) -> None:
+    """Decide what the harbor subprocess should do with proxy variables.
+
+    With `--env docker` the sandbox and the shim are both on this host, so a
+    proxy can only get in the way -- drop it. With an off-machine backend,
+    harbor has to reach the provider's API over HTTPS, which on a locked-down
+    cluster is exactly what the proxy is for; keep it, and put the shim's own
+    host in NO_PROXY so rollout traffic still goes direct.
+    """
+    if harbor_env == "docker":
+        for key in _PROXY_KEYS:
+            env.pop(key, None)
+        return
+    if not any(env.get(key) for key in _PROXY_KEYS):
+        return
+    host = urllib.parse.urlsplit(shim_url).hostname or ""
+    extra = [h for h in (host, "127.0.0.1", "localhost") if h]
+    for key in ("NO_PROXY", "no_proxy"):
+        current = [tok for tok in env.get(key, "").split(",") if tok]
+        env[key] = ",".join(dict.fromkeys(current + extra))
 
 
 # --------------------------------------------------------------------- session
@@ -279,16 +305,22 @@ class HarborTerminusAgentLoop(AgentLoopBase):
         task_id = metadata.get("task_id") or kwargs.get("label") or "unknown"
         task_dir = metadata.get("task_dir")
 
+        harbor_env = os.environ.get("RST_HARBOR_ENV", "docker")
         docker_host = os.environ.get("RST_DOCKER_HOST", "")
-        if not docker_host:
+        if harbor_env == "docker" and not docker_host:
             raise RuntimeError(
-                "RST_DOCKER_HOST is not set. Run `source scripts/00b_setup_sandbox.sh` "
-                "first: it finds a usable container runtime and exports this. On a cluster "
-                "without Docker permission the answer is rootless podman, whose "
-                "Docker-compatible API socket Harbor can use unchanged. Task Dockerfiles are "
-                "untrusted third-party build scripts, so they must never be built on a shared "
-                "root Docker daemon -- rootless podman satisfies that more strongly, since "
-                "there is no privileged daemon at all."
+                "RST_HARBOR_ENV=docker but RST_DOCKER_HOST is not set. Run "
+                "`source scripts/00b_setup_sandbox.sh` first: it picks a place for the "
+                "sandbox to live and exports both. On a cluster without Docker permission "
+                "the answer is usually rootless podman, whose Docker-compatible API socket "
+                "Harbor uses unchanged; if this machine cannot mount(2) at all (an AppArmor "
+                "or SELinux policy denial -- run the script with --diagnose), set "
+                "RST_HARBOR_ENV=daytona (or e2b / modal) instead. Those build the task's "
+                "Dockerfile on the provider's side, so this process needs no container "
+                "privilege -- and because Terminus-2 is a HOST-side agent, the agent loop "
+                "and every model call still run here, against the local shim. Task "
+                "Dockerfiles are untrusted third-party build scripts and must never be "
+                "built on a shared root Docker daemon; both options satisfy that."
             )
         if not task_dir or not (Path(task_dir) / "instruction.md").is_file():
             raise RuntimeError(f"task not materialized: {task_dir} "
@@ -311,6 +343,7 @@ class HarborTerminusAgentLoop(AgentLoopBase):
                 task_dir=Path(task_dir), job_name=job_name, jobs_root=jobs_root,
                 session_id=session_id,
                 base_url=f"http://{public_host}:{shim.port}/v1",
+                harbor_env=harbor_env,
                 docker_host=docker_host,
             )
             session = shim.close_session(session_id)
@@ -339,26 +372,29 @@ class HarborTerminusAgentLoop(AgentLoopBase):
                 shutil.rmtree(jobs_root, ignore_errors=True)
 
     async def _run_harbor(self, *, task_dir: Path, job_name: str, jobs_root: Path,
-                          session_id: str, base_url: str,
+                          session_id: str, base_url: str, harbor_env: str,
                           docker_host: str) -> tuple[float, str | None]:
         argv = [
             os.environ.get("RST_HARBOR_BIN", "harbor"), "run",
             "--path", str(task_dir.resolve()),
             "--agent", os.environ.get("RST_AGENT", "terminus-2"),
             "--model", os.environ.get("RST_SERVED_MODEL", "hosted_vllm/rst-policy"),
-            "--env", "docker", "--n-attempts", "1", "--n-concurrent", "1",
+            "--env", harbor_env, "--n-attempts", "1", "--n-concurrent", "1",
             "--max-retries", "0", "--jobs-dir", str(jobs_root),
             "--job-name", job_name, "--quiet",
         ]
+        for kwarg in os.environ.get("RST_HARBOR_ENV_KWARGS", "").split():
+            if "=" in kwarg:
+                argv += ["--environment-kwarg", kwarg]
         env = dict(os.environ)
         # The API key IS the session id: the shim reads it from the Bearer header.
         env.update({
             "HOSTED_VLLM_API_BASE": base_url, "HOSTED_VLLM_API_KEY": session_id,
             "OPENAI_BASE_URL": base_url, "OPENAI_API_KEY": session_id,
-            "DOCKER_HOST": docker_host,
         })
-        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-            env.pop(key, None)
+        if docker_host:
+            env["DOCKER_HOST"] = docker_host
+        _apply_proxy_policy(env, harbor_env, base_url)
 
         timeout = int(os.environ.get("RST_AGENT_TIMEOUT_SEC", "1800"))
         proc = await asyncio.create_subprocess_exec(

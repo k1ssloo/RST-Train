@@ -46,6 +46,7 @@ import secrets
 import shutil
 import time
 import traceback
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,8 @@ class RolloutConfig:
     adapter_bind_host: str
     adapter_port: int
     docker_host: str          # Docker-API-compatible socket (docker OR podman)
+    harbor_env: str           # harbor --env: docker | daytona | e2b | modal | gke | ...
+    harbor_env_kwargs: tuple[str, ...]
     agent: str
     agent_timeout_sec: int
     guard_sec: int
@@ -103,6 +106,10 @@ class RolloutConfig:
             adapter_bind_host=os.environ.get("ADAPTER_BIND_HOST", "0.0.0.0"),
             adapter_port=int(os.environ.get("ADAPTER_PORT", "18101")),
             docker_host=os.environ.get("RST_DOCKER_HOST", ""),
+            harbor_env=os.environ.get("RST_HARBOR_ENV", "docker"),
+            harbor_env_kwargs=tuple(
+                tok for tok in os.environ.get("RST_HARBOR_ENV_KWARGS", "").split() if "=" in tok
+            ),
             agent=os.environ.get("RST_AGENT", "terminus-2"),
             agent_timeout_sec=agent_timeout,
             guard_sec=int(os.environ.get("RST_ROLLOUT_GUARD_SEC", "0") or 0) or (agent_timeout + 600),
@@ -126,15 +133,19 @@ class _AdapterService(metaclass=SingletonMeta):
                 "dials the adapter over TCP; set it to an IP reachable from that "
                 "process (the node IP, not 127.0.0.1, if Harbor may run elsewhere)."
             )
-        if not CONFIG.docker_host:
+        if CONFIG.harbor_env == "docker" and not CONFIG.docker_host:
             raise RuntimeError(
-                "RST_DOCKER_HOST is not set. Run `source scripts/00b_setup_sandbox.sh` "
-                "first: it finds a usable container runtime and exports this. On a cluster "
-                "without Docker permission the answer is rootless podman, whose "
-                "Docker-compatible API socket Harbor can use unchanged. Task Dockerfiles are "
-                "untrusted third-party build scripts, so they must never be built on a shared "
-                "root Docker daemon -- rootless podman satisfies that more strongly, since "
-                "there is no privileged daemon at all."
+                "RST_HARBOR_ENV=docker but RST_DOCKER_HOST is not set. Run "
+                "`source scripts/00b_setup_sandbox.sh` first: it picks a place for the "
+                "sandbox to live and exports both. On a cluster without Docker permission "
+                "the answer is usually rootless podman, whose Docker-compatible API socket "
+                "Harbor uses unchanged; if this machine cannot mount(2) at all (an AppArmor "
+                "or SELinux policy denial -- run the script with --diagnose), the answer is "
+                "an off-machine backend such as RST_HARBOR_ENV=daytona, which builds the "
+                "task's Dockerfile on the provider's side and needs no container privilege "
+                "here. Task Dockerfiles are untrusted third-party build scripts, so they "
+                "must never be built on a shared root Docker daemon -- both of those "
+                "satisfy that more strongly than a dedicated daemon would."
             )
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.max_context_len = int(getattr(args, "rollout_max_context_len", 0) or 0)
@@ -155,9 +166,10 @@ class _AdapterService(metaclass=SingletonMeta):
         self.adapter_url = f"http://{CONFIG.adapter_public_host}:{self.app_handle.port}"
         CONFIG.jobs_root.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "[rst-rl] adapter=%s sglang=%s docker_host=%s agent=%s max_sandboxes=%d",
-            self.adapter_url, sglang_url, CONFIG.docker_host, CONFIG.agent,
-            CONFIG.max_concurrent_sandboxes,
+            "[rst-rl] adapter=%s sglang=%s harbor_env=%s docker_host=%s agent=%s "
+            "max_sandboxes=%d",
+            self.adapter_url, sglang_url, CONFIG.harbor_env, CONFIG.docker_host or "-",
+            CONFIG.agent, CONFIG.max_concurrent_sandboxes,
         )
 
 
@@ -193,6 +205,31 @@ def _read_reward(job_dir: Path) -> tuple[float | None, str | None]:
     return None, "no verifier reward in trial results"
 
 
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+
+
+def _apply_proxy_policy(env: dict[str, str], adapter_url: str) -> None:
+    """Decide what the harbor subprocess should do with proxy variables.
+
+    With `--env docker` everything is on this host, and a proxy can only get in
+    the way of the agent reaching the local adapter -- so drop it. With an
+    off-machine backend, harbor must reach the provider's API, which on a
+    locked-down cluster is exactly what the proxy is for; keep it, and add the
+    adapter's own host to NO_PROXY so rollout traffic still goes direct.
+    """
+    if CONFIG.harbor_env == "docker":
+        for key in _PROXY_KEYS:
+            env.pop(key, None)
+        return
+    if not any(env.get(key) for key in _PROXY_KEYS):
+        return
+    host = urllib.parse.urlsplit(adapter_url).hostname or ""
+    extra = [h for h in (host, "127.0.0.1", "localhost") if h]
+    for key in ("NO_PROXY", "no_proxy"):
+        current = [tok for tok in env.get(key, "").split(",") if tok]
+        env[key] = ",".join(dict.fromkeys(current + extra))
+
+
 async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
                       job_name: str) -> tuple[float | None, str | None, int]:
     """Run one Terminus-2 rollout against the adapter. Returns (reward, infra, rc)."""
@@ -204,7 +241,7 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
         "--path", str(task_dir.resolve()),
         "--agent", CONFIG.agent,
         "--model", CONFIG.model_name,
-        "--env", "docker",
+        "--env", CONFIG.harbor_env,
         "--n-attempts", "1",
         "--n-concurrent", "1",
         "--max-retries", "0",
@@ -212,6 +249,8 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
         "--job-name", job_name,
         "--quiet",
     ]
+    for kwarg in CONFIG.harbor_env_kwargs:
+        argv += ["--environment-kwarg", kwarg]
     env = dict(os.environ)
     env.update(
         {
@@ -221,11 +260,11 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
             "HOSTED_VLLM_API_KEY": session_id,
             "OPENAI_BASE_URL": f"{state.adapter_url}/v1",
             "OPENAI_API_KEY": session_id,
-            "DOCKER_HOST": CONFIG.docker_host,
         }
     )
-    env.pop("HTTP_PROXY", None); env.pop("HTTPS_PROXY", None)
-    env.pop("http_proxy", None); env.pop("https_proxy", None)
+    if CONFIG.docker_host:
+        env["DOCKER_HOST"] = CONFIG.docker_host
+    _apply_proxy_policy(env, state.adapter_url)
 
     async with _SANDBOX_SEM:
         process = await asyncio.create_subprocess_exec(

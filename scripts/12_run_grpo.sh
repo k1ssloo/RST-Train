@@ -4,6 +4,8 @@
 #   export BASE_FOLDER=/shared/rst SLIME_DIR=$BASE_FOLDER/slime
 #   export MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile
 #   export RST_DOCKER_HOST=unix:///run/user/1000/docker.sock   # dedicated daemon
+#   # ...or, if this machine may not run containers at all (see 00b --diagnose):
+#   export RST_HARBOR_ENV=daytona DAYTONA_API_KEY=...           # sandbox lives there
 #   export ADAPTER_PUBLIC_HOST=<head-ip>
 #   export INIT_CKPT=$BASE_FOLDER/qwen35-27b-rst-sft-v1        # or the base model
 #   bash scripts/12_run_grpo.sh
@@ -27,12 +29,20 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 3
 
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 : "${MASTER_ADDR:?set MASTER_ADDR}"
-# Container runtime for the rollout sandboxes. Rootless podman is the primary path;
-# it serves the Docker API Harbor speaks, so no Harbor patch is needed.
-if [[ -z "${RST_DOCKER_HOST:-}" ]]; then
+# Where the rollout sandboxes live. Rootless podman is the primary path when this
+# machine may run containers at all; it serves the Docker API Harbor speaks, so no
+# Harbor patch is needed. When it may NOT -- e.g. an AppArmor profile that denies
+# mount(2), which no package can fix -- 00b picks an off-machine backend instead
+# and exports RST_HARBOR_ENV. Either way RL runs; only the sandbox moves.
+if [[ -z "${RST_DOCKER_HOST:-}" && ( -z "${RST_HARBOR_ENV:-}" || "${RST_HARBOR_ENV}" == docker ) ]]; then
   source "$(dirname "${BASH_SOURCE[0]}")/00b_setup_sandbox.sh" || {
-    echo "RL requires a container runtime; none available. See BACKENDS.md." >&2; exit 1; }
+    echo "RL needs somewhere to run task containers and there is nowhere yet." >&2
+    echo "Run: bash scripts/00b_setup_sandbox.sh --diagnose   (it names the one fix)" >&2
+    echo "See BACKENDS.md for the off-machine options." >&2; exit 1; }
 fi
+: "${RST_HARBOR_ENV:=docker}"
+: "${RST_HARBOR_ENV_KWARGS:=}"
+export RST_HARBOR_ENV RST_HARBOR_ENV_KWARGS
 : "${ADAPTER_PUBLIC_HOST:=$MASTER_ADDR}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 TASKSET="${TASKSET:-$BASE_FOLDER/rl-sweet}"
@@ -41,7 +51,16 @@ INIT_CKPT="${INIT_CKPT:-$BASE_FOLDER/${MODEL_KEY}-rst-sft-v1}"
 RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-grpo-v1}"
 
 export PYTHONUNBUFFERED=1
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+# Ray, SGLang and the adapter all talk over the cluster's own network, so a proxy
+# only gets in the way -- EXCEPT when the sandbox backend is off-machine, because
+# then harbor must reach the provider's HTTPS API and on a locked-down cluster the
+# proxy is the only way out. Keep it in that case; rl/generate.py adds the local
+# endpoints to NO_PROXY per subprocess so rollout traffic still goes direct.
+if [[ "$RST_HARBOR_ENV" == docker ]]; then
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+else
+  echo "=== keeping proxy vars: --env $RST_HARBOR_ENV needs outbound HTTPS to the provider"
+fi
 
 ACTOR_NUM_NODES="${ACTOR_NUM_NODES:-4}"
 ACTOR_NUM_GPUS_PER_NODE="${ACTOR_NUM_GPUS_PER_NODE:-8}"
@@ -69,12 +88,23 @@ echo "=== TP=$TP PP=$PP CP=$CP DP=$DP EP=$EP mtpg=$MAX_TOKENS_PER_GPU resp=$MAX_
 # ---- rollout capacity: sandboxes are the bottleneck, not the GPUs ------------
 CPU_CORES=$(nproc)
 RAM_GB=$(free -g | awk 'NR==2{print $2}')
-# Each Terminus-2 rollout = 1+ containers + a tmux session. Budget ~2 cores and
-# ~4GB per concurrent sandbox, and never exceed half the cores (training needs
-# them for the CPU-offloaded optimizer).
-MAX_SANDBOXES="${RST_MAX_SANDBOXES:-$(( CPU_CORES / 4 < RAM_GB / 8 ? CPU_CORES / 4 : RAM_GB / 8 ))}"
+if [[ "$RST_HARBOR_ENV" == docker ]]; then
+  # Each Terminus-2 rollout = 1+ containers + a tmux session. Budget ~2 cores and
+  # ~4GB per concurrent sandbox, and never exceed half the cores (training needs
+  # them for the CPU-offloaded optimizer).
+  MAX_SANDBOXES="${RST_MAX_SANDBOXES:-$(( CPU_CORES / 4 < RAM_GB / 8 ? CPU_CORES / 4 : RAM_GB / 8 ))}"
+  echo "=== cores=$CPU_CORES ram=${RAM_GB}G -> RST_MAX_SANDBOXES=$MAX_SANDBOXES per node"
+else
+  # The container is not on this node, so local cores and RAM say nothing about the
+  # limit -- the provider's concurrency quota does, and exceeding it turns into
+  # HTTP 429s that rl/generate.py would (correctly) classify as infrastructure
+  # failures and drop. Default low and raise it once you have seen the quota.
+  MAX_SANDBOXES="${RST_MAX_SANDBOXES:-8}"
+  echo "=== off-machine sandbox (--env $RST_HARBOR_ENV): RST_MAX_SANDBOXES=$MAX_SANDBOXES"
+  echo "=== that is a PROVIDER-QUOTA number, not a local-resource one. Check your plan's"
+  echo "=== concurrent-sandbox limit and set RST_MAX_SANDBOXES to it explicitly."
+fi
 (( MAX_SANDBOXES < 1 )) && MAX_SANDBOXES=1
-echo "=== cores=$CPU_CORES ram=${RAM_GB}G -> RST_MAX_SANDBOXES=$MAX_SANDBOXES per node"
 
 source "${SLIME_DIR}/scripts/models/${SLIME_SPEC}"
 
@@ -181,7 +211,8 @@ MISC_ARGS=(
    --attention-backend flash
 )
 
-export no_proxy="localhost,127.0.0.1,0.0.0.0,${MASTER_ADDR}"
+NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,${MASTER_ADDR}"
+export no_proxy="$NO_PROXY_LIST"
 ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${ACTOR_NUM_GPUS_PER_NODE}" \
   --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
@@ -201,11 +232,23 @@ if [[ ! -d /sys/class/infiniband ]] || [[ -z "$(ls -A /sys/class/infiniband 2>/d
   IB_ENV='"NCCL_IB_DISABLE": "1", "NCCL_SOCKET_IFNAME": "'"${SOCKET_IFNAME}"'",'
 fi
 
+# Off-machine sandbox: every rollout worker also needs the proxy, or harbor cannot
+# reach the provider from inside the ray actor. Ray's runtime env replaces the
+# worker environment rather than extending it, so these have to be named here.
+PROXY_ENV=""
+if [[ "$RST_HARBOR_ENV" != docker ]]; then
+  for v in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
+    [[ -n "${!v:-}" ]] && PROXY_ENV+="\"$v\": \"${!v}\", "
+  done
+fi
+
 RUNTIME_ENV_JSON=$(cat <<EOF_JSON
 {
   "env_vars": {
     ${IB_ENV}
-    "no_proxy": "localhost,127.0.0.1,0.0.0.0,${MASTER_ADDR}",
+    ${PROXY_ENV}
+    "no_proxy": "${NO_PROXY_LIST}",
+    "NO_PROXY": "${NO_PROXY_LIST}",
     "GLOO_SOCKET_IFNAME": "${SOCKET_IFNAME}",
     "TP_SOCKET_IFNAME": "${SOCKET_IFNAME}",
     "MASTER_ADDR": "${MASTER_ADDR}",
@@ -215,7 +258,9 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     "ADAPTER_PUBLIC_HOST": "${ADAPTER_PUBLIC_HOST}",
     "ADAPTER_PORT": "${ADAPTER_PORT:-18101}",
-    "RST_DOCKER_HOST": "${RST_DOCKER_HOST}",
+    "RST_DOCKER_HOST": "${RST_DOCKER_HOST:-}",
+    "RST_HARBOR_ENV": "${RST_HARBOR_ENV}",
+    "RST_HARBOR_ENV_KWARGS": "${RST_HARBOR_ENV_KWARGS}",
     "RST_MAX_SANDBOXES": "${MAX_SANDBOXES}",
     "RST_AGENT": "terminus-2",
     "RST_AGENT_TIMEOUT_SEC": "${RST_AGENT_TIMEOUT_SEC:-1800}",
