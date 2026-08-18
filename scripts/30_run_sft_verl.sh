@@ -60,21 +60,53 @@ if [[ ! -f "$PRETOK" ]]; then
     --out "$PRETOK" --max-seq-len "${MAX_SEQ_LEN:-32768}"
 fi
 
-# Sanity gate: refuse to train if the export dropped rows for a contract failure.
-python - "$DATA_DIR" <<'EOF_PY'
-import json, sys
-from pathlib import Path
-m = Path(sys.argv[1]) / "pretokenized_train_manifest.json"
-d = json.loads(m.read_text())
-bad = d["dropped"]["contract"] + d["dropped"]["error"]
-print(f"pretokenized: rows={d['rows_out']} trained_fraction={d['trained_fraction']}")
-if bad:
-    sys.exit(f"REFUSING TO TRAIN: {bad} rows failed the chat-template contract. "
-             f"The mask is not trustworthy; fix the export first.")
-if not (0.25 <= d["trained_fraction"] <= 0.45):
-    sys.exit(f"REFUSING TO TRAIN: trained_fraction={d['trained_fraction']} is outside the "
-             f"0.25-0.45 band measured for this dataset. A mask bug is the likely cause.")
+# Sanity gate. Verified against the PARQUET ITSELF, not a sidecar manifest: the file
+# may have been downloaded (HF ships its manifest under a different name) or copied,
+# and a manifest can be stale while the data is not. Checking the actual tensors is
+# both stronger and provenance-independent.
+python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" <<'EOF_PY'
+import sys
+import pandas as pd
+
+path, max_len = sys.argv[1], int(sys.argv[2])
+df = pd.read_parquet(path)
+for col in ("input_ids", "loss_mask"):
+    if col not in df.columns:
+        sys.exit(f"REFUSING TO TRAIN: {path} has no {col!r} column. This must be PRE-TOKENIZED "
+                 f"data from scripts/15_export_pretokenized.py, not a `messages` parquet.")
+
+n_tok = df.input_ids.map(len)
+n_msk = df.loss_mask.map(len)
+misaligned = int((n_tok != n_msk).sum())
+empty = int((df.loss_mask.map(sum) == 0).sum())
+too_long = int((n_tok > max_len).sum())
+total = int(n_tok.sum())
+trained = int(df.loss_mask.map(sum).sum())
+frac = trained / max(1, total)
+
+print(f"pretokenized: rows={len(df)} tokens={total:,} trained={trained:,} ({frac:.2%}) "
+      f"max_len={int(n_tok.max())}")
+
+if misaligned:
+    sys.exit(f"REFUSING TO TRAIN: {misaligned} rows have len(input_ids) != len(loss_mask). "
+             f"The mask does not line up with the tokens; every masked position would be "
+             f"wrong. Re-export.")
+if empty:
+    sys.exit(f"REFUSING TO TRAIN: {empty} rows have zero trained tokens. They contribute no "
+             f"gradient and, with per-token loss normalization, skew the average. Re-export.")
+if too_long:
+    sys.exit(f"REFUSING TO TRAIN: {too_long} rows exceed max_seq_len={max_len}. Re-export with "
+             f"--max-seq-len {max_len} so the drop is counted, or raise the limit.")
+# 32.42% measured for cap10. A mask bug typically lands far outside this band: ~100%
+# means nothing is masked (training on the harness prompt and terminal output), ~0%
+# means everything is.
+if not (0.25 <= frac <= 0.45):
+    sys.exit(f"REFUSING TO TRAIN: trained fraction {frac:.2%} is outside the 0.25-0.45 band "
+             f"measured for this dataset. Near 100% means the mask is absent (you would train "
+             f"on terminal output); near 0% means it masks everything. Investigate before "
+             f"spending GPU time.")
 EOF_PY
+
 
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
 [[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"

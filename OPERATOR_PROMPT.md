@@ -226,8 +226,45 @@ The training data is already built and validated. Prefer downloading it:
 `cap10` = 10,778 examples (the paper's exact count); `cap8` = 8,886 (ablation).
 Then `SKIP_STAGES="data"` so the wrapper does not rebuild it.
 
-If you do rebuild (`scripts/03_build_sft_data.py`), you MUST then run
-`scripts/03b_validate_sft_data.py`. It must print `contract failures : 0` and
+### The verl path wants PRE-TOKENIZED data, and you have two ways to get it
+
+There is a third config, `cap10_pretokenized`: the same 10,778 examples stored as
+`input_ids` + `loss_mask`, with the verified mask already applied. It is what
+`30_run_sft_verl.sh` trains on. Either way works:
+
+  (a) download it (faster, ~75 MB — it is SMALLER than the messages version because
+      token ids compress better than JSON):
+
+      hf download NiuNiu0110/RST-SFT-Qwen3.5-27B --repo-type dataset \
+        --local-dir "$BASE_FOLDER/sft-hf"
+      cp "$BASE_FOLDER/sft-hf/data/cap10_pretokenized/train.parquet" \
+         "$BASE_FOLDER/sft-v1-cap10/pretokenized_train.parquet"
+
+  (b) do nothing. `30_run_sft_verl.sh` BUILDS it automatically when the file is
+      absent, from the `messages` parquet plus the tokenizer in the downloaded model
+      directory (~5 min). There is NO hard dependency on the Hub for this — if the
+      upload is unreachable, or you changed `--max-seq-len`, or you are using a
+      model whose tokenizer differs, regenerating is the correct move:
+
+      python scripts/15_export_pretokenized.py \
+        --parquet   "$BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet" \
+        --tokenizer "$BASE_FOLDER/<model-dir>" \
+        --out       "$BASE_FOLDER/sft-v1-cap10/pretokenized_train.parquet"
+
+Note (b) is safe for every model in the registry precisely because all five Qwen3.5
+sizes share one byte-identical tokenizer AND one training-time render. If you ever
+add a model outside that family, you MUST regenerate rather than download.
+
+Either way the launcher validates the parquet before training — alignment of
+`input_ids` to `loss_mask`, no zero-mask rows, nothing over `max_seq_len`, and a
+trained-token fraction inside 0.25–0.45 (measured 32.42%). It checks the file
+itself, not a sidecar manifest, so a downloaded or hand-copied file is checked
+exactly as strictly as a freshly built one. A trained fraction near 100% means the
+mask is missing and you would be training on terminal output; near 0% means it masks
+everything. Both abort.
+
+If you rebuild the `messages` data (`scripts/03_build_sft_data.py`), you MUST then
+run `scripts/03b_validate_sft_data.py`. It must print `contract failures : 0` and
 `user-turn leakage : 0`. Anything else is a stop condition — the training target
 would be wrong and no amount of training fixes that.
 
