@@ -4,12 +4,13 @@ Five model sizes are supported (0.8B … 35B-A3B); see "Pick a model first" belo
 
 You are starting from an EMPTY directory. Bootstrap first:
 
-    export BASE_FOLDER=<shared-scratch-dir>      # >= 400 GB free, ideally shared across nodes
-    mkdir -p "$BASE_FOLDER" && cd "$BASE_FOLDER"
-    git clone https://github.com/k1ssloo/RST-Train.git
-    cd RST-Train
+​    export BASE_FOLDER=<shared-scratch-dir>      # >= 400 GB free, ideally shared across nodes
+​    mkdir -p "$BASE_FOLDER" && cd "$BASE_FOLDER"
+​    git clone https://github.com/k1ssloo/RST-Train.git
+​    cd RST-Train
 
 Then READ THESE THREE FILES BEFORE RUNNING ANYTHING:
+
   - README.md    — status table: what is already verified vs. never executed
   - BACKENDS.md  — READ THIS EARLY. verl + FSDP is the PRIMARY backend, not slime.
   - PLAN.md      — the SFT spec: measured facts, hardware decision tables, risk register
@@ -35,7 +36,7 @@ Beating round 1 is the goal. Do not expect round 3.
 
 ## Pick a model first
 
-    python scripts/model_registry.py --list
+​    python scripts/model_registry.py --list
 
 Five models are supported; `MODEL_KEY` selects one and everything else
 (parallelism, loss mask, spec file, vision handling, serving TP) follows from
@@ -52,8 +53,8 @@ configs/models.json, which VALIDATES the config and refuses impossible ones.
 Run **qwen3.5-27b and qwen3.5-9b: SFT, then RL, then eval** for both. These two are
 marked first_batch=true in the registry. Nothing else is authorized yet.
 
-    MODEL_KEY=qwen3.5-27b RUN_RL=1 bash scripts/20_run_all.sh
-    MODEL_KEY=qwen3.5-9b  RUN_RL=1 bash scripts/20_run_all.sh
+​    MODEL_KEY=qwen3.5-27b RUN_RL=1 bash scripts/20_run_all.sh
+​    MODEL_KEY=qwen3.5-9b  RUN_RL=1 bash scripts/20_run_all.sh
 
 Qwen3.5-0.8B has already been run locally on one GPU against the real
 pre-tokenized data (`scripts/16_smoke_forward_backward.py`), and it found real bugs
@@ -106,15 +107,16 @@ render, so the SAME dataset and --loss-mask-type qwen3_5 apply to all of them. D
 not rebuild the data per model.
 
 TWO MODEL-SPECIFIC THINGS THAT WILL BITE YOU:
-  1. qwen3.5-0.8b must be SERVED with a thinking-on chat template. Its own template
-     defaults thinking off, so its generation prompt already closes the think block
-     while training targets open with "\n</think>\n\n". 20_run_all.sh fetches the
-     right template automatically via the registry -- do not remove that step, and
-     if you serve 0.8B by hand, pass --chat-template.
-  2. qwen3.5-35b-a3b's expert-parallel rows are UNVALIDATED on A100. slime's shipped
-     launcher uses TP2/EP8 on 8 GPUs; ours scale that to 32. If DeepEP misbehaves on
-     SM80, drop --moe-enable-deepep and use --moe-token-dispatcher-type alltoall.
-     Report what you had to change.
+
+    1. qwen3.5-0.8b must be SERVED with a thinking-on chat template. Its own template
+       defaults thinking off, so its generation prompt already closes the think block
+       while training targets open with "\n</think>\n\n". 20_run_all.sh fetches the
+       right template automatically via the registry -- do not remove that step, and
+       if you serve 0.8B by hand, pass --chat-template.
+    2. qwen3.5-35b-a3b's expert-parallel rows are UNVALIDATED on A100. slime's shipped
+       launcher uses TP2/EP8 on 8 GPUs; ours scale that to 32. If DeepEP misbehaves on
+       SM80, drop --moe-enable-deepep and use --moe-token-dispatcher-type alltoall.
+       Report what you had to change.
 
 Only qwen3.5-27b has published reference numbers. For any other model the report
 SKIPS (does not pass) the regression-vs-base and reference-reproduction checks, and
@@ -122,7 +124,7 @@ says so. Do not invent a target for 4B/9B/35B.
 
 ## Backend: use verl + FSDP. Do NOT start with Megatron.
 
-    MODEL_KEY=qwen3.5-9b bash scripts/30_run_sft_verl.sh
+​    MODEL_KEY=qwen3.5-9b bash scripts/30_run_sft_verl.sh
 
 Megatron on A100 requires swapping cuDNN to satisfy the TransformerEngine/apex
 build, which a shared cluster will not let you do. So slime + Megatron
@@ -132,20 +134,20 @@ only if verl fails and you have somehow obtained the ability to change cuDNN.
 Two things on the verl path are mandatory, not optional. Both are explained in
 BACKENDS.md; neither is a style preference:
 
-  1. `model.use_liger=True`. This model's vocab is 248,320, so materialized logits
-     for a 32K sequence are 16.3 GiB in bf16 (~32.6 GiB if the loss upcasts to
-     fp32) -- larger than the activations. Liger's fused cross-entropy is what makes
-     the run fit at all. Without it you OOM and it will look like a parallelism
-     problem.
-  2. Pre-tokenized data via `scripts/15_export_pretokenized.py`. verl's built-in
-     multi-turn dataset tokenizes message-by-message; measured on 200 real rows,
-     200/200 disagree with the whole-conversation render, because the Qwen3.5
-     template puts an empty <think> block on the LAST assistant turn and
-     turn-by-turn building makes every turn "last" (21 blocks instead of 1 in a
-     21-turn conversation). Do NOT set `ignore_input_ids_mismatch: True` to silence
-     that -- it silences the check, not the bug, and you would train on tokens
-     serving never emits. `30_run_sft_verl.sh` builds the pre-tokenized file for you
-     and refuses to start if its trained-token fraction leaves the measured band.
+    1. `model.use_liger=True`. This model's vocab is 248,320, so materialized logits
+       for a 32K sequence are 16.3 GiB in bf16 (~32.6 GiB if the loss upcasts to
+       fp32) -- larger than the activations. Liger's fused cross-entropy is what makes
+       the run fit at all. Without it you OOM and it will look like a parallelism
+       problem.
+    2. Pre-tokenized data via `scripts/15_export_pretokenized.py`. verl's built-in
+       multi-turn dataset tokenizes message-by-message; measured on 200 real rows,
+       200/200 disagree with the whole-conversation render, because the Qwen3.5
+       template puts an empty <think> block on the LAST assistant turn and
+       turn-by-turn building makes every turn "last" (21 blocks instead of 1 in a
+       21-turn conversation). Do NOT set `ignore_input_ids_mismatch: True` to silence
+       that -- it silences the check, not the bug, and you would train on tokens
+       serving never emits. `30_run_sft_verl.sh` builds the pre-tokenized file for you
+       and refuses to start if its trained-token fraction leaves the measured band.
 
 verl's FSDP engine has no context parallelism, so there is no CP correctness
 question to resolve on this path -- one fewer unknown. (For what it is worth,
@@ -156,8 +158,8 @@ CP as TODO. It is genuinely unsettled for gated-delta-net layers.)
 
 The cluster will not give you Docker daemon access. You do not need it.
 
-    source scripts/00b_setup_sandbox.sh        # finds/starts a runtime, exports DOCKER_HOST
-    bash   scripts/00b_setup_sandbox.sh --check
+​    source scripts/00b_setup_sandbox.sh        # finds/starts a runtime, exports DOCKER_HOST
+​    bash   scripts/00b_setup_sandbox.sh --check
 
 Rootless **podman** serves the same Docker API that Harbor speaks, so pointing
 DOCKER_HOST at podman's socket makes Harbor work with NO code change. This was
@@ -171,23 +173,24 @@ training helped, and you must say the eval was impossible rather than call a
 checkpoint good.
 
 FOUR THINGS THAT WILL BITE YOU, all found by actually building the real task images:
-  1. `--format docker` is required: 16% of task Dockerfiles use `SHELL`, which
-     podman's default OCI format ignores and then errors on.
-  2. **podman >= 4.4 is required**: 31% use Dockerfile heredocs (`RUN <<EOF`).
-     Ubuntu 22.04 ships 3.4.4, which fails them with "Unknown instruction: IF" --
-     looks like a broken task, is actually a stale toolchain, and would silently
-     cost you a third of the pool. If yours is old, install a STATIC rootless podman
-     (32 MB, no root, no package manager):
-       curl -sSL -o /tmp/podman.tgz https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
-       mkdir -p $HOME/.local && tar xzf /tmp/podman.tgz -C $HOME/.local --strip-components=1
-       export PATH=$HOME/.local/bin:$PATH
-     `11_prebuild_images.py` aborts on this rather than building two thirds quietly.
-  3. A `git clone` inside a build can fail "hardlink different from source" under
-     rootless kernel overlay. Retry in a vfs store under a separate `--root`;
-     `11_prebuild_images.py` does that automatically.
-  4. podman < 4 has no `compose` subcommand, so the 710 docker-compose multi-service
-     tasks (13.8% of the pool) need podman >= 4.x too, or must be excluded. If you
-     exclude them, say so -- it changes which tasks the numbers cover.
+
+    1. `--format docker` is required: 16% of task Dockerfiles use `SHELL`, which
+       podman's default OCI format ignores and then errors on.
+    2. **podman >= 4.4 is required**: 31% use Dockerfile heredocs (`RUN <<EOF`).
+       Ubuntu 22.04 ships 3.4.4, which fails them with "Unknown instruction: IF" --
+       looks like a broken task, is actually a stale toolchain, and would silently
+       cost you a third of the pool. If yours is old, install a STATIC rootless podman
+       (32 MB, no root, no package manager):
+         curl -sSL -o /tmp/podman.tgz https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
+         mkdir -p $HOME/.local && tar xzf /tmp/podman.tgz -C $HOME/.local --strip-components=1
+         export PATH=$HOME/.local/bin:$PATH
+       `11_prebuild_images.py` aborts on this rather than building two thirds quietly.
+    3. A `git clone` inside a build can fail "hardlink different from source" under
+       rootless kernel overlay. Retry in a vfs store under a separate `--root`;
+       `11_prebuild_images.py` does that automatically.
+    4. podman < 4 has no `compose` subcommand, so the 710 docker-compose multi-service
+       tasks (13.8% of the pool) need podman >= 4.x too, or must be excluded. If you
+       exclude them, say so -- it changes which tasks the numbers cover.
 
 If podman is genuinely unavailable, ask for the `podman` + `uidmap` packages. That
 is normally an easier request than Docker access: no daemon, no root, no group
@@ -196,12 +199,12 @@ so Harbor cannot drive it without a new backend, which is not written.
 
 ## The one-command path
 
-    export MODEL_KEY=qwen3.5-0.8b            # start here, then 27b
-    export MASTER_ADDR=<head-node-ip>
-    export HOSTFILE="$BASE_FOLDER/hostfile"          # one node IP per line, head first
-    export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock   # dedicated daemon, see below
-    export WANDB_KEY=<key>                           # omit -> offline mode automatically
-    bash scripts/20_run_all.sh 2>&1 | tee "$BASE_FOLDER/run_all.log"
+​    export MODEL_KEY=qwen3.5-0.8b            # start here, then 27b
+​    export MASTER_ADDR=<head-node-ip>
+​    export HOSTFILE="$BASE_FOLDER/hostfile"          # one node IP per line, head first
+​    export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock   # dedicated daemon, see below
+​    export WANDB_KEY=<key>                           # omit -> offline mode automatically
+​    bash scripts/20_run_all.sh 2>&1 | tee "$BASE_FOLDER/run_all.log"
 
 That runs: preflight → env → download → build data → convert checkpoint → train →
 export → eval (yours + the reference checkpoint) → report. Every stage writes a
@@ -216,55 +219,18 @@ for resuming and for the long unattended stretch, not for hiding the risky steps
 
 The training data is already built and validated. Prefer downloading it:
 
-    hf download NiuNiu0110/RST-SFT-Qwen3.5-27B --repo-type dataset \
-      --local-dir "$BASE_FOLDER/sft-hf"
-    mkdir -p "$BASE_FOLDER/sft-v1-cap10"
-    cp "$BASE_FOLDER/sft-hf/data/cap10/train.parquet"   "$BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet"
-    cp "$BASE_FOLDER/sft-hf/data/cap10/holdout.parquet" "$BASE_FOLDER/sft-v1-cap10/rst_sft_holdout.parquet"
-    cp "$BASE_FOLDER/sft-hf/manifest_cap10.json"        "$BASE_FOLDER/sft-v1-cap10/manifest.json"
+​    hf download NiuNiu0110/RST-SFT-Qwen3.5-27B --repo-type dataset \
+​      --local-dir "$BASE_FOLDER/sft-hf"
+​    mkdir -p "$BASE_FOLDER/sft-v1-cap10"
+​    cp "$BASE_FOLDER/sft-hf/data/cap10/train.parquet"   "$BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet"
+​    cp "$BASE_FOLDER/sft-hf/data/cap10/holdout.parquet" "$BASE_FOLDER/sft-v1-cap10/rst_sft_holdout.parquet"
+​    cp "$BASE_FOLDER/sft-hf/manifest_cap10.json"        "$BASE_FOLDER/sft-v1-cap10/manifest.json"
 
 `cap10` = 10,778 examples (the paper's exact count); `cap8` = 8,886 (ablation).
 Then `SKIP_STAGES="data"` so the wrapper does not rebuild it.
 
-### The verl path wants PRE-TOKENIZED data, and you have two ways to get it
-
-There is a third config, `cap10_pretokenized`: the same 10,778 examples stored as
-`input_ids` + `loss_mask`, with the verified mask already applied. It is what
-`30_run_sft_verl.sh` trains on. Either way works:
-
-  (a) download it (faster, ~75 MB — it is SMALLER than the messages version because
-      token ids compress better than JSON):
-
-      hf download NiuNiu0110/RST-SFT-Qwen3.5-27B --repo-type dataset \
-        --local-dir "$BASE_FOLDER/sft-hf"
-      cp "$BASE_FOLDER/sft-hf/data/cap10_pretokenized/train.parquet" \
-         "$BASE_FOLDER/sft-v1-cap10/pretokenized_train.parquet"
-
-  (b) do nothing. `30_run_sft_verl.sh` BUILDS it automatically when the file is
-      absent, from the `messages` parquet plus the tokenizer in the downloaded model
-      directory (~5 min). There is NO hard dependency on the Hub for this — if the
-      upload is unreachable, or you changed `--max-seq-len`, or you are using a
-      model whose tokenizer differs, regenerating is the correct move:
-
-      python scripts/15_export_pretokenized.py \
-        --parquet   "$BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet" \
-        --tokenizer "$BASE_FOLDER/<model-dir>" \
-        --out       "$BASE_FOLDER/sft-v1-cap10/pretokenized_train.parquet"
-
-Note (b) is safe for every model in the registry precisely because all five Qwen3.5
-sizes share one byte-identical tokenizer AND one training-time render. If you ever
-add a model outside that family, you MUST regenerate rather than download.
-
-Either way the launcher validates the parquet before training — alignment of
-`input_ids` to `loss_mask`, no zero-mask rows, nothing over `max_seq_len`, and a
-trained-token fraction inside 0.25–0.45 (measured 32.42%). It checks the file
-itself, not a sidecar manifest, so a downloaded or hand-copied file is checked
-exactly as strictly as a freshly built one. A trained fraction near 100% means the
-mask is missing and you would be training on terminal output; near 0% means it masks
-everything. Both abort.
-
-If you rebuild the `messages` data (`scripts/03_build_sft_data.py`), you MUST then
-run `scripts/03b_validate_sft_data.py`. It must print `contract failures : 0` and
+If you do rebuild (`scripts/03_build_sft_data.py`), you MUST then run
+`scripts/03b_validate_sft_data.py`. It must print `contract failures : 0` and
 `user-turn leakage : 0`. Anything else is a stop condition — the training target
 would be wrong and no amount of training fixes that.
 
@@ -284,22 +250,23 @@ entirely fine to fix yourself:
   * anything in configs/models.json that is simply wrong for your hardware
 
 Rules when you do:
-  1. Fix the cause, not the symptom. If a launcher passes a flag slime removed,
-     update the flag -- do not delete the feature it enabled.
-  2. **Never change these to make a run start.** Each one silently invalidates the
-     result, so a run that "succeeds" after touching them is worse than no run:
-       - `--loss-mask-type qwen3_5` (anything else trains on terminal output)
-       - the data gate in 20_run_all.sh (contract failures / user-turn leakage == 0)
-       - `max_tokens_per_gpu * cp >= max_seq_len` and the other registry asserts
-       - infrastructure-vs-model-failure separation in 06_eval.py and rl/generate.py
-       - the reference-checkpoint eval, when the model has one
-     If you believe one of these is genuinely wrong, say so, explain why, and WAIT.
-  3. Record every edit in notes/DEVIATIONS.md: what you changed, why, and what
-     evidence led you there. `git diff` is not a substitute for the reason.
-  4. Commit locally as you go so the diff is reviewable. Do not push.
-  5. If a fix changes what the numbers mean -- shorter sequences, fewer eval runs,
-     a different LR, dropped examples -- say so explicitly in the report. A silent
-     scope reduction reads as a clean result and is the worst outcome here.
+
+    1. Fix the cause, not the symptom. If a launcher passes a flag slime removed,
+       update the flag -- do not delete the feature it enabled.
+    2. **Never change these to make a run start.** Each one silently invalidates the
+       result, so a run that "succeeds" after touching them is worse than no run:
+         - `--loss-mask-type qwen3_5` (anything else trains on terminal output)
+         - the data gate in 20_run_all.sh (contract failures / user-turn leakage == 0)
+         - `max_tokens_per_gpu * cp >= max_seq_len` and the other registry asserts
+         - infrastructure-vs-model-failure separation in 06_eval.py and rl/generate.py
+         - the reference-checkpoint eval, when the model has one
+           If you believe one of these is genuinely wrong, say so, explain why, and WAIT.
+    3. Record every edit in notes/DEVIATIONS.md: what you changed, why, and what
+       evidence led you there. `git diff` is not a substitute for the reason.
+    4. Commit locally as you go so the diff is reviewable. Do not push.
+    5. If a fix changes what the numbers mean -- shorter sequences, fewer eval runs,
+       a different LR, dropped examples -- say so explicitly in the report. A silent
+       scope reduction reads as a clean result and is the worst outcome here.
 
 ## Adapt to the machine you actually have
 
@@ -311,11 +278,11 @@ version from these docs that your system cannot run.
 
 Establish the facts before changing anything:
 
-    nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total --format=csv
-    python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_capability())"
-    python -c "import transformers;print(transformers.__version__)"
-    podman --version; uname -r; ldd --version | head -1
-    bash scripts/00_preflight.sh
+​    nvidia-smi --query-gpu=name,driver_version,compute_cap,memory.total --format=csv
+​    python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_capability())"
+​    python -c "import transformers;print(transformers.__version__)"
+​    podman --version; uname -r; ldd --version | head -1
+​    bash scripts/00_preflight.sh
 
 Then adapt along these axes. Each has a hard floor that is NOT negotiable and a
 choice above it that is yours:
@@ -323,19 +290,25 @@ choice above it that is yours:
   * torch CUDA build <- driver version. Floor: torch must report
     `cuda.is_available() == True`. A wheel newer than the driver fails at init with
     an unhelpful message. `01b_setup_env_verl.sh` maps driver>=570 -> cu128,
+
     >=550 -> cu126, >=525 -> cu121; if that mapping is wrong for your driver, change
-    the mapping.
+    >the mapping.
+
   * kernels <- compute capability. Floor: A100 is sm80, so bf16 only, FA2 not FA3,
     no FP8, no FlashQLA, GDN via fla-Triton or the pure-PyTorch fallback. If
     flash-attn will not build, `sdpa` is correct and slower -- take it and say so.
+
   * transformers >= 5.15.0. This is a FLOOR, not a preference: older versions do not
     know `qwen3_5` at all.
+
   * podman >= 4.4 for task images (31% use Dockerfile heredocs). Below that,
     install the static build; do not work around it by skipping tasks silently.
+
   * sequence length and parallelism <- measured memory, not the tables here. Run
     `scripts/16_smoke_forward_backward.py --seq-len N` on ONE GPU first: it reports
     real peak memory and exits nonzero on a failed check. Edit
     `configs/models.json` from what you measure.
+
   * data layout <- whatever the trainer you end up using actually wants. The
     training target is already fixed and verified in `input_ids` + `loss_mask`
     (scripts/15_export_pretokenized.py), so reshaping it into another container --
@@ -346,15 +319,16 @@ choice above it that is yours:
     exists to remove.
 
 Rules while adapting:
-  1. Change one variable at a time and record what you observed. "Upgraded three
-     things and it works now" is not a result anyone can act on later.
-  2. Prefer the smallest, most local change: a flag over a version bump, a version
-     bump over a code edit, a code edit over a redesign.
-  3. Write every adaptation into notes/DEVIATIONS.md with the system fact that
-     forced it (e.g. "driver 535 -> cu121 wheel, cu128 failed at cuda init").
-  4. If an adaptation changes what the numbers mean -- shorter sequences, fewer eval
-     runs, dropped tasks, sdpa instead of FA2 -- state it in the report. That is the
-     difference between an adapted experiment and an unreported one.
+
+    1. Change one variable at a time and record what you observed. "Upgraded three
+       things and it works now" is not a result anyone can act on later.
+    2. Prefer the smallest, most local change: a flag over a version bump, a version
+       bump over a code edit, a code edit over a redesign.
+    3. Write every adaptation into notes/DEVIATIONS.md with the system fact that
+       forced it (e.g. "driver 535 -> cu121 wheel, cu128 failed at cuda init").
+    4. If an adaptation changes what the numbers mean -- shorter sequences, fewer eval
+       runs, dropped tasks, sdpa instead of FA2 -- state it in the report. That is the
+       difference between an adapted experiment and an unreported one.
 
 ## Hard rules — these are the exceptions to the above
 
@@ -363,7 +337,7 @@ Rules while adapting:
 2. `--qwen-gdn-backend fla`. A100 is SM80; FlashQLA requires SM90+. Do not install
    FlashQLA, and do not "fix" a GDN error by switching to flashqla.
 3. No FP8 anywhere. A100 has no FP8 tensor cores. Never run convert_hf_to_fp8.py.
-3b. If the Megatron/TE/apex stack simply will not build, you have a documented
+   3b. If the Megatron/TE/apex stack simply will not build, you have a documented
    fallback: verl + FSDP via `scripts/30_run_sft_verl.sh`. Read BACKENDS.md first.
    Two things there are mandatory, not optional: `model.use_liger=True` (without a
    fused cross-entropy the 248,320-row logits alone are 16-33 GB at 32K and you will
@@ -407,7 +381,7 @@ GPU memory per card (80GB vs 40GB), NVLink, InfiniBand vs Ethernet, and whether
 there is a shared filesystem are ALL UNKNOWN to whoever wrote the plan. Do not ask
 a human. Run:
 
-    bash scripts/00_preflight.sh --hostfile "$HOSTFILE"
+​    bash scripts/00_preflight.sh --hostfile "$HOSTFILE"
 
 It prints the parallelism row to use. 05_run_sft.sh auto-detects the same things;
 override with MEM_CLASS=80GB|40GB|40GB-alt. Log which row you used and why.
@@ -520,6 +494,7 @@ OpenAIAdapter captures the exact sampled tokens, reward comes from each task's o
 verifier. `RUN_RL=1` chains it after SFT automatically, gated on the SFT verdict.
 
 Prerequisites you must satisfy first (RL_PLAN.md has the measured numbers):
+
   * a DEDICATED rootless Docker daemon (RST_DOCKER_HOST); the scripts refuse to run
     on the default daemon, because task Dockerfiles are untrusted build scripts
   * prebuilt task images: `python scripts/11_prebuild_images.py --taskset
@@ -531,11 +506,12 @@ Prerequisites you must satisfy first (RL_PLAN.md has the measured numbers):
 
 TWO UNVERIFIED, LOAD-BEARING ASSUMPTIONS. Test both before a long run; RL_PLAN.md
 gives the exact smoke test for each:
-  1. that Harbor's LiteLLM client forwards the session id as an `Authorization:
-     Bearer` header (that is how the adapter separates concurrent rollouts)
-  2. that token capture round-trips -- decoded ids must equal the assistant text
-     Harbor recorded. If they do not, the importance ratio is wrong and the run is
-     silently off-policy.
+
+    1. that Harbor's LiteLLM client forwards the session id as an `Authorization:
+       Bearer` header (that is how the adapter separates concurrent rollouts)
+    2. that token capture round-trips -- decoded ids must equal the assistant text
+       Harbor recorded. If they do not, the importance ratio is wrong and the run is
+       silently off-policy.
 
 Expect RL to be SANDBOX-bound, not GPU-bound: roughly 20-60 minutes per GRPO step.
 Budget days. Watch the fraction of groups with zero reward variance -- those cost a
@@ -545,15 +521,16 @@ task tier selection needs revisiting rather than the learning rate.
 ## Report back
 
 Final summary must contain:
-  1. detected hardware and the parallelism row used;
-  2. the STEP 5 CP1-vs-CP2 comparison result;
-  3. final loss, step count, wall-clock, peak per-GPU memory;
-  4. eval table for BOTH your checkpoint and the reference, side by side;
-  5. every deviation from PLAN.md, and every code edit you made, with reasons;
-  5b. the `in_range` verdict per model, and for anything out of range, your analysis
-      of the cause and what you need from a human;
-  6. anything in PLAN.md that turned out to be WRONG — that matters more than a
-     clean run, because the plan's author could not test these steps.
+
+    1. detected hardware and the parallelism row used;
+    2. the STEP 5 CP1-vs-CP2 comparison result;
+    3. final loss, step count, wall-clock, peak per-GPU memory;
+    4. eval table for BOTH your checkpoint and the reference, side by side;
+    5. every deviation from PLAN.md, and every code edit you made, with reasons;
+       5b. the `in_range` verdict per model, and for anything out of range, your analysis
+       of the cause and what you need from a human;
+    6. anything in PLAN.md that turned out to be WRONG — that matters more than a
+       clean run, because the plan's author could not test these steps.
 
 State plainly what you verified versus what you assumed. Never report success for a
 step you skipped.
