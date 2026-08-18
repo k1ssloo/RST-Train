@@ -28,6 +28,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
+| DPO fallback for a container-less pod (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
 
 ## Supported models
 
@@ -61,6 +62,7 @@ render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged
 PLAN.md                        SFT plan; hardware decision tables; risk register
 BACKENDS.md                    slime+Megatron vs verl+FSDP; why others were rejected
 RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates
+DPO_PLAN.md                    the container-free fallback when GRPO cannot roll out
 OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
   00_preflight.sh              detect GPU mem / NVLink / IB / shared FS / RAM → config row
@@ -83,6 +85,11 @@ scripts/
   15_export_pretokenized.py    bake the verified mask into input_ids+loss_mask
   00b_setup_sandbox.sh         find/start a container runtime (rootless podman)
   30_run_sft_verl.sh           PRIMARY backend: verl + FSDP (no Megatron)
+  17_build_dpo_data.py         logged successes/failures on one task → preference pairs
+  18_dpo_ref_logprobs.py       frozen reference logprobs, once, sharded across GPUs
+  19_train_dpo.py              DPO with a step-0 = log 2 calibration gate (FSDP2)
+  dpo_common.py                the one logprob implementation both 18 and 19 use
+  33_run_dpo.sh                the three DPO stages, resumable, container-free
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
 configs/models.json            the model registry
@@ -93,6 +100,8 @@ data/
   sft-v1-cap10/                ★ primary: 10,778 examples = the paper's exact count
   sft-v1/                      ablation: cap 8, 8,886 examples
   rl-sweet/                    5,140 materialized RL tasks (pass-rate 10-90% band)
+  dpo-v2/                      ★ adopted DPO pairs: 2,673 (--per-side 14)
+  dpo-v1/                      first DPO build, --per-side 5 → 1,330; kept for the yield table
   rst-tasks/                   3.7 GB task release (8 tars)
 probe/                         paper.pdf + the upstream sources I read
 .venv/                         local CPU-only env for the data pipeline

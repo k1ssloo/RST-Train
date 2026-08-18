@@ -293,14 +293,17 @@ python scripts/14_make_report.py \
   --verdict-json "$BASE_FOLDER/verdict.json"
 REPORT_RC=$?
 
-# ---------------------------------------------------- 10. RL (gated on the SFT verdict)
+# ------------------------------------ 10. post-SFT training (gated on the SFT verdict)
 # This encodes the operating rule mechanically instead of leaving it to judgement:
 # results in range -> continue; out of range -> stop and wait for a fix. "In range"
 # means the report produced ZERO FAIL findings. WARNs do not block, because a WARN is
 # a caveat for a human to weigh; a FAIL means a number is wrong or untrustworthy, and
 # spending days of sandbox time on top of one is worse than waiting.
-if [[ "$RUN_RL" == "1" ]]; then
-  IN_RANGE=$(python - "$BASE_FOLDER/verdict.json" <<'EOF_PY'
+#
+# Two paths continue from the SFT checkpoint, so both read the same verdict:
+#   10a  agentic GRPO -- on-policy, and every rollout needs a task container
+#   10b  DPO          -- off-policy on logged trajectories, needs no container at all
+IN_RANGE=$(python - "$BASE_FOLDER/verdict.json" <<'EOF_PY'
 import json, sys
 try:
     print("1" if json.load(open(sys.argv[1]))["in_range"] else "0")
@@ -308,9 +311,21 @@ except Exception:
     print("0")
 EOF_PY
 )
+
+# ------------------------------------------------------------- 10a. agentic GRPO
+if [[ "$RUN_RL" == "1" ]]; then
   if [[ "$FIRST_BATCH" != "1" ]]; then
     echo "=== RL SKIPPED: $MODEL_KEY is not in the authorized first batch (27B and 9B only)."
     echo "    Run its SFT, confirm the report is in range, then ask before adding it."
+  elif [[ "$SANDBOX_OK" == "0" ]]; then
+    # Not a soft warning: every rollout in 12_run_grpo.sh builds a task image and
+    # drives tmux inside it, so with nowhere to run containers there is nothing for
+    # GRPO to be on-policy about. Starting it anyway would burn the queue slot to
+    # reach the same conclusion an hour later.
+    echo "=== RL BLOCKED: nowhere to run task containers, and every GRPO rollout needs"
+    echo "    one. Not fixable from inside the training job -- see BACKENDS.md for the"
+    echo "    one-flag ops ask and the off-machine backends."
+    echo "    Falling through to 10b (DPO), which needs no container."
   elif [[ "$IN_RANGE" != "1" ]]; then
     echo "=== RL BLOCKED: the SFT report has FAIL findings, so RL would build on an"
     echo "    untrustworthy checkpoint. Fix the FAILs, re-run the report, then retry."
@@ -352,6 +367,67 @@ EOF_PY
       --out "$BASE_FOLDER/REPORT_RL.md" \
       --verdict-json "$BASE_FOLDER/verdict_rl.json"
     echo "rl report : $BASE_FOLDER/REPORT_RL.md"
+  fi
+fi
+
+# ------------------------------------- 10b. DPO, the container-free fallback for RL
+# See DPO_PLAN.md. RUN_DPO=auto fires this exactly when GRPO was asked for and cannot
+# run, i.e. there is nowhere to run task containers. That is a fallback, not a second
+# opinion: with a working sandbox the same GPU hours are better spent on-policy, and
+# DPO over other policies' logged trajectories cannot discover a strategy no logged
+# trajectory used. RUN_DPO=1 forces it anyway, RUN_DPO=0 disables it.
+RUN_DPO="${RUN_DPO:-auto}"
+if [[ "$RUN_DPO" == "auto" ]]; then
+  if [[ "$RUN_RL" == "1" && "$SANDBOX_OK" == "0" ]]; then RUN_DPO=1; else RUN_DPO=0; fi
+fi
+DPO_TRAJ_ROOT="${DPO_TRAJ_ROOT:-$BASE_FOLDER/rst-trajectories}"
+if [[ "$RUN_DPO" == "1" ]]; then
+  if [[ "$IN_RANGE" != "1" ]]; then
+    # DPO starts FROM this checkpoint and scores divergence from it, so a checkpoint
+    # the report does not trust makes every implicit reward meaningless -- and unlike
+    # a bad eval number, that failure is invisible in the loss curve.
+    echo "=== DPO BLOCKED: the SFT report has FAIL findings, and DPO would use that"
+    echo "    checkpoint as both policy and frozen reference. Fix the FAILs first."
+    python -c "import json;d=json.load(open('$BASE_FOLDER/verdict.json'));[print('      -',r) for r in d.get('fail_reasons',[])]" 2>/dev/null || true
+  elif [[ ! -d "$DPO_TRAJ_ROOT" && ! -f "${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}/dpo_train.parquet" ]]; then
+    echo "=== DPO SKIPPED: no trajectories at $DPO_TRAJ_ROOT and no prebuilt pairs at"
+    echo "    ${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}. scripts/02_download.sh fetches the release; or set"
+    echo "    DPO_TRAJ_ROOT / DPO_PAIRS_DIR."
+  else
+    echo "=== SFT in range, no sandbox -> DPO on logged trajectories (this is NOT GRPO)"
+    # NNODES=1 by default: 19_train_dpo.py is FSDP2-only and torchrun here is local.
+    # For 27B on 8x80GB the launcher's own note applies (fp32 masters + Adam is 444.8
+    # GB sharded, so 8 is tight and 16 is comfortable) -- set DPO_NNODES and
+    # MASTER_ADDR and run this script on each node if 8 OOMs.
+    stage dpo env MODEL_KEY="$MODEL_KEY" MEM_CLASS="$MEM_CLASS" \
+      NNODES="${DPO_NNODES:-1}" NGPUS="${DPO_NGPUS:-${ACTOR_NUM_GPUS_PER_NODE:-8}}" \
+      TRAJ_ROOT="$DPO_TRAJ_ROOT" PAIRS_DIR="${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}" \
+      POLICY="$BASE_FOLDER/out-hf-full" OUT_DIR="$BASE_FOLDER/out-dpo" \
+      MAX_SEQ_LEN="${MAX_SEQ_LEN:-32768}" \
+      bash scripts/33_run_dpo.sh
+    # The only eval available without a container. --base-model is the SFT checkpoint,
+    # not the base model, so the delta attributed to DPO is DPO's alone.
+    dpo_eval_offline() {
+      local args=(--model-path "$BASE_FOLDER/out-dpo/hf"
+                  --base-model "$BASE_FOLDER/out-hf-full"
+                  --out "$BASE_FOLDER/eval/dpo-offline")
+      if [[ -f "$DATA_DIR/rst_sft_holdout.parquet" ]]; then
+        args+=(--holdout "$DATA_DIR/rst_sft_holdout.parquet"
+               --tokenizer "$BASE_FOLDER/$MODEL_DIR_NAME")
+      else
+        args+=(--holdout "$DATA_DIR/pretokenized_holdout.parquet")
+      fi
+      python scripts/06b_eval_offline.py "${args[@]}"
+    }
+    stage dpo_eval_offline dpo_eval_offline
+    # Not folded into REPORT.md: 14_make_report.py checks SFT findings against one
+    # offline eval, and quietly replacing that eval with a DPO one would relabel the
+    # SFT report. These two files are the DPO evidence, and DPO_PLAN.md says how to
+    # read them -- in particular that holdout_reward_accuracy is likelihood ranking
+    # and 0.5 means no preference, so it is not comparable with a benchmark pass rate.
+    echo "dpo summary : $BASE_FOLDER/out-dpo/dpo_training_summary.json"
+    echo "dpo offline : $BASE_FOLDER/eval/dpo-offline/offline_results.json"
+    echo "dpo ckpt    : $BASE_FOLDER/out-dpo/hf  (NOT agentically evaluated -- no sandbox)"
   fi
 fi
 

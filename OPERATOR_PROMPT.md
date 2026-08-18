@@ -9,12 +9,14 @@ You are starting from an EMPTY directory. Bootstrap first:
 ​    git clone https://github.com/k1ssloo/RST-Train.git
 ​    cd RST-Train
 
-Then READ THESE THREE FILES BEFORE RUNNING ANYTHING:
+Then READ THESE FILES BEFORE RUNNING ANYTHING:
 
   - README.md    — status table: what is already verified vs. never executed
   - BACKENDS.md  — READ THIS EARLY. verl + FSDP is the PRIMARY backend, not slime.
   - PLAN.md      — the SFT spec: measured facts, hardware decision tables, risk register
   - RL_PLAN.md   — the RL phase: prerequisites, gates, unverified assumptions
+  - DPO_PLAN.md  — only if RL turns out to be blocked: what to train when no
+                   container will run here. Skip it while GRPO is still viable.
 
 Everything in PLAN.md marked "measured" was verified against the real data and the
 real upstream source trees. Everything marked UNVERIFIED has not been run and is
@@ -284,6 +286,24 @@ action-protocol agreement: parse rate, first-keystroke match, command-list match
 the result to `14_make_report.py --offline-eval`. The report still records a **FAIL**
 on benchmark coverage, deliberately: it must never let "we could not measure it" read
 as "it looks good".
+
+### And the RL phase still has something to train: DPO
+
+Eval is not the only thing a missing container blocks -- GRPO is blocked outright,
+because every rollout needs one. The fallback for the TRAINING half is DPO on the
+logged trajectories, which needs no container, no network and no privilege: the
+release already contains successes and failures on the same tasks, scored by those
+tasks' own verifiers.
+
+    bash scripts/33_run_dpo.sh          # or RUN_DPO=1 bash scripts/20_run_all.sh
+
+`20_run_all.sh` also picks it up on its own (`RUN_DPO=auto`) exactly when `RUN_RL=1`
+and the sandbox check fails, so you do not have to notice. Read `DPO_PLAN.md` before
+quoting any of its numbers -- two things there are easy to get wrong in a report:
+DPO is **off-policy** (it cannot discover a strategy no logged trajectory used, so it
+is never "our RL result"), and `holdout_reward_accuracy` is **likelihood ranking**
+where 0.5 means no preference, not a pass rate. A DPO checkpoint with no agentic eval
+is still an untested checkpoint.
 
 ## The one-command path
 
@@ -605,6 +625,11 @@ Expect RL to be SANDBOX-bound, not GPU-bound: roughly 20-60 minutes per GRPO ste
 Budget days. Watch the fraction of groups with zero reward variance -- those cost a
 full set of sandboxes and contribute nothing to the gradient; if it stays high, the
 task tier selection needs revisiting rather than the learning rate.
+
+If the sandbox never materializes, do not leave the RL phase empty and do not fake it
+with GRPO on a machine that cannot roll out. Run the DPO fallback instead
+(`DPO_PLAN.md`, `scripts/33_run_dpo.sh`) and report it as what it is: off-policy
+preference training on logged trajectories, agentically unevaluated.
 
 ## Report back
 

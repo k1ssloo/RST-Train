@@ -13,6 +13,14 @@ outline.
 | GRPO rollout function (`rl/generate.py`) | ⚠️ written against the real slime API; **never executed** |
 | Image prebuild (`scripts/11_prebuild_images.py`) | ⚠️ written; **no image has been built yet** |
 | GRPO launcher (`scripts/12_run_grpo.sh`) | ⚠️ written; needs cluster |
+| **DPO fallback** (`DPO_PLAN.md`, `scripts/33_run_dpo.sh`) | ✅ **run end to end** on 0.8B: 2,673 pairs built, step-0 loss = log 2 exactly. Needs **no container** |
+
+Everything on this page needs a sandbox. If there is nowhere to run task containers,
+`DPO_PLAN.md` is the path that still trains something from this data — off-policy, on
+logged trajectories, no container and no privilege. It is a fallback, not a
+substitute: it reweights behaviour already in other policies' trajectories and cannot
+discover a strategy none of them used. `20_run_all.sh` picks it automatically
+(`RUN_DPO=auto`) exactly when `RUN_RL=1` and the sandbox check fails.
 
 `rl/generate.py` is written against APIs I read in slime's source
 (`slime/agent/adapters/common.py`, `slime/utils/types.py`,
@@ -228,7 +236,7 @@ throughput after correctness is established.
 | Degenerate all-same-reward groups waste the whole budget | high | tier selection (§3); log the degenerate-group fraction every step and drop tasks that stay degenerate |
 | Infra failures mislabeled as reward 0 | high | narrow marker list + abort path in `rl/generate.py`; watch the abort-reason histogram |
 | Sandbox throughput dominates | high | accepted and budgeted (§4); consider a separate CPU node pool for sandboxes |
-| **The pod cannot run containers at all** (AppArmor `docker-default` denies `mount(2)`; observed, not hypothetical) | **high** | `00b_setup_sandbox.sh --diagnose` identifies it in one command. Two independent unblocks: the one-flag ops ask `--security-opt apparmor=unconfined`, and `RST_HARBOR_ENV=daytona\|e2b\|modal\|<remote daemon>\|k8s`, which needs no local privilege. Pursue both; SFT is unaffected either way |
+| **The pod cannot run containers at all** (AppArmor `docker-default` denies `mount(2)`; observed, not hypothetical) | **high** | `00b_setup_sandbox.sh --diagnose` identifies it in one command. Three independent unblocks: the one-flag ops ask `--security-opt apparmor=unconfined`; `RST_HARBOR_ENV=daytona\|e2b\|modal\|<remote daemon>\|k8s`, which needs no local privilege; and — if neither lands — the DPO fallback (`DPO_PLAN.md`), which needs no container at all but is off-policy and leaves the checkpoint agentically unevaluated. Pursue the first two; SFT is unaffected either way |
 | Provider concurrency quota exceeded on an off-machine backend | med | `RST_MAX_SANDBOXES` defaults to a conservative 8 there instead of a cores/RAM formula; 429s surface in the abort-reason histogram as infra failures |
 | 710 compose tasks are heavier / flakier | med | they are tagged in the manifest; drop them for the first run if the abort rate is high |
 | Docker disk exhaustion mid-run | med | `--sample` probe first; `docker system prune` policy between runs |
