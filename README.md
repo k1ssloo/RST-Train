@@ -41,6 +41,7 @@ scripts/
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
+  13_upload_hf.py              publish the derived datasets (sanitizes local paths)
 rl/generate.py                 slime --custom-generate-function-path implementation
 data/
   rst-trajectories/            23 GB source release (66 tars, all verified)
@@ -55,7 +56,23 @@ probe/                         paper.pdf + the upstream sources I read
 
 ## Getting the data
 
-`data/` is **not in this repo** (27 GB). Rebuild it from the public release — the
+The derived datasets are published:
+
+| dataset | contents |
+|---|---|
+| [`NiuNiu0110/RST-SFT-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-SFT-Qwen3.5-27B) | SFT conversations, configs `cap10` (10,778 ex) and `cap8` (8,886 ex) |
+| `NiuNiu0110/RST-RL-Taskset` (private) | GRPO task selection metadata, 5,140 `sweet`-tier tasks |
+
+```python
+from datasets import load_dataset
+ds = load_dataset("NiuNiu0110/RST-SFT-Qwen3.5-27B", "cap10", split="train")
+```
+
+The RL taskset is metadata only — task *bodies* are rebuilt from upstream with
+`scripts/10_build_rl_taskset.py --materialize` (~15 s), which also rewrites
+`metadata.task_dir` to local absolute paths.
+
+`data/` is **not in this repo** (27 GB). To rebuild everything from the public release — the
 whole pipeline is deterministic, and `manifest.json` records every count so you can
 check you got the same thing:
 
