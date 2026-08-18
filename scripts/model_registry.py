@@ -36,14 +36,27 @@ def load() -> dict:
     return json.loads(REGISTRY.read_text(encoding="utf-8"))
 
 
-def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len: int) -> dict:
+def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len: int,
+            phase: str = "sft") -> dict:
     reg = load()
     models, defaults = reg["models"], reg.get("defaults", {})
     if key not in models:
         sys.exit(f"unknown model key {key!r}. Known: {', '.join(sorted(models))}")
     m = models[key]
 
-    par = m["parallelism"]
+    # RL colocates the rollout engine with the actor, so it gets its own rows when
+    # present. Falling back to the SFT rows is allowed but flagged: it has not been
+    # sized for a resident SGLang engine.
+    rl_fallback = ""
+    if phase == "rl":
+        par = m.get("rl_parallelism")
+        if not par:
+            par = m["parallelism"]
+            rl_fallback = (f"{key} has no rl_parallelism rows; falling back to the SFT rows. "
+                           f"Those were NOT sized for a colocated rollout engine -- expect to "
+                           f"lower max_tokens_per_gpu or raise CP.")
+    else:
+        par = m["parallelism"]
     if mem_class not in par:
         # 40GB-alt and friends fall back to the 40GB row
         fallback = "40GB" if mem_class.startswith("40") else "80GB"
@@ -79,6 +92,7 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         sys.exit(f"invalid config for {key} @ {mem_class} on {gpus} GPUs:\n  - " + "\n  - ".join(problems))
 
     out = {
+        "PHASE": phase,
         "MODEL_KEY": key,
         "HF_REPO": m["hf_repo"],
         "MODEL_DIR_NAME": m["hf_repo"].split("/")[-1],
@@ -107,10 +121,16 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "DECODER_LAST_PP_LAYERS": m.get("decoder_last_pipeline_num_layers", 0),
         "MIN_GPUS": m.get("min_gpus", gpus),
         "SERVE_CHAT_TEMPLATE_REPO": m.get("serve_chat_template_repo", ""),
+        "FIRST_BATCH": int(bool(m.get("first_batch"))),
+        "ROLLOUT_GPUS_PER_ENGINE": p.get("rollout_gpus_per_engine", 2),
+        "ROLLOUT_MAX_RESPONSE_LEN": p.get("rollout_max_response_len", 16384),
     }
     extra = list(m.get("moe_flags") or []) + list(m.get("moe_optional_flags") or [])
     out["MOE_FLAGS"] = " ".join(extra)
-    out["_unvalidated"] = m.get("unvalidated", "")
+    unvalidated = m.get("unvalidated", "")
+    if rl_fallback:
+        unvalidated = (unvalidated + " " + rl_fallback).strip()
+    out["_unvalidated"] = unvalidated
     out["_role"] = m.get("role", "")
     out["_paper_reference"] = m.get("paper_reference")
     return out
@@ -123,6 +143,7 @@ def main() -> int:
     ap.add_argument("--gpus", type=int, default=32)
     ap.add_argument("--gpus-per-node", type=int, default=8)
     ap.add_argument("--max-seq-len", type=int, default=32768)
+    ap.add_argument("--phase", default="sft", choices=["sft", "rl"])
     ap.add_argument("--shell", action="store_true", help="emit eval-able shell assignments")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true")
@@ -142,7 +163,8 @@ def main() -> int:
 
     if not args.key:
         sys.exit("--key required (or --list)")
-    cfg = resolve(args.key, args.mem_class, args.gpus, args.gpus_per_node, args.max_seq_len)
+    cfg = resolve(args.key, args.mem_class, args.gpus, args.gpus_per_node, args.max_seq_len,
+                  phase=args.phase)
 
     if args.json:
         print(json.dumps(cfg, indent=2))

@@ -23,6 +23,8 @@ PER_GROUP="${PER_GROUP:-10}"
 EVAL_RUNS="${EVAL_RUNS:-3}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-tb-hard,tb2}"
 EVAL_REFERENCE="${EVAL_REFERENCE:-1}"   # also score the released SFT ckpt to validate the harness
+EVAL_BASE="${EVAL_BASE:-1}"             # also score the UN-finetuned base model on the same harness
+RUN_RL="${RUN_RL:-0}"                   # 1 = continue into agentic GRPO if SFT lands in range
 STAGE_DIR="$BASE_FOLDER/.stage"
 mkdir -p "$STAGE_DIR" "$BASE_FOLDER/logs"
 SKIP_STAGES="${SKIP_STAGES:-}"
@@ -142,6 +144,20 @@ eval_candidate() {
 }
 stage eval_candidate eval_candidate
 
+# The base model on the SAME harness. For 4B/9B/35B this is the ONLY thing that can
+# answer "did fine-tuning help?", since the paper published no numbers for them. Even
+# for 27B it is the better comparison, because it cancels harness differences.
+eval_base() {
+  [[ "$EVAL_BASE" == "1" ]] || { echo "base eval disabled"; return 0; }
+  python scripts/06_eval.py --model-path "$BASE_FOLDER/$MODEL_DIR_NAME" \
+    "${SERVE_TEMPLATE_ARG[@]}" \
+    --tp "${EVAL_TP:-$SERVE_TP}" --served-name rst-base --label base \
+    --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
+    --n-concurrent "${EVAL_CONCURRENCY:-8}" \
+    --out "$BASE_FOLDER/eval/base"
+}
+stage eval_base eval_base
+
 # Scoring the authors' released checkpoint through the SAME harness is what makes
 # our own number interpretable. If the reference does not land near the paper's
 # 47.94 / 28.33, the harness is wrong -- not the training.
@@ -195,13 +211,77 @@ python scripts/14_make_report.py \
   --run-config "$BASE_FOLDER/run_config.json" \
   --data-manifest "$DATA_DIR/manifest.json" \
   --eval "mine=$BASE_FOLDER/eval/mine/results.json" \
+  --eval "base=$BASE_FOLDER/eval/base/results.json" \
   --eval "reference=$BASE_FOLDER/eval/reference/results.json" \
-  --out "$BASE_FOLDER/REPORT.md"
+  --out "$BASE_FOLDER/REPORT.md" \
+  --verdict-json "$BASE_FOLDER/verdict.json"
 REPORT_RC=$?
+
+# ---------------------------------------------------- 10. RL (gated on the SFT verdict)
+# This encodes the operating rule mechanically instead of leaving it to judgement:
+# results in range -> continue; out of range -> stop and wait for a fix. "In range"
+# means the report produced ZERO FAIL findings. WARNs do not block, because a WARN is
+# a caveat for a human to weigh; a FAIL means a number is wrong or untrustworthy, and
+# spending days of sandbox time on top of one is worse than waiting.
+if [[ "$RUN_RL" == "1" ]]; then
+  IN_RANGE=$(python - "$BASE_FOLDER/verdict.json" <<'EOF_PY'
+import json, sys
+try:
+    print("1" if json.load(open(sys.argv[1]))["in_range"] else "0")
+except Exception:
+    print("0")
+EOF_PY
+)
+  if [[ "$FIRST_BATCH" != "1" ]]; then
+    echo "=== RL SKIPPED: $MODEL_KEY is not in the authorized first batch (27B and 9B only)."
+    echo "    Run its SFT, confirm the report is in range, then ask before adding it."
+  elif [[ "$IN_RANGE" != "1" ]]; then
+    echo "=== RL BLOCKED: the SFT report has FAIL findings, so RL would build on an"
+    echo "    untrustworthy checkpoint. Fix the FAILs, re-run the report, then retry."
+    python -c "import json;d=json.load(open('$BASE_FOLDER/verdict.json'));[print('      -',r) for r in d.get('fail_reasons',[])]" 2>/dev/null || true
+  else
+    echo "=== SFT in range -> continuing into agentic GRPO"
+    stage rl env MODEL_KEY="$MODEL_KEY" MEM_CLASS="$MEM_CLASS" \
+      INIT_CKPT="$BASE_FOLDER/$RUN_NAME" RUN_NAME="${MODEL_KEY}-rst-grpo-v1" \
+      TASKSET="${TASKSET:-$BASE_FOLDER/rl-sweet}" bash scripts/12_run_grpo.sh
+    # Re-evaluate the RL checkpoint and regenerate the report with both stages.
+    rl_export_eval() {
+      local latest
+      latest=$(find "$BASE_FOLDER/${MODEL_KEY}-rst-grpo-v1" -maxdepth 1 -type d -name 'iter_*' | sort | tail -1)
+      [[ -n "$latest" ]] || { echo "no RL checkpoint found" >&2; return 1; }
+      MODEL_KEY="$MODEL_KEY" bash scripts/04_convert_ckpt.sh to_hf "$latest" "$BASE_FOLDER/out-hf-rl" || return 1
+      if [[ "$HAS_VISION" == "1" ]]; then
+        python scripts/07_restore_vision.py --trained "$BASE_FOLDER/out-hf-rl" \
+          --original "$BASE_FOLDER/$MODEL_DIR_NAME" --out "$BASE_FOLDER/out-hf-rl-full" || return 1
+      else
+        ln -sfn "$BASE_FOLDER/out-hf-rl" "$BASE_FOLDER/out-hf-rl-full"
+      fi
+      python scripts/06_eval.py --model-path "$BASE_FOLDER/out-hf-rl-full" \
+        "${SERVE_TEMPLATE_ARG[@]}" \
+        --tp "${EVAL_TP:-$SERVE_TP}" --served-name rst-rl --label rl \
+        --benchmarks "$EVAL_BENCHMARKS" --runs "$EVAL_RUNS" \
+        --n-concurrent "${EVAL_CONCURRENCY:-8}" --out "$BASE_FOLDER/eval/rl"
+    }
+    stage rl_eval rl_export_eval
+    python scripts/14_make_report.py \
+      --model-key "$MODEL_KEY" \
+      --run-dir "$BASE_FOLDER/${MODEL_KEY}-rst-grpo-v1" \
+      --run-config "$BASE_FOLDER/run_config.json" \
+      --data-manifest "$DATA_DIR/manifest.json" \
+      --eval "mine=$BASE_FOLDER/eval/rl/results.json" \
+      --eval "sft=$BASE_FOLDER/eval/mine/results.json" \
+      --eval "base=$BASE_FOLDER/eval/base/results.json" \
+      --eval "reference=$BASE_FOLDER/eval/reference/results.json" \
+      --out "$BASE_FOLDER/REPORT_RL.md" \
+      --verdict-json "$BASE_FOLDER/verdict_rl.json"
+    echo "rl report : $BASE_FOLDER/REPORT_RL.md"
+  fi
+fi
 
 echo
 echo "================================================================"
 echo "report : $BASE_FOLDER/REPORT.md"
+echo "verdict: $BASE_FOLDER/verdict.json"
 [[ -n "$FAILED_STAGE" ]] && echo "FAILED STAGE: $FAILED_STAGE (see report + logs)"
 echo "report generator exit: $REPORT_RC  (2 = at least one FAIL finding)"
 echo "================================================================"

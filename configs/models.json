@@ -16,7 +16,8 @@
     "    targets start with '\\n</think>\\n\\n', which lines up with the latter. Hence",
     "    serve_enable_thinking=true for 0.8B only -- otherwise the block is doubled at",
     "    serving time and eval silently degrades.",
-    "  - Param counts are from each repo's safetensors index total_size / 2 (bf16)."
+    "  - Param counts are from each repo's safetensors index total_size / 2 (bf16).",
+    "  - first_batch=true marks the models authorized for the initial SFT+RL run (27B and 9B). Others are SFT-only until the first batch lands in range."
   ],
   "defaults": {
     "max_seq_len": 32768,
@@ -121,7 +122,26 @@
           "cp": 2,
           "max_tokens_per_gpu": 16384
         }
-      }
+      },
+      "rl_parallelism": {
+        "80GB": {
+          "tp": 2,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384,
+          "rollout_gpus_per_engine": 1,
+          "rollout_max_response_len": 16384
+        },
+        "40GB": {
+          "tp": 4,
+          "pp": 1,
+          "cp": 2,
+          "max_tokens_per_gpu": 16384,
+          "rollout_gpus_per_engine": 2,
+          "rollout_max_response_len": 8192
+        }
+      },
+      "first_batch": true
     },
     "qwen3.5-27b": {
       "hf_repo": "Qwen/Qwen3.5-27B",
@@ -158,7 +178,26 @@
           "cp": 4,
           "max_tokens_per_gpu": 8192
         }
-      }
+      },
+      "rl_parallelism": {
+        "80GB": {
+          "tp": 4,
+          "pp": 2,
+          "cp": 4,
+          "max_tokens_per_gpu": 8192,
+          "rollout_gpus_per_engine": 2,
+          "rollout_max_response_len": 16384
+        },
+        "40GB": {
+          "tp": 8,
+          "pp": 1,
+          "cp": 4,
+          "max_tokens_per_gpu": 8192,
+          "rollout_gpus_per_engine": 4,
+          "rollout_max_response_len": 8192
+        }
+      },
+      "first_batch": true
     },
     "qwen3.5-35b-a3b": {
       "hf_repo": "Qwen/Qwen3.5-35B-A3B",

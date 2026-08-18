@@ -238,6 +238,45 @@ def check_training(findings: Findings, training: dict, manifest: dict | None, co
                 findings.add(OK, "training", "step count", f"~{observed} steps (expected ~{expected})")
 
 
+def check_vs_base(findings: Findings, evals: dict[str, dict | None], tolerance: float = 2.0) -> None:
+    """Compare the fine-tuned model to the SAME base model measured on the SAME harness.
+
+    This is the only comparison available for models the paper never published, and
+    it is a better comparison than the paper's numbers even for 27B, because it
+    cancels out every harness difference.
+    """
+    base = evals.get("base")
+    cand = next((v for k, v in evals.items() if k not in ("base",) and "ref" not in k.lower()), None)
+    if not base:
+        findings.add(WARN, "eval", "base comparison",
+                     "no base-model eval supplied, so 'did SFT help?' cannot be answered from "
+                     "measurement. Run 06_eval.py on the un-finetuned checkpoint with --label base.")
+        return
+    if not cand:
+        findings.add(WARN, "eval", "base comparison", "no candidate eval to compare against base")
+        return
+    for name, b in (base.get("benchmarks") or {}).items():
+        c = (cand.get("benchmarks") or {}).get(name)
+        if not c or b.get("status") != "scored" or c.get("status") != "scored":
+            continue
+        bm, cm = b.get("pass_rate_mean"), c.get("pass_rate_mean")
+        if not isinstance(bm, (int, float)) or not isinstance(cm, (int, float)):
+            continue
+        delta = cm - bm
+        # Noise band: combine the two stds rather than using a flat threshold.
+        noise = max(tolerance, (b.get("pass_rate_std") or 0) + (c.get("pass_rate_std") or 0))
+        if delta < -noise:
+            findings.add(FAIL, "eval", f"{name} vs measured base",
+                         f"{cm} vs base {bm} ({delta:+.2f}), worse than the {noise:.1f}-point noise "
+                         f"band. Fine-tuning made this model worse on its own harness.")
+        elif delta < 0:
+            findings.add(WARN, "eval", f"{name} vs measured base",
+                         f"{cm} vs base {bm} ({delta:+.2f}) -- inside noise, but no gain")
+        else:
+            findings.add(OK, "eval", f"{name} vs measured base",
+                         f"{cm} vs base {bm} ({delta:+.2f})")
+
+
 def check_eval(findings: Findings, label: str, data: dict | None, is_reference: bool,
                model_key: str | None = None) -> None:
     comparable = has_paper_reference(model_key)
@@ -478,6 +517,8 @@ def main() -> int:
     p.add_argument("--eval", action="append", default=[], metavar="LABEL=PATH",
                    help="repeatable, e.g. --eval mine=.../results.json --eval reference=...")
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--verdict-json", type=Path, default=None,
+                   help="also write a small machine-readable verdict for orchestration")
     args = p.parse_args()
 
     config = read_json(args.run_config)
@@ -501,12 +542,30 @@ def main() -> int:
     model_key = args.model_key or (config or {}).get("model_key")
     for label, data in evals.items():
         check_eval(findings, label, data, is_reference=("ref" in label.lower()), model_key=model_key)
+    check_vs_base(findings, evals)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(args, config, manifest, training, evals, findings), encoding="utf-8")
 
-    print(f"verdict={findings.worst()}  FAIL={findings.count(FAIL)} WARN={findings.count(WARN)} "
-          f"OK={findings.count(OK)}")
+    # "In range" is deliberately narrow: no FAIL findings at all. WARNs are for a
+    # human to weigh; FAILs mean a number is either wrong or untrustworthy, and
+    # nothing downstream (least of all RL) should be built on top of one.
+    fails = [r for r in findings.rows if r[0] == FAIL]
+    in_range = not fails
+    if args.verdict_json:
+        args.verdict_json.parent.mkdir(parents=True, exist_ok=True)
+        args.verdict_json.write_text(json.dumps({
+            "verdict": findings.worst(),
+            "in_range": in_range,
+            "n_fail": len(fails),
+            "n_warn": findings.count(WARN),
+            "model_key": model_key,
+            "fail_reasons": [f"[{a}] {c}: {d}" for _, a, c, d in fails],
+            "report": str(args.out),
+        }, indent=2) + "\n", encoding="utf-8")
+
+    print(f"verdict={findings.worst()} in_range={in_range}  FAIL={findings.count(FAIL)} "
+          f"WARN={findings.count(WARN)} OK={findings.count(OK)}")
     for level, area, check, detail in findings.rows:
         if level in (FAIL, WARN):
             print(f"  {level:4s} [{area}] {check}: {detail[:150]}")

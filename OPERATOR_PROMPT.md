@@ -28,9 +28,10 @@ your job to validate. Do not assume anything beyond that.
 
 ## Mission
 
-An HF-format checkpoint that loads under SGLang, benchmarked on Terminal-Bench-Hard
-and Terminal-Bench 2, plus `$BASE_FOLDER/REPORT.md` with your analysis. Training and
-evaluation are chained automatically; you supervise and diagnose.
+For qwen3.5-27b AND qwen3.5-9b: an SFT checkpoint, then an RL checkpoint, each
+benchmarked on Terminal-Bench-Hard and Terminal-Bench 2 against the same base model,
+plus a markdown report per stage with YOUR analysis of anything abnormal. Training,
+evaluation and reporting are chained automatically; you supervise, fix, and diagnose.
 
 Reference numbers below apply to Qwen3.5-27B ONLY (paper Tables 3–4, pass rate %,
 tb-hard / tb2). No other size has published numbers:
@@ -53,12 +54,38 @@ configs/models.json, which VALIDATES the config and refuses impossible ones.
   qwen3.5-27b      27.78B ~150 min/epoch   32  GPUs   the paper's model
   qwen3.5-35b-a3b  35.95B  ~40 min/epoch    8+ GPUs   MoE, ~3B active
 
-RECOMMENDED ORDER, and the reasoning: run qwen3.5-0.8b end-to-end FIRST. It is the
-same architecture as 27B, so it validates the two unverified high-risk steps
-(HF<->Megatron conversion tolerating the ViT/MTP tensors, and CP correctness on the
-gated-delta-net layers) at negligible cost. Then qwen3.5-27b, because it is the
-only model with published numbers and therefore the only one that can validate your
-eval harness. Then 4b/9b/35b-a3b for cheap iteration.
+### FIRST BATCH — what you are authorized to run now
+
+Run **qwen3.5-27b and qwen3.5-9b: SFT, then RL, then eval** for both. These two are
+marked first_batch=true in the registry. Nothing else is authorized yet.
+
+    MODEL_KEY=qwen3.5-27b RUN_RL=1 bash scripts/20_run_all.sh
+    MODEL_KEY=qwen3.5-9b  RUN_RL=1 bash scripts/20_run_all.sh
+
+Optional but strongly advised first: one throwaway qwen3.5-0.8b SFT run
+(`MODEL_KEY=qwen3.5-0.8b`, ~5 min/epoch, 2 GPUs). Same architecture as 27B, so it
+clears the two unverified high-risk steps -- HF<->Megatron conversion tolerating the
+ViT/MTP tensors, and CP correctness on the gated-delta-net layers -- for almost
+nothing. Failing those on 0.8B costs minutes; failing them after booking 32 GPUs for
+27B costs a day. Do not report 0.8B numbers as a result; it is a smoke test.
+
+### After the first batch: continue or wait
+
+`20_run_all.sh` writes `$BASE_FOLDER/verdict.json` with `in_range: true|false`.
+"In range" means the report produced **zero FAIL findings**. WARNs do not block --
+a WARN is a caveat for a human to weigh; a FAIL means a number is wrong or
+untrustworthy.
+
+  * **In range** -> proceed on your own initiative: continue to the next model
+    (4b, 35b-a3b) and keep training. You do not need to ask.
+  * **Out of range** -> STOP that model, write the analysis into the report, and
+    WAIT for a human. Do not start another model's long run on top of an
+    unexplained failure, and do not "fix" it by loosening a check.
+
+The RL stage enforces this itself: it refuses to start if the SFT verdict has FAILs,
+and refuses entirely for models not in the first batch. That is deliberate -- RL
+costs days of sandbox time, so it must not be built on a checkpoint you cannot
+trust.
 
 All five share one byte-identical tokenizer AND one training-time chat-template
 render, so the SAME dataset and --loss-mask-type qwen3_5 apply to all of them. Do
@@ -116,7 +143,40 @@ If you do rebuild (`scripts/03_build_sft_data.py`), you MUST then run
 `user-turn leakage : 0`. Anything else is a stop condition — the training target
 would be wrong and no amount of training fixes that.
 
-## Hard rules — violating any of these silently corrupts the run
+## You may modify the code to get training running
+
+This repository was written without access to your cluster, and several steps have
+never been executed. **You are authorized to edit any file in it** -- scripts,
+configs, the registry, even the rollout code -- to make training start and keep
+running. Do not sit blocked waiting for a human on a plumbing problem. Expected and
+entirely fine to fix yourself:
+
+  * launcher/env bugs, wrong paths, missing exports, quoting, arg-order problems
+  * NCCL / Ray / Docker / filesystem / permission issues
+  * OOM: apply the fallback ladder, or edit configs/models.json parallelism rows
+  * a slime or Megatron flag that changed name or no longer exists
+  * a pinned wheel that will not build for your CUDA/driver combination
+  * anything in configs/models.json that is simply wrong for your hardware
+
+Rules when you do:
+  1. Fix the cause, not the symptom. If a launcher passes a flag slime removed,
+     update the flag -- do not delete the feature it enabled.
+  2. **Never change these to make a run start.** Each one silently invalidates the
+     result, so a run that "succeeds" after touching them is worse than no run:
+       - `--loss-mask-type qwen3_5` (anything else trains on terminal output)
+       - the data gate in 20_run_all.sh (contract failures / user-turn leakage == 0)
+       - `max_tokens_per_gpu * cp >= max_seq_len` and the other registry asserts
+       - infrastructure-vs-model-failure separation in 06_eval.py and rl/generate.py
+       - the reference-checkpoint eval, when the model has one
+     If you believe one of these is genuinely wrong, say so, explain why, and WAIT.
+  3. Record every edit in notes/DEVIATIONS.md: what you changed, why, and what
+     evidence led you there. `git diff` is not a substitute for the reason.
+  4. Commit locally as you go so the diff is reviewable. Do not push.
+  5. If a fix changes what the numbers mean -- shorter sequences, fewer eval runs,
+     a different LR, dropped examples -- say so explicitly in the report. A silent
+     scope reduction reads as a clean result and is the worst outcome here.
+
+## Hard rules — these are the exceptions to the above
 
 1. `--loss-mask-type qwen3_5`. NEVER the default `qwen`. The default mis-segments
    this chat template and trains on terminal output and the harness prompt.
@@ -251,15 +311,34 @@ achieved by disabling a check is not.
 - Log deviations to `notes/DEVIATIONS.md` as you go, and per-step progress to
   `notes/RUN_LOG.md`.
 
-## Phase 2 (do NOT start on your own initiative)
+## RL — in scope for 27B and 9B, read RL_PLAN.md first
 
-RL is specified in RL_PLAN.md with working code (rl/generate.py, scripts/10–12):
-agentic GRPO where Harbor + Terminus-2 drive a Docker sandbox per rollout, slime's
-OpenAIAdapter captures exact sampled tokens, and reward comes from each task's own
-verifier. Two load-bearing things there are unverified: whether Harbor's LiteLLM
-client forwards the session id as an `Authorization: Bearer` header, and whether
-token capture round-trips. RL_PLAN.md names the smoke test for each. Report SFT
-results and wait for instruction.
+Agentic GRPO: Harbor + Terminus-2 drive a Docker sandbox per rollout, slime's
+OpenAIAdapter captures the exact sampled tokens, reward comes from each task's own
+verifier. `RUN_RL=1` chains it after SFT automatically, gated on the SFT verdict.
+
+Prerequisites you must satisfy first (RL_PLAN.md has the measured numbers):
+  * a DEDICATED rootless Docker daemon (RST_DOCKER_HOST); the scripts refuse to run
+    on the default daemon, because task Dockerfiles are untrusted build scripts
+  * prebuilt task images: `python scripts/11_prebuild_images.py --taskset
+    $BASE_FOLDER/rl-sweet --sample 40` FIRST to measure real disk via
+    `docker system df`, then the full build. 99% of task Dockerfiles install
+    packages at build time, so lazy building makes every rollout network-bound.
+  * `ADAPTER_PUBLIC_HOST` reachable from the Harbor process
+  * `pip install harbor==0.21.0` plus the tmux patch noted in RL_PLAN.md
+
+TWO UNVERIFIED, LOAD-BEARING ASSUMPTIONS. Test both before a long run; RL_PLAN.md
+gives the exact smoke test for each:
+  1. that Harbor's LiteLLM client forwards the session id as an `Authorization:
+     Bearer` header (that is how the adapter separates concurrent rollouts)
+  2. that token capture round-trips -- decoded ids must equal the assistant text
+     Harbor recorded. If they do not, the importance ratio is wrong and the run is
+     silently off-policy.
+
+Expect RL to be SANDBOX-bound, not GPU-bound: roughly 20-60 minutes per GRPO step.
+Budget days. Watch the fraction of groups with zero reward variance -- those cost a
+full set of sandboxes and contribute nothing to the gradient; if it stays high, the
+task tier selection needs revisiting rather than the learning rate.
 
 ## Report back
 
@@ -268,7 +347,9 @@ Final summary must contain:
   2. the STEP 5 CP1-vs-CP2 comparison result;
   3. final loss, step count, wall-clock, peak per-GPU memory;
   4. eval table for BOTH your checkpoint and the reference, side by side;
-  5. every deviation from PLAN.md;
+  5. every deviation from PLAN.md, and every code edit you made, with reasons;
+  5b. the `in_range` verdict per model, and for anything out of range, your analysis
+      of the cause and what you need from a human;
   6. anything in PLAN.md that turned out to be WRONG — that matters more than a
      clean run, because the plan's author could not test these steps.
 

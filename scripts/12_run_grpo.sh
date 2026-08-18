@@ -31,8 +31,9 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 3
 : "${ADAPTER_PUBLIC_HOST:=$MASTER_ADDR}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 TASKSET="${TASKSET:-$BASE_FOLDER/rl-sweet}"
-INIT_CKPT="${INIT_CKPT:-$BASE_FOLDER/qwen35-27b-rst-sft-v1}"
-RUN_NAME="${RUN_NAME:-qwen35-27b-rst-grpo-v1}"
+MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
+INIT_CKPT="${INIT_CKPT:-$BASE_FOLDER/${MODEL_KEY}-rst-sft-v1}"
+RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-grpo-v1}"
 
 export PYTHONUNBUFFERED=1
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
@@ -46,16 +47,19 @@ GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 HAS_NVLINK=$(( NVLINK_COUNT > 0 ? 1 : 0 ))
 [[ "$COMPUTE_CAP" == "8.0" ]] && GDN_BACKEND=fla || GDN_BACKEND="${GDN_BACKEND:-fla}"
-
-# RL needs the rollout engine resident alongside training weights (--colocate),
-# so it is tighter than SFT. Keep slime's shipped CP4 row on 80GB, and drop the
-# response budget on 40GB rather than weakening parallelism.
-if (( GPU_MEM_MIB > 70000 )); then
-  TP=4; PP=2; CP=4; MAX_TOKENS_PER_GPU=8192;  MAX_RESP=16384; ROLLOUT_GPUS_PER_ENGINE=2
-else
-  TP=8; PP=2; CP=2; MAX_TOKENS_PER_GPU=4096;  MAX_RESP=8192;  ROLLOUT_GPUS_PER_ENGINE=4
+if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
+  if (( GPU_MEM_MIB > 70000 )); then MEM_CLASS=80GB; else MEM_CLASS=40GB; fi
 fi
-echo "=== cc=$COMPUTE_CAP mem=${GPU_MEM_MIB}MiB TP=$TP PP=$PP CP=$CP gdn=$GDN_BACKEND"
+
+# RL parallelism comes from the registry's rl_* rows (colocated rollout engine, so
+# tighter than SFT) and is validated there.
+TOTAL_GPUS=$(( ACTOR_NUM_NODES * ACTOR_NUM_GPUS_PER_NODE ))
+eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --phase rl --mem-class "$MEM_CLASS" \
+          --gpus "$TOTAL_GPUS" --gpus-per-node "$ACTOR_NUM_GPUS_PER_NODE" \
+          --max-seq-len "${RL_MAX_SEQ_LEN:-32768}" --shell)"
+MAX_RESP="${ROLLOUT_MAX_RESPONSE_LEN}"
+echo "=== model=$MODEL_KEY (${PARAMS_B}B) cc=$COMPUTE_CAP mem=${GPU_MEM_MIB}MiB gdn=$GDN_BACKEND"
+echo "=== TP=$TP PP=$PP CP=$CP DP=$DP EP=$EP mtpg=$MAX_TOKENS_PER_GPU resp=$MAX_RESP"
 
 # ---- rollout capacity: sandboxes are the bottleneck, not the GPUs ------------
 CPU_CORES=$(nproc)
@@ -67,10 +71,10 @@ MAX_SANDBOXES="${RST_MAX_SANDBOXES:-$(( CPU_CORES / 4 < RAM_GB / 8 ? CPU_CORES /
 (( MAX_SANDBOXES < 1 )) && MAX_SANDBOXES=1
 echo "=== cores=$CPU_CORES ram=${RAM_GB}G -> RST_MAX_SANDBOXES=$MAX_SANDBOXES per node"
 
-source "${SLIME_DIR}/scripts/models/qwen3.5-27B.sh"
+source "${SLIME_DIR}/scripts/models/${SLIME_SPEC}"
 
 CKPT_ARGS=(
-   --hf-checkpoint "${BASE_FOLDER}/Qwen3.5-27B"
+   --hf-checkpoint "${BASE_FOLDER}/${MODEL_DIR_NAME}"
    --ref-load      "${INIT_CKPT}_torch_dist/"
    --load          "${BASE_FOLDER}/${RUN_NAME}/"
    --save          "${BASE_FOLDER}/${RUN_NAME}/"
@@ -109,13 +113,17 @@ GRPO_ARGS=(
    --eps-clip 0.2
 )
 
+PP_SPLIT_ARGS=()
+if [[ "${PP}" -gt 1 && "${DECODER_LAST_PP_LAYERS}" -gt 0 ]]; then
+  PP_SPLIT_ARGS=(--decoder-last-pipeline-num-layers "${DECODER_LAST_PP_LAYERS}")
+fi
+
 PERF_ARGS=(
    --tensor-model-parallel-size "${TP}"
    --sequence-parallel
    --pipeline-model-parallel-size "${PP}"
-   --decoder-last-pipeline-num-layers 30
    --context-parallel-size "${CP}"
-   --expert-model-parallel-size 1
+   --expert-model-parallel-size "${EP}"
    --expert-tensor-parallel-size 1
    --recompute-granularity full
    --recompute-method uniform
@@ -226,5 +234,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${GRPO_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
+   "${PP_SPLIT_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${MISC_ARGS[@]}"

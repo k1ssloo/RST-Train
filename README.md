@@ -31,8 +31,13 @@ serving TP all follow from `configs/models.json`.
 
 ```bash
 python scripts/model_registry.py --list
-MODEL_KEY=qwen3.5-9b bash scripts/20_run_all.sh
+MODEL_KEY=qwen3.5-9b RUN_RL=1 bash scripts/20_run_all.sh   # SFT -> eval -> report -> RL
 ```
+
+`20_run_all.sh` evaluates the **base model on the same harness** as well as the
+fine-tuned one, so "did this help?" is answerable even for sizes the paper never
+published. It writes `verdict.json` with `in_range`, and the RL stage refuses to
+start unless the SFT report has zero FAIL findings.
 
 | key | params | ~min/epoch | min GPUs | note |
 |---|---|---|---|---|
