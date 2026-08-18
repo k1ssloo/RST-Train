@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Download model weights + datasets, verifying shard checksums.
+#   export BASE_FOLDER=/shared/rst
+#   bash scripts/02_download.sh
+set -ex
+: "${BASE_FOLDER:?set BASE_FOLDER}"
+mkdir -p "$BASE_FOLDER"
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
+pip install -q "huggingface_hub[hf_transfer]" hf_transfer
+
+# ---- base model: the SFT starting point (51.7 GiB, 18 shards) ---------------
+hf download Qwen/Qwen3.5-27B --local-dir "$BASE_FOLDER/Qwen3.5-27B"
+
+# ---- reference checkpoints: for eval comparison, NOT for training -----------
+# The authors' own SFT/RL results. Use them as an upper-bound sanity check on
+# your eval harness before trusting your own numbers.
+if [[ "${DOWNLOAD_REFERENCE:-0}" == "1" ]]; then
+  hf download Zhongzhi1228/Qwen3.5-27B-SFT --local-dir "$BASE_FOLDER/ref-Qwen3.5-27B-SFT"
+  hf download Zhongzhi1228/Qwen3.5-27B-RL  --local-dir "$BASE_FOLDER/ref-Qwen3.5-27B-RL"
+fi
+
+# ---- trajectories: the SFT source (22.4 GiB, 66 tars) -----------------------
+hf download Zhongzhi1228/Recursive-Task-Synthesis-Trajectories --repo-type dataset \
+  --local-dir "$BASE_FOLDER/rst-trajectories" \
+  --include "data/*.tar" "metadata/*"
+
+# ---- tasks: needed for RL rollouts + Terminal-Bench-Hard eval ---------------
+hf download Zhongzhi1228/Recursive-Task-Synthesis --repo-type dataset \
+  --local-dir "$BASE_FOLDER/rst-tasks" --include "data/*.tar" "metadata/*"
+hf download Zhongzhi1228/Terminal-Bench-Hard --repo-type dataset \
+  --local-dir "$BASE_FOLDER/terminal-bench-hard"
+
+# ---- verify every shard against the published manifest ----------------------
+python - "$BASE_FOLDER" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+base = Path(sys.argv[1])
+bad = 0
+for repo in ("rst-trajectories", "rst-tasks"):
+    manifest = base / repo / "metadata" / "shard_manifest.jsonl"
+    if not manifest.exists():
+        print(f"{repo}: NO MANIFEST"); continue
+    for line in manifest.read_text().splitlines():
+        if not line.strip(): continue
+        row = json.loads(line)
+        path = base / repo / row["shard"]
+        if not path.exists():
+            print(f"MISSING {path}"); bad += 1; continue
+        if path.stat().st_size != row["size_bytes"]:
+            print(f"SIZE MISMATCH {path}"); bad += 1; continue
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(8 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != row["sha256"]:
+            print(f"SHA MISMATCH {path}"); bad += 1
+    print(f"{repo}: verified")
+print("BAD SHARDS:", bad)
+sys.exit(1 if bad else 0)
+PY
+echo "DOWNLOAD + VERIFY OK"

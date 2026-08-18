@@ -1,0 +1,28 @@
+# Datasets, model weights, materialized tasks — 27+ GB, published separately.
+# Regenerate with scripts/02_download.sh + 03_build_sft_data.py + 10_build_rl_taskset.py.
+data/
+
+# Local research scratch: copies of upstream sources (slime / vLLM / verl) and the
+# paper PDF, kept only to make this repo auditable while it was written. Not
+# redistributed here — PLAN.md cites the exact upstream files and commits instead.
+probe/
+
+# Environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Run artifacts
+notes/*.log
+runs/
+outputs/
+wandb/
+*.pt
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
