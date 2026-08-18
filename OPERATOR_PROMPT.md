@@ -13,38 +13,100 @@ in this pass.
 You start from an empty directory.
 
 ```bash
-export BASE_FOLDER=<shared-scratch>          # >= 400 GB, visible from every node
+export BASE_FOLDER=<shared-scratch>          # visible from every node; see the sizing below
 mkdir -p "$BASE_FOLDER" && cd "$BASE_FOLDER"
 git clone https://github.com/k1ssloo/RST-Train.git && cd RST-Train
+df -h "$BASE_FOLDER"                         # check it before the 55 GB download starts
 ```
 
+Disk, estimated (nothing here has measured it, so verify rather than trust): 27B base
+weights ~56 GB + the trained checkpoint ~56 GB + its HF export ~56 GB + the DPO
+checkpoint ~56 GB + SFT parquet ~2 GB + DPO pairs 48 MB, plus a conda env ~15 GB and
+whatever `04_convert_ckpt.sh` keeps. **Budget ~400 GB** and run `df -h` first; running out
+mid-checkpoint corrupts the export rather than failing cleanly.
+
 Read before running anything: **README.md** (status table — verified vs never executed),
-**BACKENDS.md** §Decision (verl+FSDP is the primary backend, *not* slime), **PLAN.md**
-(the SFT spec; this is the contract), **DPO_PLAN.md** (the DPO stage). `RL_PLAN.md` only
-if you later get a sandbox.
+**BACKENDS.md** §"verl + FSDP" (the primary backend, *not* slime — §"What leaving Megatron
+actually costs" says why), **PLAN.md** (the SFT spec; this is the contract),
+**DPO_PLAN.md** (the DPO stage). `RL_PLAN.md` only if you later get a sandbox.
 
 Anything those files call "measured" was verified against the real data. Anything marked
 UNVERIFIED has never been executed — validating it is your job. Assume nothing beyond
 that, and never report success for a step you skipped.
 
+Run the unit tests now, and again after any edit you make to the loss mask, the Harbor
+result layer or the dataset code:
+
+```bash
+python tests/run_tests.py       # or: python -m pytest tests/ -q
+```
+
+37 tests, ~1 s, no GPU / cluster / dataset needed (10 of them need torch and say SKIP
+without it — run them again inside the training venv). They pin the loss mask, the infra-vs-budget failure split and the padding rules —
+the three things that break a run silently instead of loudly. A green run says nothing
+about anything needing real weights, a container runtime, or more than one node.
+
 ## Run it
 
 ```bash
-bash scripts/00_preflight.sh                      # prints the parallelism row to use
 export MODEL_KEY=qwen3.5-27b
 export MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile   # one node IP per line, head first
+export ACTOR_NUM_NODES=4 ACTOR_NUM_GPUS_PER_NODE=8            # the cluster shape, always set it
 export WANDB_KEY=<key>                            # omit -> offline mode
+bash scripts/00_preflight.sh --hostfile $HOSTFILE  # prints the parallelism row to use
 bash scripts/20_run_all.sh 2>&1 | tee $BASE_FOLDER/run_all.log
 ```
+
+`ACTOR_NUM_NODES × ACTOR_NUM_GPUS_PER_NODE` is the **only** thing that sets the GPU count;
+`MODEL_KEY` does not influence it, and the registry validates the arithmetic, not the
+intent — it will happily place 0.8B on 32 GPUs. The launcher now refuses to start when
+`ACTOR_NUM_GPUS_PER_NODE` exceeds the GPUs this host can see, and prints the exact exports
+to use. Set both anyway.
 
 Chain: preflight → env → download → data → train → export → eval → report → **DPO** →
 offline eval of the DPO checkpoint. Every stage writes `$BASE_FOLDER/.stage/<name>.done`
 and is skipped next time, so after fixing anything just re-run the same command. Delete
 a marker to force one stage; `SKIP_STAGES="env download"` skips by name.
 
-**Do a throwaway `MODEL_KEY=qwen3.5-0.8b` run first** (~5 min/epoch, 2 GPUs). Same
-architecture as 27B, so it clears the integration risks in minutes instead of after
-booking 32 GPUs for a day. It is a smoke test — never report its numbers as a result.
+**Do a throwaway 0.8B run first** (~5 min/epoch). Same architecture as 27B, so it clears
+the integration risks in minutes instead of after booking 32 GPUs for a day. It is a smoke
+test — never report its numbers as a result. Give it a small shape explicitly, or it plans
+a 32-GPU job and dies in NCCL rendezvous:
+
+```bash
+MODEL_KEY=qwen3.5-0.8b ACTOR_NUM_NODES=1 ACTOR_NUM_GPUS_PER_NODE=2 \
+  BASE_FOLDER=$BASE_FOLDER/smoke bash scripts/20_run_all.sh
+```
+
+A separate `BASE_FOLDER` keeps the smoke run's `.stage` markers, `verdict.json` and
+checkpoints from being mistaken for the real ones later. Its env build is reusable:
+`ENV_NAME=rstverl` is shared, so the 27B run's `env` stage is a no-op afterwards.
+
+## The environment: the launcher enters it for you
+
+`20_run_all.sh`, `30_run_sft_verl.sh` and `33_run_dpo.sh` all `source scripts/lib_env.sh`
+and enter the conda env before their first `python`, then **prove** it by locating `torch`,
+`transformers`, `pandas`, `pyarrow`. `micromamba activate` inside `01b_setup_env_verl.sh`
+only affected that script's own process, which is why this exists. So you do not need to
+activate anything by hand. If you want to:
+
+```bash
+micromamba activate rstverl              # interactive shell
+source $BASE_FOLDER/env-rstverl.sh       # inside a script or a batch job
+```
+
+Two things worth knowing about the env build:
+
+- **`INSTALL_ROLLOUT` defaults to 1** and installs sglang, which is `06_eval.py`'s *only*
+  serving path. If the install fails, or if it replaces the driver-matched torch (the
+  script rolls that back and prefers training), the launcher skips the agentic benchmarks
+  loudly and the report FAILs on benchmark coverage. `$BASE_FOLDER/env_summary.json` is
+  the record of what actually landed — check `"sglang"`, `"flash_attn"`, `"torch"`.
+- If a stage dies with `ModuleNotFoundError`, that is an environment problem, not a code
+  problem. Re-run `bash scripts/01b_setup_env_verl.sh` (idempotent), or activate the env
+  you already have and re-run with `SKIP_STAGES="env"`. Do **not** pip-install torch into
+  the system interpreter: the CUDA build is chosen from the driver version, and a
+  mismatched one fails much later at cuda init looking unrelated.
 
 Then 27B, then:
 
@@ -52,19 +114,31 @@ Then 27B, then:
 MODEL_KEY=qwen3.5-9b bash scripts/20_run_all.sh
 ```
 
-**The gate between models.** `20_run_all.sh` writes `verdict.json` with `in_range`,
-which means the report produced **zero FAIL findings**. WARNs do not block — a WARN is a
-caveat for a human to weigh, a FAIL means a number is wrong.
+**The gate between models.** `20_run_all.sh` writes `verdict.json` with two flags. WARNs
+do not block either of them — a WARN is a caveat for a human to weigh, a FAIL means a
+number is wrong.
+
+- `in_range` — **zero FAIL findings of any kind.** This is the gate between models and the
+  gate for GRPO.
+- `checkpoint_trustworthy` — zero FAILs *about the checkpoint*. It differs from `in_range`
+  in exactly one case: "the benchmarks never ran" (no container runtime, or no sglang).
+  That FAIL impugns the measurement, not the weights.
+
+Then:
 
 - **In range** → continue on your own initiative, including the next model. Do not ask.
 - **Out of range** → stop that model, write the analysis, wait for a human. Do not start
   another long run on top of an unexplained failure, and do not "fix" it by loosening a
   check.
 
-DPO refuses to start if the SFT report has FAILs, deliberately: it uses that checkpoint
-as both the policy *and* the frozen reference, so an untrustworthy checkpoint makes every
-implicit reward meaningless — and unlike a bad benchmark number, that failure is
-invisible in the loss curve.
+**One exception, and only this one:** DPO gates on `checkpoint_trustworthy`, not
+`in_range`. It needs no container and no server, so a benchmark-coverage FAIL is not a
+reason to leave the pod with an SFT checkpoint and nothing after it — the launcher runs
+DPO, prints the FAILs it is carrying forward, and both checkpoints must then be reported
+as **not agentically evaluated**. Any *other* FAIL blocks DPO: it uses that checkpoint as
+both the policy *and* the frozen reference, so an untrustworthy one makes every implicit
+reward meaningless — and unlike a bad benchmark number, that failure is invisible in the
+loss curve.
 
 ## Data: download it, do not rebuild it
 
@@ -145,6 +219,9 @@ Say which one you are claiming — never describe a correctness bug as flakiness
 | 0.8B generates nothing sane at eval | its own template defaults thinking **off** while training targets open with `\n</think>\n\n` | the launcher fetches the thinking-on template via the registry — do not remove that step; if you serve by hand, pass `--chat-template` |
 | `02_download.sh` sha256 mismatch | a corrupted or changed shard | stop. Do not proceed past it |
 | tokenizer checksum mismatch | drift between models | stop. Do not "fix" it by re-tokenizing |
+| `ModuleNotFoundError` in any stage | an environment problem, not a code problem — the env exists somewhere the launcher did not find | re-run `bash scripts/01b_setup_env_verl.sh` (idempotent, rewrites `$BASE_FOLDER/env-rstverl.sh`), or activate the env yourself and re-run with `SKIP_STAGES="env"` |
+| `AGENTIC EVAL BLOCKED: sglang is not installed` | the rollout engine did not land, or was rolled back because it replaced the driver-matched torch | `INSTALL_ROLLOUT=1 bash scripts/01b_setup_env_verl.sh`, then `rm -f $BASE_FOLDER/.stage/eval_*.done` and re-run. Check `env_summary.json`. SFT and DPO are unaffected |
+| the launcher exits 2 before anything runs, naming `ACTOR_NUM_GPUS_PER_NODE` | the planned cluster shape does not match the GPUs this host has | it prints the exports to use. Do not delete the check — it is replacing an NCCL rendezvous hang |
 | no container runtime for eval | expected; **SFT and DPO need none** | `bash scripts/00b_setup_sandbox.sh --diagnose` names the one case you are in. See below |
 | every `mount` returns **EACCES** under AppArmor `docker-default (enforce)` | an LSM denial; nothing inside the pod fixes it (profiles survive `unshare`/`execve`) | ask ops for exactly **one** flag: `--security-opt apparmor=unconfined` (k8s ≥1.30: `securityContext.appArmorProfile.type: Unconfined`). Do **not** ask for `podman`+`uidmap` (already installed), `SYS_ADMIN`, `/dev/fuse`, or `--privileged` |
 | podman fails on 31 % of task images ("Unknown instruction: IF") | podman < 4.4 cannot do Dockerfile heredocs; Ubuntu 22.04 ships 3.4.4 | install the static rootless build (32 MB, no root): `curl -sSL -o /tmp/podman.tgz https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz && mkdir -p $HOME/.local && tar xzf /tmp/podman.tgz -C $HOME/.local --strip-components=1 && export PATH=$HOME/.local/bin:$PATH` |
@@ -174,8 +251,16 @@ python scripts/06b_eval_offline.py \
   --tokenizer $BASE_FOLDER/$MODEL_DIR_NAME --out $BASE_FOLDER/eval/offline
 ```
 
-The report still records a **FAIL** on benchmark coverage. That is deliberate: it must
-never let "we could not measure it" read as "it looks good".
+The published `rst_sft_holdout.parquet` was split by row, not by task group, so up to nine
+siblings of each held-out trajectory were trained on: call that number a memorization
+check, not generalization. `manifest.json` says which (`holdout_mode`); a local rebuild
+with `03_build_sft_data.py` now defaults to a group-disjoint split.
+
+The report still records a **FAIL** on benchmark coverage, so `in_range` is 0. That is
+deliberate: it must never let "we could not measure it" read as "it looks good". It does
+**not** stop DPO — `checkpoint_trustworthy` stays 1, the launcher continues, and you report
+both checkpoints as not agentically evaluated. It does stop the next model and GRPO: get a
+sandbox, or get a human to accept an unmeasured checkpoint, before booking more GPU days.
 
 ## DPO: what it is, and the two ways to misreport it
 
@@ -259,8 +344,8 @@ Final summary must contain:
 4. DPO: `gates.step0_loss`, whether `--length-normalize` was on, `holdout_reward_accuracy`
    with `holdout_ties`, and the explicit statement that it is off-policy and agentically
    unevaluated;
-5. `in_range` per model, and for anything out of range, your analysis and what you need
-   from a human;
+5. `in_range` **and** `checkpoint_trustworthy` per model, and for anything out of range,
+   your analysis and what you need from a human;
 6. every deviation and code edit, with reasons;
 7. anything in `PLAN.md` / `DPO_PLAN.md` that turned out to be **wrong** — that matters
    more than a clean run, because the author could not test these steps.

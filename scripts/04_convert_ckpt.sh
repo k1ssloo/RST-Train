@@ -20,6 +20,13 @@
 set -ex
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
+
+# Both conversions import torch; enter the env first. No-op if the caller already did.
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "${ENV_NAME:-rstverl}" || exit 2
+
 MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
 eval "$(python "$(dirname "${BASH_SOURCE[0]}")/model_registry.py" --key "$MODEL_KEY" --shell 2>/dev/null)"
 MODEL_NAME="${MODEL_NAME:-$MODEL_DIR_NAME}"

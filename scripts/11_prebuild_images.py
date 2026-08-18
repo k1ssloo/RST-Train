@@ -142,7 +142,14 @@ def build_one(row: dict, timeout: int, pull_base: bool) -> dict:
             #                    errors on. Docker format supports it.
             #  --network host  : builds legitimately fetch packages; the AGENT
             #                    sandbox is what must have no network, not the build.
-            argv[:0] = ["--format", "docker"]
+            # Both go AFTER the subcommand: `--format` is an option of `podman build`,
+            # not a global. podman's globals are --root/--runroot/--storage-driver/
+            # --storage-opt/--remote (which is why _build_with_vfs prefixes exactly
+            # those). Putting --format in front makes podman exit on an unknown flag
+            # before it ever reads the Dockerfile, so every build fails and the reason
+            # recorded in prebuild_report.json is a CLI parse error rather than
+            # anything about the task.
+            argv[1:1] = ["--format", "docker"]
             argv.append("--network=host")
         if pull_base:
             argv.append("--pull")
@@ -180,7 +187,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=1800, help="per-image build timeout (s)")
     parser.add_argument("--sample", type=int, default=0, help="build only N tasks (size probe)")
     parser.add_argument("--no-pull", action="store_true", help="skip --pull on base images")
-    parser.add_argument("--skip-existing", action="store_true", default=True)
+    # Skipping images that already exist is the default because this script is
+    # re-run to fill in failures. `--rebuild-existing` is the way to turn it off:
+    # a `--skip-existing` store_true that already defaults to True can only ever be
+    # set to the value it already has, which reads like a switch and is not one.
+    parser.add_argument("--rebuild-existing", action="store_true",
+                        help="rebuild task images that are already present locally")
     parser.add_argument("--force-local", action="store_true",
                         help="build here even if the sandbox backend is off-machine")
     args = parser.parse_args()
@@ -256,7 +268,7 @@ def main() -> int:
         elif affected:
             print(f"[precheck] podman {major}.{minor} OK for the {affected} heredoc Dockerfiles")
 
-    if args.skip_existing:
+    if not args.rebuild_existing:
         existing = set()
         listing = docker("images", "--format", "{{.Repository}}:{{.Tag}}", timeout=120)
         if listing.returncode == 0:
@@ -304,11 +316,14 @@ def main() -> int:
         "ready_task_ids": sorted(r["task_id"] for r in ok_rows),
     }
     if args.sample and sizes:
-        full = len(rows) if not args.sample else None
+        # No extrapolated total on purpose: with shared base layers the honest
+        # number cannot be computed from a sample, so we say what to measure
+        # instead of publishing mean_image_gib * task_count as if it were one.
         report["extrapolation_note"] = (
-            "NOTE: layers are shared across tasks with the same base image, so the "
-            "naive per-image sum double-counts. Compare `docker system df` before and "
-            "after this probe for the true incremental cost."
+            f"sampled {len(sizes)} of {args.sample} requested images. Layers are shared "
+            "across tasks with the same base image, so the naive per-image sum "
+            "double-counts and no total is extrapolated here. Compare `docker system df` "
+            "before and after this probe for the true incremental cost."
         )
     out = args.taskset / "prebuild_report.json"
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

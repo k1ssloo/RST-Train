@@ -49,58 +49,32 @@ reward read from the task's own verifier.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
 import shutil
+import sys
 import time
-import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+# The launcher puts the repo root on PYTHONPATH (that is how this module is
+# importable at all), but a ray worker may start from anywhere -- make the shared
+# import independent of that.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Narrow list: a plain reward-0 must never be classified as infrastructure.
-INFRA_MARKERS = (
-    "connection reset by peer", "could not resolve host", "docker daemon",
-    "docker compose command failed", "error during connect", "failed to pull image",
-    "name or service not known", "no space left on device",
-    "temporary failure in name resolution", "unexpected eof while reading",
-    "command too long", "rate limit exceeded", "timed out", "unable to locate package",
+from rst_common.harbor import (  # noqa: E402
+    HARNESS_INFRA,
+    Outcome,
+    apply_proxy_policy,
+    read_reward,
+    refine_with_stdout,
+    wall_clock_timeout,
 )
 
-
-def classify_infra(text: str) -> str | None:
-    low = text.lower()
-    return next((m for m in INFRA_MARKERS if m in low), None)
-
-
-_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-
-
-def _apply_proxy_policy(env: dict[str, str], harbor_env: str, shim_url: str) -> None:
-    """Decide what the harbor subprocess should do with proxy variables.
-
-    With `--env docker` the sandbox and the shim are both on this host, so a
-    proxy can only get in the way -- drop it. With an off-machine backend,
-    harbor has to reach the provider's API over HTTPS, which on a locked-down
-    cluster is exactly what the proxy is for; keep it, and put the shim's own
-    host in NO_PROXY so rollout traffic still goes direct.
-    """
-    if harbor_env == "docker":
-        for key in _PROXY_KEYS:
-            env.pop(key, None)
-        return
-    if not any(env.get(key) for key in _PROXY_KEYS):
-        return
-    host = urllib.parse.urlsplit(shim_url).hostname or ""
-    extra = [h for h in (host, "127.0.0.1", "localhost") if h]
-    for key in ("NO_PROXY", "no_proxy"):
-        current = [tok for tok in env.get(key, "").split(",") if tok]
-        env[key] = ",".join(dict.fromkeys(current + extra))
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------- session
@@ -339,7 +313,7 @@ class HarborTerminusAgentLoop(AgentLoopBase):
         jobs_root.mkdir(parents=True, exist_ok=True)
         started = time.time()
         try:
-            reward, infra = await self._run_harbor(
+            outcome = await self._run_harbor(
                 task_dir=Path(task_dir), job_name=job_name, jobs_root=jobs_root,
                 session_id=session_id,
                 base_url=f"http://{public_host}:{shim.port}/v1",
@@ -347,24 +321,29 @@ class HarborTerminusAgentLoop(AgentLoopBase):
                 docker_host=docker_host,
             )
             session = shim.close_session(session_id)
-            if infra is not None:
+            if outcome.kind == HARNESS_INFRA:
                 # Infrastructure failure. NOT a reward of 0 -- returning 0 here would
                 # teach the policy its actions were bad because Docker broke.
-                raise RuntimeError(f"infrastructure:{infra}")
+                raise RuntimeError(f"infrastructure:{outcome.reason}")
             if session is None or not session.turns:
                 raise RuntimeError("no model turns recorded; harness never called the shim")
+            # A budget failure (wall clock spent, command too long) IS a reward-0
+            # sample and stays in the GRPO group -- see rst_common/harbor.py.
+            assert outcome.reward is not None
+            reward = outcome.reward
 
             token_ids, response_mask, num_turns = session.assemble()
             prompt_len = len(session.turns[0].prompt_ids)
-            logger.info("[harbor-verl] %s reward=%.2f turns=%d tokens=%d elapsed=%.0fs",
-                        task_id, reward, num_turns, len(token_ids), time.time() - started)
+            logger.info("[harbor-verl] %s reward=%.2f turns=%d tokens=%d elapsed=%.0fs%s",
+                        task_id, reward, num_turns, len(token_ids), time.time() - started,
+                        f" budget={outcome.budget_reason}" if outcome.budget_reason else "")
             return AgentLoopOutput(
                 prompt_ids=token_ids[:prompt_len],
                 response_ids=token_ids[prompt_len:],
                 response_mask=response_mask[prompt_len:],
                 num_turns=num_turns,
                 reward_score=reward,
-                metrics={},
+                metrics={"agent_budget_failure": float(outcome.budget_reason is not None)},
             )
         finally:
             shim.close_session(session_id)
@@ -373,7 +352,7 @@ class HarborTerminusAgentLoop(AgentLoopBase):
 
     async def _run_harbor(self, *, task_dir: Path, job_name: str, jobs_root: Path,
                           session_id: str, base_url: str, harbor_env: str,
-                          docker_host: str) -> tuple[float, str | None]:
+                          docker_host: str) -> Outcome:
         argv = [
             os.environ.get("RST_HARBOR_BIN", "harbor"), "run",
             "--path", str(task_dir.resolve()),
@@ -394,7 +373,7 @@ class HarborTerminusAgentLoop(AgentLoopBase):
         })
         if docker_host:
             env["DOCKER_HOST"] = docker_host
-        _apply_proxy_policy(env, harbor_env, base_url)
+        apply_proxy_policy(env, harbor_env, base_url)
 
         timeout = int(os.environ.get("RST_AGENT_TIMEOUT_SEC", "1800"))
         proc = await asyncio.create_subprocess_exec(
@@ -402,30 +381,17 @@ class HarborTerminusAgentLoop(AgentLoopBase):
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill(); await proc.wait()
-            return 0.0, "agent time budget exceeded"
+            proc.kill()
+            await proc.wait()
+            # This timeout IS the agent's budget: nothing else caps how long
+            # Terminus-2 may keep issuing commands. Reward 0, not "unmeasured".
+            return wall_clock_timeout(timeout)
 
         text = (stdout or b"").decode("utf-8", "replace")
         job_dir = jobs_root / job_name
-        reward, infra = self._read_reward(job_dir if job_dir.is_dir() else jobs_root)
-        if reward is None:
-            return 0.0, classify_infra(text) or (infra or "no verifier reward")
-        return reward, None
-
-    @staticmethod
-    def _read_reward(job_dir: Path) -> tuple[float | None, str | None]:
-        candidates = sorted({*(job_dir / "trials").glob("*/result.json"),
-                             *job_dir.glob("*/result.json"), *job_dir.glob("result.json")})
-        if not candidates:
-            return None, "job artifacts incomplete: no result.json"
-        for path in candidates:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                return None, f"unreadable result.json: {exc}"
-            if payload.get("exception_info"):
-                return None, classify_infra(json.dumps(payload["exception_info"])) or "harness exception"
-            value = ((payload.get("verifier_result") or {}).get("rewards") or {}).get("reward")
-            if isinstance(value, (int, float)):
-                return float(value), None
-        return None, "no verifier reward in result.json"
+        outcome = read_reward(job_dir if job_dir.is_dir() else jobs_root)
+        outcome = refine_with_stdout(outcome, text)
+        if outcome.kind is not None:
+            logger.warning("[harbor-verl] %s %s=%s rc=%s tail=%s", job_name, outcome.kind,
+                           outcome.reason, proc.returncode, text[-400:].replace("\n", " | "))
+        return outcome

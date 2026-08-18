@@ -19,10 +19,14 @@
 #   discover a strategy no logged trajectory used. The summary this writes says so
 #   in its own first field; keep that wording in the report.
 #
-# THREE STAGES, EACH SKIPPED IF ITS OUTPUT EXISTS
+# THREE STAGES, ALL RE-ENTRANT
 #   17_build_dpo_data.py    trajectories -> tokenized preference pairs   (CPU, ~25 min)
 #   18_dpo_ref_logprobs.py  frozen reference logprobs                    (GPU, sharded)
 #   19_train_dpo.py         the DPO step itself                          (GPU, FSDP2)
+#   Stage 1 is skipped when its parquet is already there. Stage 2 is ALWAYS entered
+#   and resumes from whatever it already scored -- a shard file exists minutes into a
+#   pass that takes hours, so "output exists" was never the same question as "output
+#   is complete". Stage 3 is not resumable; it starts from POLICY each time.
 #
 # COST SHAPE, 27.8B on 8x80GB, pairs at ~3k supervised tokens per side:
 #   reference pass  one forward per side, no optimizer state -> ~55.6 GB weights
@@ -37,6 +41,14 @@ set -uo pipefail
 MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$REPO_DIR"
+
+# Enter the training env before the first `python`. DPO_PLAN.md tells the operator to
+# run this script directly, so it cannot assume 20_run_all.sh already did it. If the
+# env is already active this is one find_spec and a printed path.
+# shellcheck source=lib_env.sh
+source "$REPO_DIR/scripts/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "${ENV_NAME:-rstverl}" || exit 2
 
 GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
 if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
@@ -98,7 +110,45 @@ LOGIT_CHUNK="${DPO_LOGIT_CHUNK:-512}"
 # a missing directory would kill every shard on the redirect with nothing to read.
 mkdir -p "$BASE_FOLDER/logs" "$OUT_DIR"
 
+# A parquet whose path exists is not yet a parquet that finished being written, and
+# on a shared filesystem the two are seconds apart. Probe the footer instead of the
+# inode.
+wait_readable_parquet() {  # <path> <budget_sec>
+  local path="$1" budget="$2" waited=0
+  while (( waited < budget )); do
+    if python - "$path" > /dev/null 2>&1 <<'EOF_PY'
+import sys
+
+import pyarrow.parquet as pq
+
+pq.ParquetFile(sys.argv[1]).metadata.num_rows
+EOF_PY
+    then
+      return 0
+    fi
+    sleep 10; waited=$(( waited + 10 ))
+  done
+  return 1
+}
+
 # ------------------------------------------------------------------ 1. pairs
+# Only node 0 produces the pairs. $PAIRS_DIR is on the shared filesystem, so with
+# NNODES>1 every node would otherwise fetch the same 48 MB onto the same three paths
+# concurrently, or -- much worse -- one node would start reading dpo_train.parquet
+# while another is still writing it, and a truncated parquet either raises here or
+# (if the footer happens to be there) silently trains on a prefix of the data.
+PAIRS_WAIT_SEC="${PAIRS_WAIT_SEC:-3600}"
+if [[ "${NODE_RANK:-0}" != "0" ]]; then
+  echo "=== node ${NODE_RANK:-0}: waiting for node 0 to publish $PAIRS_DIR/dpo_train.parquet"
+  if ! wait_readable_parquet "$PAIRS_DIR/dpo_train.parquet" "$PAIRS_WAIT_SEC"; then
+    echo "waited ${PAIRS_WAIT_SEC}s and $PAIRS_DIR/dpo_train.parquet is still not a" >&2
+    echo "readable parquet. Node 0 either has not been started, failed in stage 1 (check" >&2
+    echo "its console), or does not share $PAIRS_DIR with this node. Raise PAIRS_WAIT_SEC" >&2
+    echo "if the local rebuild from $TRAJ_ROOT is genuinely still running." >&2
+    exit 1
+  fi
+fi
+
 # Three sources, tried in cost order.
 #   a) already on disk          -> nothing to do
 #   b) the published pairs      -> 48 MB, seconds, and it is the exact set every number
@@ -224,28 +274,144 @@ EOF_PY
 
 # ------------------------------------------------------- 2. reference logprobs
 # One process per GPU, no communication: each shard writes its own parquet and 19
-# reads them together. Resumable, so an interrupted pass is re-run cheaply.
-if ! compgen -G "$REF_DIR/ref_logps*.parquet" > /dev/null; then
-  echo "=== scoring reference logprobs ($REF_DTYPE) -> $REF_DIR"
-  mkdir -p "$REF_DIR"
-  pids=()
-  for (( i = 0; i < NGPUS; i++ )); do
-    CUDA_VISIBLE_DEVICES="$i" python scripts/18_dpo_ref_logprobs.py \
-      --pairs "$PAIRS_DIR" --model-path "$POLICY" --out "$REF_DIR" \
-      --dtype "$REF_DTYPE" --max-seq-len "$DPO_SEQ_LEN" \
-      --logit-chunk "$LOGIT_CHUNK" \
-      --shard "$i" --num-shards "$NGPUS" \
-      > "$BASE_FOLDER/logs/dpo_ref_shard$i.log" 2>&1 &
-    pids+=("$!")
-  done
-  rc=0
-  for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
-  if (( rc != 0 )); then
-    echo "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log" >&2
-    echo "18 is resumable -- fix the cause and re-run this script, already-scored rows are kept" >&2
-    exit 1
-  fi
+# reads them together.
+#
+# THIS STAGE ALWAYS RUNS. It used to be wrapped in
+#   if ! compgen -G "$REF_DIR/ref_logps*.parquet"
+# which skipped all of it the moment ONE shard file existed -- and 18 flushes every
+# 50 pairs, so a shard parquet appears minutes into a pass that takes hours. An
+# interrupted reference pass therefore left exactly the state that made the re-run
+# skip scoring, after which 19 failed GATE 2 (coverage) even though this script's own
+# error message had just told the operator that "18 is resumable -- re-run this
+# script". 18 is idempotent by design: it reads the partial parquet, REFUSES to
+# resume across a changed checkpoint / dtype / chunk (its provenance sidecar), and
+# scores only the rows that are missing. Re-entering it costs a directory listing when
+# there is nothing to do; skipping it wrongly costs a whole reference pass.
+echo "=== scoring reference logprobs ($REF_DTYPE) -> $REF_DIR"
+mkdir -p "$REF_DIR"
+
+# Shard IDs are GLOBAL to the job, not per node. With --shard $i --num-shards $NGPUS
+# on every node, all NNODES nodes take the same NGPUS slices of the same frame and
+# write them to the same ref_logps_shard$i.parquet on the shared filesystem: the
+# pairs in slices NGPUS..NNODES*NGPUS-1 are never scored by anyone, and the files
+# that do get written are several processes overwriting one path. The offset makes
+# each (node, GPU) pair own exactly one slice.
+TOTAL_SHARDS=$(( NNODES * NGPUS ))
+SHARD_BASE=$(( ${NODE_RANK:-0} * NGPUS ))
+pids=()
+for (( i = 0; i < NGPUS; i++ )); do
+  shard=$(( SHARD_BASE + i ))
+  CUDA_VISIBLE_DEVICES="$i" python scripts/18_dpo_ref_logprobs.py \
+    --pairs "$PAIRS_DIR" --model-path "$POLICY" --out "$REF_DIR" \
+    --dtype "$REF_DTYPE" --max-seq-len "$DPO_SEQ_LEN" \
+    --logit-chunk "$LOGIT_CHUNK" \
+    --shard "$shard" --num-shards "$TOTAL_SHARDS" \
+    > "$BASE_FOLDER/logs/dpo_ref_shard$shard.log" 2>&1 &
+  pids+=("$!")
+done
+rc=0
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+if (( rc != 0 )); then
+  echo "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log" >&2
+  echo "18 is resumable -- fix the cause and re-run this script, already-scored rows are kept" >&2
+  exit 1
 fi
+
+# Multi-node: this node's eight shards are done, the other nodes' twenty-four may not
+# be. Waiting here rather than at torchrun means a missing node is reported as a
+# missing node, instead of as 19's coverage gate failing on rank 0 after the whole
+# world has already loaded a 27.8 B model.
+if (( TOTAL_SHARDS > NGPUS )); then
+  echo "=== waiting for the other nodes' shards ($TOTAL_SHARDS total)"
+  for (( shard = 0; shard < TOTAL_SHARDS; shard++ )); do
+    (( shard >= SHARD_BASE && shard < SHARD_BASE + NGPUS )) && continue
+    if ! wait_readable_parquet "$REF_DIR/ref_logps_shard$shard.parquet" "${REF_WAIT_SEC:-7200}"; then
+      echo "shard $shard never appeared at $REF_DIR/ref_logps_shard$shard.parquet." >&2
+      echo "Node $(( shard / NGPUS )) is not running this script, failed early (check its" >&2
+      echo "own $BASE_FOLDER/logs/dpo_ref_shard*.log), or was launched with a different" >&2
+      echo "NGPUS/NNODES so its shard numbering does not match this node's." >&2
+      exit 1
+    fi
+  done
+fi
+
+# Coverage, checked HERE and again by 19's GATE 2. Not redundant: this check can name
+# the shard that is short and the stale file that has to go, because it still knows
+# NNODES, NGPUS and the shard numbering; by the time 19 runs, all it can see is a set
+# of parquets that do not cover the pairs.
+python - "$PAIRS_DIR" "$REF_DIR" "$DPO_SEQ_LEN" "$TOTAL_SHARDS" <<'EOF_PY' || exit 1
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+pairs_dir, ref_dir = Path(sys.argv[1]), Path(sys.argv[2])
+max_len, total_shards = int(sys.argv[3]), int(sys.argv[4])
+
+want: set[str] = set()
+for name in ("dpo_train.parquet", "dpo_holdout.parquet"):
+    path = pairs_dir / name
+    if not path.is_file():
+        continue
+    frame = pd.read_parquet(path, columns=["pair_id", "chosen_n_tokens", "rejected_n_tokens"])
+    keep = frame[(frame.chosen_n_tokens <= max_len) & (frame.rejected_n_tokens <= max_len)]
+    want |= set(keep.pair_id)
+
+shards = sorted(ref_dir.glob("ref_logps*.parquet"))
+if not shards:
+    sys.exit(f"REFUSING TO TRAIN: no ref_logps*.parquet under {ref_dir} even though every "
+             f"shard process exited 0. Check {ref_dir}/../../logs/dpo_ref_shard*.log.")
+
+# Stale shards from a previous run with a different GPU count are the failure mode
+# that a plain row count cannot see: ref_logps_shard5.parquet left over from an
+# 8-GPU pass holds pairs that a 4-GPU pass assigns to other shards, so the union
+# looks complete while some pairs carry logprobs from a different slicing (and, if
+# the checkpoint was re-exported in between, from different weights).
+stale, fingerprints = [], {}
+for shard in shards:
+    manifest = shard.with_name(shard.stem + "_manifest.json")
+    if not manifest.is_file():
+        stale.append(f"{shard.name}: no manifest, so its shard count and checkpoint are unknown")
+        continue
+    meta = json.loads(manifest.read_text(encoding="utf-8"))
+    if int(meta.get("num_shards", -1)) != total_shards:
+        stale.append(f"{shard.name}: num_shards={meta.get('num_shards')} but this job has "
+                     f"{total_shards}")
+    fingerprints.setdefault(meta.get("checkpoint_fingerprint"), []).append(shard.name)
+if len(fingerprints) > 1:
+    lines = "\n".join(f"    {fp!s:.16}...: {', '.join(names)}"
+                      for fp, names in sorted(fingerprints.items(), key=lambda kv: str(kv[0])))
+    sys.exit(f"REFUSING TO TRAIN: these shards were scored against DIFFERENT checkpoints, so "
+             f"the reference is not one model:\n{lines}\n  Delete {ref_dir} and rescore.")
+if stale:
+    sys.exit("REFUSING TO TRAIN: leftover reference shards from an incompatible run:\n  - "
+             + "\n  - ".join(stale)
+             + f"\n  Delete {ref_dir} and rescore, or restore the NNODES/NGPUS that wrote them.")
+
+got: set[str] = set()
+overlap = 0
+for shard in shards:
+    ids = set(pd.read_parquet(shard, columns=["pair_id"]).pair_id)
+    overlap += len(got & ids)
+    got |= ids
+if overlap:
+    sys.exit(f"REFUSING TO TRAIN: {overlap} pair_ids appear in more than one shard. The "
+             f"slices are supposed to be disjoint, so two processes scored the same pairs "
+             f"-- delete {ref_dir} and rescore.")
+
+missing = want - got
+print(f"reference coverage: {len(got):,}/{len(want):,} pairs over {len(shards)} shards")
+if missing:
+    sys.exit(f"REFUSING TO TRAIN: {len(missing):,} pairs have no reference logprob "
+             f"(e.g. {sorted(missing)[:3]}). Every shard exited 0, so the likely cause is a "
+             f"--max-seq-len or --pairs mismatch between this script and the shards. Re-run "
+             f"this script; 18 keeps what it already scored.")
+extra = got - want
+if extra:
+    print(f"note: {len(extra):,} scored pairs are not in the current pairs set (rebuilt data, "
+          f"or a narrower --max-seq-len now). 19 joins on pair_id, so they are ignored.")
+EOF_PY
 
 # ------------------------------------------------------------------ 3. train
 # --length-normalize is ON by default here, deliberately. With summed logprobs the
@@ -257,7 +423,11 @@ fi
 LENGTH_NORM_ARG=(--length-normalize)
 [[ "${DPO_LENGTH_NORM:-1}" == "0" ]] && LENGTH_NORM_ARG=()
 
+# 19_train_dpo.py does not import wandb at all -- it writes dpo_training_summary.json,
+# and THAT is the evidence for this stage. These two lines only keep a wandb-enabled
+# library in the env from silently opening a run; they are not how you get metrics.
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
+[[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"
 
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \

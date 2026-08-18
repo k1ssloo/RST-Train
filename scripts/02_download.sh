@@ -5,6 +5,15 @@
 set -ex
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 mkdir -p "$BASE_FOLDER"
+
+# The pip install and the `hf` CLI below have to land in the TRAINING env; installed into
+# the system interpreter they are invisible to every later stage. No-op when the caller
+# already entered it. See scripts/lib_env.sh.
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "${ENV_NAME:-rstverl}" || exit 2
+
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 pip install -q "huggingface_hub[hf_transfer]" hf_transfer
 
@@ -20,12 +29,27 @@ for k in ${EXTRA_MODEL_KEYS:-}; do
   hf download "$repo" --local-dir "$BASE_FOLDER/$(basename "$repo")"
 done
 
-# ---- reference checkpoints: for eval comparison, NOT for training -----------
-# The authors' own SFT/RL results. Use them as an upper-bound sanity check on
-# your eval harness before trusting your own numbers.
-if [[ "${DOWNLOAD_REFERENCE:-0}" == "1" ]]; then
-  hf download Zhongzhi1228/Qwen3.5-27B-SFT --local-dir "$BASE_FOLDER/ref-Qwen3.5-27B-SFT"
-  hf download Zhongzhi1228/Qwen3.5-27B-RL  --local-dir "$BASE_FOLDER/ref-Qwen3.5-27B-RL"
+# ---- reference checkpoint: for eval comparison, NOT for training ------------
+# The authors' released SFT checkpoint, scored through OUR harness, is what makes
+# our own number interpretable (20_run_all.sh::eval_reference).
+#
+# Gated on REFERENCE_CHECKPOINT as well as on DOWNLOAD_REFERENCE, because only
+# qwen3.5-27b has one (configs/models.json). 20_run_all.sh passes
+# DOWNLOAD_REFERENCE="$EVAL_REFERENCE", which defaults to 1 -- so a 9B or 4B run
+# used to pull ~110 GB of 27B reference weights that eval_reference() then skipped,
+# on the same filesystem as the 400 GB budget.
+if [[ "${DOWNLOAD_REFERENCE:-0}" == "1" && -n "${REFERENCE_CHECKPOINT:-}" ]]; then
+  hf download "$REFERENCE_CHECKPOINT" \
+    --local-dir "$BASE_FOLDER/ref-$(basename "$REFERENCE_CHECKPOINT")"
+  # The RL reference is a further ~56 GB and nothing in this pipeline reads it: the
+  # RL row in rst_common/paper.py is a published number, not a scored checkpoint.
+  # Opt in explicitly if you want to score it by hand.
+  if [[ "${DOWNLOAD_REFERENCE_RL:-0}" == "1" ]]; then
+    hf download Zhongzhi1228/Qwen3.5-27B-RL --local-dir "$BASE_FOLDER/ref-Qwen3.5-27B-RL"
+  fi
+elif [[ "${DOWNLOAD_REFERENCE:-0}" == "1" ]]; then
+  echo "no published reference checkpoint for MODEL_KEY=$MODEL_KEY; skipping the" \
+       "reference download (the paper only reports Qwen3.5-27B and 122B-A10B)."
 fi
 
 # ---- trajectories: the SFT source (22.4 GiB, 66 tars) -----------------------

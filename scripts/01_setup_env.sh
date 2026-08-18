@@ -23,7 +23,13 @@ set -ex
 : "${BASE_FOLDER:?set BASE_FOLDER (shared dir for checkpoints/envs)}"
 export BASE_DIR="${BASE_DIR:-$BASE_FOLDER}"
 export SLIME_DIR="${SLIME_DIR:-$BASE_DIR/slime}"
+ENV_NAME="${ENV_NAME:-slime}"
 mkdir -p "$BASE_DIR" "$BASE_FOLDER/logs"
+
+# rst_write_env_stub: the `micromamba activate "$ENV_NAME"` below affects THIS process only,
+# and every launcher runs as a child of something. See scripts/lib_env.sh.
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
 
 # ---- pinned versions: keep in sync with slime/docker/Dockerfile --------------
 export SGLANG_VERSION="v0.5.15.post1"
@@ -45,13 +51,13 @@ fi
 [[ -f ~/.condarc ]] && sed -i '/^\s*-\s*nodefaults\s*$/d' ~/.condarc
 
 eval "$(micromamba shell hook --shell bash)"
-micromamba create -n slime python=3.12 pip -c conda-forge -y
-micromamba activate slime
+micromamba create -n "$ENV_NAME" python=3.12 pip -c conda-forge -y
+micromamba activate "$ENV_NAME"
 export CUDA_HOME="$CONDA_PREFIX"
 
-micromamba install -n slime cuda=12.9.1 cuda-nvtx=12.9.79 cuda-nvtx-dev=12.9.79 nccl \
+micromamba install -n "$ENV_NAME" cuda=12.9.1 cuda-nvtx=12.9.79 cuda-nvtx-dev=12.9.79 nccl \
   -c nvidia/label/cuda-12.9.1 -c nvidia -c conda-forge -y
-micromamba install -n slime -c conda-forge cudnn rust -y
+micromamba install -n "$ENV_NAME" -c conda-forge cudnn rust -y
 pip install cuda-python==12.9
 
 # ---- 1. sglang (rollout engine + eval server) -------------------------------
@@ -154,4 +160,9 @@ import transformer_engine, megatron.core as mcore
 print("TE", transformer_engine.__version__, "megatron.core ok")
 PY
 pip install wandb
-echo "ENV READY. conda env name: slime   (micromamba activate slime)"
+
+# Record how to re-enter this env; the activate above was process-local.
+rst_write_env_stub "$ENV_NAME" "$BASE_FOLDER/env-$ENV_NAME.sh"
+echo "ENV READY. env name: $ENV_NAME"
+echo "  In a shell:   micromamba activate $ENV_NAME"
+echo "  In a script:  source $BASE_FOLDER/env-$ENV_NAME.sh   (the launchers do this)"

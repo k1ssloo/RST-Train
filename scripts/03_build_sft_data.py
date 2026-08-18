@@ -16,7 +16,12 @@ Pipeline
 5. Exact and command-signature dedup.
 6. Tokenization against the real Qwen3.5 tokenizer to measure sequence length
    and to assert slime's ``--loss-mask-type qwen3_5`` contract.
-7. Write ``messages`` parquet (+ train/holdout split) and a manifest.
+7. Write ``messages`` parquet (+ train/holdout split) and a manifest. The split is
+   group-disjoint by default (``--holdout-mode group``): no ``task_group_id`` is in
+   both files, because ``--per-group`` puts up to ten trajectories of one task in
+   the pool and a row-wise shuffle would leave siblings of every held-out example
+   in train. ``--holdout-mode row`` reproduces that older, contaminated split and
+   is recorded in the manifest when used.
 
 Every drop is counted and reported; nothing is silently discarded.
 """
@@ -26,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 import re
 import sys
 import tarfile
@@ -276,7 +282,18 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--per-group", type=int, default=8)
     parser.add_argument("--max-seq-len", type=int, default=32768)
-    parser.add_argument("--holdout", type=int, default=200)
+    parser.add_argument("--holdout", type=int, default=200,
+                        help="TARGET holdout size. In group mode whole task groups are "
+                             "taken, so the actual size overshoots by at most one group")
+    parser.add_argument("--holdout-mode", default="group", choices=["group", "row"],
+                        help="group (default): no task_group_id is in both splits, so the "
+                             "holdout measures transfer to unseen tasks. row: the old "
+                             "uniform shuffle, where siblings of held-out trajectories "
+                             "stay in train -- only for reproducing an earlier number, "
+                             "and the manifest records which was used")
+    parser.add_argument("--max-holdout-fraction", type=float, default=0.15,
+                        help="ceiling on the holdout as a fraction of the pool, so a "
+                             "coarse group structure cannot swallow the training set")
     parser.add_argument("--seed", type=int, default=1228)
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--models", type=str, default="", help="comma-separated model_name allowlist")
@@ -352,8 +369,10 @@ def main() -> int:
     for record in kept:
         messages = record["messages"]
         rendered = tokenizer.apply_chat_template(messages, tokenize=False, return_dict=False)
-        encoding = tokenizer(rendered, add_special_tokens=False, return_offsets_mapping=True)
-        ids = encoding["input_ids"]
+        # No offset mapping here on purpose: this stage needs the LENGTH and the
+        # render-vs-direct-tokenize contract, nothing else. Character offsets are what
+        # a loss mask needs, and that is built once, later, by 15_export_pretokenized.py.
+        ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
         expected = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False)
         if ids != expected:
             stats["drop_slime_contract_mismatch"] += 1
@@ -368,11 +387,64 @@ def main() -> int:
           f"too_long={stats['drop_too_long']}", flush=True)
 
     # ---- split + write -----------------------------------------------------
+    # GROUP-DISJOINT by default. --per-group admits up to that many trajectories of one
+    # task_group_id into the pool (10 for cap10), so a row-wise shuffle puts siblings of
+    # held-out trajectory into train: same task, same verifier, frequently the same
+    # command sequence. The holdout loss then measures memorization of a task the
+    # model was trained on rather than transfer to a new one -- and it is the only
+    # offline number this pipeline produces (06b_eval_offline.py reads exactly this
+    # file, and 20_run_all.sh quotes it when no sandbox is available).
     final.sort(key=lambda r: r["trajectory_id"])
-    rng = __import__("random").Random(args.seed)
-    rng.shuffle(final)
-    holdout = final[: args.holdout]
-    train = final[args.holdout :]
+    rng = random.Random(args.seed)
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for record in final:
+        by_group[record["task_group_id"]].append(record)
+
+    chosen_groups: set[str] = set()
+    if args.holdout_mode == "row":
+        shuffled = list(final)
+        rng.shuffle(shuffled)
+        holdout, train = shuffled[: args.holdout], shuffled[args.holdout :]
+    else:
+        # Whole groups, in a seed-determined order, until the target is met. The
+        # fraction cap is what keeps a coarse group structure (few groups, many
+        # trajectories each) from handing the entire dataset to the holdout.
+        order = sorted(by_group)
+        rng.shuffle(order)
+        cap = int(len(final) * args.max_holdout_fraction)
+        target = min(args.holdout, cap)
+        holdout = []
+        for group_id in order:
+            if len(holdout) >= target:
+                break
+            holdout.extend(by_group[group_id])
+            chosen_groups.add(group_id)
+        train = [r for r in final if r["task_group_id"] not in chosen_groups]
+        if args.holdout and target < args.holdout:
+            print(f"[split] holdout target reduced from {args.holdout} to {target}: "
+                  f"--max-holdout-fraction {args.max_holdout_fraction} of "
+                  f"{len(final)} examples. Group-disjoint splitting cannot give you more "
+                  f"than that without shrinking train.", flush=True)
+        if args.holdout and not holdout:
+            print("[split] WARNING: holdout is EMPTY. There will be no offline "
+                  "generalization measurement at all.", flush=True)
+    holdout.sort(key=lambda r: r["trajectory_id"])
+    train.sort(key=lambda r: r["trajectory_id"])
+    holdout_groups = {r["task_group_id"] for r in holdout}
+
+    if not train:
+        sys.exit(f"every one of the {len(final)} examples ended up in the holdout. Lower "
+                 f"--holdout (now {args.holdout}) or --max-holdout-fraction (now "
+                 f"{args.max_holdout_fraction}), or build a pool spanning more than "
+                 f"{len(by_group)} task groups.")
+    group_overlap = ({r["task_group_id"] for r in train}
+                     & {r["task_group_id"] for r in holdout})
+    if args.holdout_mode == "group" and group_overlap:
+        sys.exit(f"internal error: {len(group_overlap)} task groups appear in both splits "
+                 f"after a group-disjoint split; refusing to write a contaminated holdout")
+    print(f"[split] mode={args.holdout_mode} train={len(train)} holdout={len(holdout)} "
+          f"holdout_groups={len(holdout_groups)} shared_groups={len(group_overlap)}",
+          flush=True)
 
     def write(rows: list[dict], name: str) -> Path:
         frame = pd.DataFrame(
@@ -408,6 +480,16 @@ def main() -> int:
         "final_examples": int(len(final)),
         "train_examples": int(len(train)),
         "holdout_examples": int(len(holdout)),
+        "holdout_mode": args.holdout_mode,
+        "holdout_groups": len(holdout_groups),
+        "holdout_shared_groups_with_train": len(group_overlap),
+        "max_holdout_fraction": args.max_holdout_fraction,
+        "holdout_note": (
+            "group mode: no task_group_id occurs in both splits, so holdout loss is a "
+            "transfer measurement. row mode: siblings of held-out trajectories remain in "
+            "train (up to --per-group of them per task), so holdout loss is closer to a "
+            "memorization check and must be described that way."
+        ),
         "max_seq_len": args.max_seq_len,
         "token_stats": {
             "mean": float(array.mean()),

@@ -21,8 +21,8 @@ The adapter resolves the session from ``Authorization: Bearer <sid>`` (see
 id as Harbor's API key. That is what keeps concurrent rollouts separated on one
 shared adapter port.
 
-THREE CORRECTNESS RULES THAT ARE EASY TO GET WRONG
---------------------------------------------------
+FOUR CORRECTNESS RULES THAT ARE EASY TO GET WRONG
+-------------------------------------------------
 1. **Never normalize the model's JSON here.** The SFT pipeline rewrites fenced
    ```json blocks; doing that in RL would train on tokens the policy did not
    emit, silently breaking the importance ratio. The adapter returns the sampled
@@ -31,22 +31,28 @@ THREE CORRECTNESS RULES THAT ARE EASY TO GET WRONG
    image pull timeout or a DNS error must ABORT the sample (``remove_sample``),
    not teach the policy that its actions were bad. Conflating the two is the
    fastest way to a silently poisoned run.
-3. **Reward comes only from the task's own verifier**, read out of Harbor's
+3. **And the converse: a policy failure is not an infrastructure failure.** An
+   agent that spends its whole wall clock, or emits a command the harness refuses
+   as too long, has failed the task. Dropping those samples would remove the most
+   informative negatives from the GRPO group -- which changes the group baseline
+   and therefore every advantage in it. They score 0 and stay. The taxonomy is
+   ``rst_common/harbor.py``, shared with ``scripts/06_eval.py`` so that RL rewards
+   and eval numbers mean the same thing.
+4. **Reward comes only from the task's own verifier**, read out of Harbor's
    ``result.json`` after the agent exits. Never let the agent see ``tests/``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import sys
 import time
 import traceback
-import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,26 +63,20 @@ from slime.utils.misc import SingletonMeta
 from slime.utils.processing_utils import load_tokenizer
 from slime.utils.types import Sample
 
-logger = logging.getLogger(__name__)
+# 12_run_grpo.sh puts the repo root on PYTHONPATH (that is how `rl.generate` is
+# importable at all), but ray workers have been known to start from elsewhere.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Markers that mean "the sandbox/harness broke", not "the policy failed".
-# Kept deliberately narrow: a plain reward-0 must never land here.
-_INFRA_MARKERS = (
-    "connection reset by peer",
-    "could not resolve host",
-    "docker daemon",
-    "docker compose command failed",
-    "error during connect",
-    "failed to pull image",
-    "name or service not known",
-    "no space left on device",
-    "temporary failure in name resolution",
-    "unexpected eof while reading",
-    "command too long",
-    "rate limit exceeded",
-    "timed out",
-    "unable to locate package",
+from rst_common.harbor import (  # noqa: E402
+    HARNESS_INFRA,
+    Outcome,
+    apply_proxy_policy,
+    read_reward,
+    refine_with_stdout,
+    wall_clock_timeout,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -175,64 +175,14 @@ class _AdapterService(metaclass=SingletonMeta):
 
 # --------------------------------------------------------------------- harbor
 
-def _classify_infra(text: str) -> str | None:
-    lowered = text.lower()
-    return next((m for m in _INFRA_MARKERS if m in lowered), None)
-
-
-def _read_reward(job_dir: Path) -> tuple[float | None, str | None]:
-    """Return ``(reward, infra_reason)`` from a finished Harbor job directory.
-
-    Mirrors terminalevo/runner/harbor.py: trial results live at
-    ``<job>/trials/*/result.json`` or ``<job>/*/result.json``.
-    """
-    candidates = sorted({*(job_dir / "trials").glob("*/result.json"), *job_dir.glob("*/result.json")})
-    if not candidates:
-        return None, "job artifacts incomplete: no trial result.json"
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            return None, f"unreadable trial result: {exc}"
-        exception_info = payload.get("exception_info")
-        if exception_info:
-            reason = _classify_infra(json.dumps(exception_info)) or "harness exception"
-            return None, reason
-        rewards = (payload.get("verifier_result") or {}).get("rewards") or {}
-        value = rewards.get("reward")
-        if isinstance(value, (int, float)):
-            return float(value), None
-    return None, "no verifier reward in trial results"
-
-
-_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-
-
-def _apply_proxy_policy(env: dict[str, str], adapter_url: str) -> None:
-    """Decide what the harbor subprocess should do with proxy variables.
-
-    With `--env docker` everything is on this host, and a proxy can only get in
-    the way of the agent reaching the local adapter -- so drop it. With an
-    off-machine backend, harbor must reach the provider's API, which on a
-    locked-down cluster is exactly what the proxy is for; keep it, and add the
-    adapter's own host to NO_PROXY so rollout traffic still goes direct.
-    """
-    if CONFIG.harbor_env == "docker":
-        for key in _PROXY_KEYS:
-            env.pop(key, None)
-        return
-    if not any(env.get(key) for key in _PROXY_KEYS):
-        return
-    host = urllib.parse.urlsplit(adapter_url).hostname or ""
-    extra = [h for h in (host, "127.0.0.1", "localhost") if h]
-    for key in ("NO_PROXY", "no_proxy"):
-        current = [tok for tok in env.get(key, "").split(",") if tok]
-        env[key] = ",".join(dict.fromkeys(current + extra))
-
-
 async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
-                      job_name: str) -> tuple[float | None, str | None, int]:
-    """Run one Terminus-2 rollout against the adapter. Returns (reward, infra, rc)."""
+                      job_name: str) -> tuple[Outcome, int]:
+    """Run one Terminus-2 rollout against the adapter. Returns (outcome, returncode).
+
+    The taxonomy lives in ``rst_common.harbor`` and is shared with eval, so a
+    budget failure here scores 0 and stays in the GRPO group while a broken
+    sandbox comes back unmeasured.
+    """
     jobs_dir = CONFIG.jobs_root / job_name
     jobs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -264,7 +214,7 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
     )
     if CONFIG.docker_host:
         env["DOCKER_HOST"] = CONFIG.docker_host
-    _apply_proxy_policy(env, state.adapter_url)
+    apply_proxy_policy(env, CONFIG.harbor_env, state.adapter_url)
 
     async with _SANDBOX_SEM:
         process = await asyncio.create_subprocess_exec(
@@ -275,19 +225,21 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            return None, "agent time budget exceeded", -1
+            # Our own wall clock IS the agent's budget: nothing else caps how long
+            # Terminus-2 may keep issuing commands. Reward 0, kept in the group.
+            return wall_clock_timeout(CONFIG.agent_timeout_sec), -1
 
     output = (stdout or b"").decode("utf-8", "replace")
     job_dir = jobs_dir / job_name
-    reward, infra = _read_reward(job_dir if job_dir.is_dir() else jobs_dir)
-    if reward is None and infra is not None:
-        # Harbor's own stdout often names the real cause more precisely.
-        infra = _classify_infra(output) or infra
-        logger.warning("[rst-rl] %s infra=%s rc=%s tail=%s",
-                       job_name, infra, process.returncode, output[-400:].replace("\n", " | "))
+    outcome = read_reward(job_dir if job_dir.is_dir() else jobs_dir)
+    # Harbor's own stdout often names the cause more precisely than result.json.
+    outcome = refine_with_stdout(outcome, output)
+    if outcome.kind is not None:
+        logger.warning("[rst-rl] %s %s=%s rc=%s tail=%s", job_name, outcome.kind, outcome.reason,
+                       process.returncode, output[-400:].replace("\n", " | "))
     if not CONFIG.keep_jobs:
         shutil.rmtree(jobs_dir, ignore_errors=True)
-    return reward, infra, process.returncode or 0
+    return outcome, process.returncode or 0
 
 
 # -------------------------------------------------------------------- results
@@ -347,17 +299,21 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any],
     started = time.time()
     try:
         async with asyncio.timeout(CONFIG.guard_sec):
-            reward, infra, returncode = await _run_harbor(state, session_id, task_dir, job_name)
+            outcome, returncode = await _run_harbor(state, session_id, task_dir, job_name)
 
-            if infra is not None:
-                return _abort(base_sample, f"infrastructure:{infra}",
+            if outcome.kind == HARNESS_INFRA:
+                # Unmeasured, not unsuccessful. Dropping it keeps the group honest.
+                return _abort(base_sample, f"infrastructure:{outcome.reason}",
                               {"harbor_returncode": returncode})
-            assert reward is not None
+            assert outcome.reward is not None
+            reward = outcome.reward
+            budget_reason = outcome.budget_reason
 
             elapsed = time.time() - started
             if evaluation:
                 return _placeholder(base_sample, reward=reward, status=Sample.Status.COMPLETED,
-                                    reason="eval", extra={"task_id": task_id, "elapsed_sec": elapsed})
+                                    reason="eval", extra={"task_id": task_id, "elapsed_sec": elapsed,
+                                                          "agent_budget_failure": budget_reason})
 
             samples = await state.adapter.finish_session(
                 session_id,
@@ -370,19 +326,28 @@ async def generate(args, base_sample: Sample, sampling_params: dict[str, Any],
                     "empirical_pass_rate": metadata.get("empirical_pass_rate"),
                     "solved": reward >= 1.0,
                     "elapsed_sec": elapsed,
+                    # A budget failure is a REAL reward-0 sample and stays in the
+                    # group; this key only exists so the run is auditable.
+                    "agent_budget_failure": budget_reason,
                 },
             )
             if not samples:
-                # Session produced no trainable tokens: the agent never issued a
-                # completion (usually a harness-side failure), so this is infra.
+                # No trainable tokens at all: the policy never got one completion
+                # back, so there is nothing to reward 0. That is a harness-side
+                # failure (adapter or server stalled), not a policy failure --
+                # even when it arrived wearing a budget-timeout hat.
                 return _abort(base_sample, "adapter_session_empty",
-                              {"harbor_returncode": returncode})
-            logger.info("[rst-rl] %s reward=%.2f turns_as_segments=%d elapsed=%.0fs",
-                        task_id, reward, len(samples), elapsed)
+                              {"harbor_returncode": returncode,
+                               "agent_budget_failure": budget_reason})
+            logger.info("[rst-rl] %s reward=%.2f turns_as_segments=%d elapsed=%.0fs%s",
+                        task_id, reward, len(samples), elapsed,
+                        f" budget={budget_reason}" if budget_reason else "")
             return samples
 
     except asyncio.TimeoutError:
-        return _abort(base_sample, "wall_clock_timeout")
+        # The outer guard, agent_timeout + 600s: harbor ignored its own kill, so
+        # something below us is genuinely wedged. Infrastructure, not budget.
+        return _abort(base_sample, f"wall_clock_timeout>{CONFIG.guard_sec}s")
     except Exception as exc:  # noqa: BLE001 - a rollout must never kill the trainer
         logger.warning("[rst-rl] %s failed: %s\n%s", task_id, exc, traceback.format_exc())
         return _abort(base_sample, f"exception:{type(exc).__name__}")

@@ -46,9 +46,22 @@ because every rollout needs one. `RUN_DPO=0` turns DPO off.
 
 `20_run_all.sh` evaluates the **base model on the same harness** as well as the
 fine-tuned one, so "did this help?" is answerable even for sizes the paper never
-published. It writes `verdict.json` with `in_range`, and both post-SFT stages refuse to
-start unless the SFT report has zero FAIL findings — DPO uses that checkpoint as its own
-frozen reference, so an untrustworthy one makes every implicit reward meaningless.
+published. It writes `verdict.json` with two flags: `in_range` (zero FAIL findings of any
+kind) gates GRPO and the next model, and `checkpoint_trustworthy` (zero FAILs *about the
+checkpoint*) gates DPO — DPO uses that checkpoint as its own frozen reference, so an
+untrustworthy one makes every implicit reward meaningless.
+
+The two differ in exactly one case, deliberately: "the benchmarks never ran" — no container
+runtime, or no sglang to serve with — is a FAIL about the *measurement*, not the weights,
+and DPO needs neither a container nor a server. So on a pod that cannot run containers, DPO
+still runs, prints the FAILs it is carrying forward, and both checkpoints must be reported
+as *not agentically evaluated*. That exemption is one entry in `POSTTRAIN_EXEMPT_FAILS` in
+`scripts/14_make_report.py`; nothing else is exempt.
+
+The launchers enter the conda env themselves (`scripts/lib_env.sh`) and verify it by
+locating `torch`/`transformers`/`pandas`/`pyarrow`, because the `micromamba activate` inside
+`01b_setup_env_verl.sh` only affects that script's own process. To do it by hand:
+`source $BASE_FOLDER/env-rstverl.sh` in a script, `micromamba activate rstverl` in a shell.
 
 | key | params | ~min/epoch | min GPUs | note |
 |---|---|---|---|---|
@@ -71,6 +84,7 @@ DPO_PLAN.md                    DPO on logged trajectories: the container-free de
 OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
   00_preflight.sh              detect GPU mem / NVLink / IB / shared FS / RAM → config row
+  lib_env.sh                   sourced by every launcher: enter the conda env, then prove it
   01_setup_env.sh              slime/Megatron env (secondary path)
   01b_setup_env_verl.sh        PRIMARY env: verl+FSDP, driver-adaptive torch build
   16_smoke_forward_backward.py real fwd/bwd on 1 GPU; measures peak memory
@@ -97,6 +111,8 @@ scripts/
   33_run_dpo.sh                the three DPO stages, resumable, container-free
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
+rst_common/                    definitions that must be identical in eval and RL
+tests/                         no-GPU, no-cluster unit tests (see "Tests" below)
 configs/models.json            the model registry
 rl/generate.py                 slime --custom-generate-function-path implementation
 data/
@@ -162,6 +178,13 @@ python scripts/10_build_rl_taskset.py --tasks-root $BASE_FOLDER/rst-tasks \
 | task groups | 1,329 | 1,327 |
 | steps/epoch @ GBS 128 | 82 | 67 |
 
+Both **published** holdouts — and the 200-example counts above — come from a uniform row
+shuffle, so up to `--per-group − 1` siblings of each held-out trajectory sit in train:
+that loss is closer to a memorization check than to a transfer measurement. A local
+rebuild now defaults to `--holdout-mode group`, which puts no `task_group_id` in both
+splits. `manifest.json` records `holdout_mode` either way; quote it next to any holdout
+number.
+
 ## Local quick start (no cluster)
 
 ```bash
@@ -172,3 +195,25 @@ python scripts/03b_validate_sft_data.py \
 
 The data pipeline and the checkpoint conversion are CPU/RAM-bound and can be
 validated on a single machine before booking the cluster — see `PLAN.md` §4.
+
+## Tests
+
+```bash
+python -m pytest tests/ -q     # 37 tests, ~1 s (10 of them skip without torch)
+python tests/run_tests.py      # same tests, for an env without pytest
+```
+
+They need no GPU, no cluster, no container runtime and no dataset. What they cover:
+
+| file | what is pinned |
+|---|---|
+| `tests/test_loss_mask.py` | the two ports of slime's `qwen3_5` mask (producer in `15_export_pretokenized.py`, independent auditor in `03b_validate_sft_data.py`) stay behaviourally identical, on a synthetic tokenizer and on a per-character one; plus the semantics — no prompt/header/user token is ever a target, the `<think>\n` opener is prompt, `step_loss_mask=0` turns are excluded |
+| `tests/test_harbor_outcomes.py` | the `HARNESS_INFRA` vs `AGENT_BUDGET` split in `rst_common/harbor.py`: marker precedence, all three `result.json` layouts, "unmeasured ≠ reward 0", escalate-only stdout refinement, the proxy policy |
+| `tests/test_verl_dataset.py` | `build_row` padding never becomes a training target, and an oversized row is an error rather than a silent truncation; plus `RSTPretokenizedSFTDataset.__init__` raising on a misaligned mask, an oversized table or an empty one *before* the first forward pass (those need torch) |
+| `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
+
+What they do **not** cover, and no test in this repo does: anything that needs the
+real tokenizer (`03b_validate_sft_data.py --sample 300` is that check, run by hand),
+a GPU (`16_smoke_forward_backward.py`), a container runtime (`00b_setup_sandbox.sh`,
+`06_eval.py`), or a multi-node launch. The `⏳`/`⚠️` rows in the status table above
+are exactly those; a green test run says nothing about them.

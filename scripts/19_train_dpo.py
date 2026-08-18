@@ -144,9 +144,21 @@ def log0(rank: int, message: str) -> None:
 
 
 def load_split(pairs: Path, name: str):
+    """One split. A single-file `--pairs` is the TRAIN split and nothing else.
+
+    This used to resolve `pairs` itself for every `name`, so `--pairs some.parquet`
+    returned the same frame for "train" and for "holdout" -- and the run then
+    reported `holdout_reward_accuracy` measured on the pairs it had just trained on,
+    which is the single headline number of this stage and would have been worthless
+    without saying so anywhere. A disjoint holdout cannot be recovered from one file
+    (the split is by task group, which a bare parquet does not record), so the honest
+    result is no holdout at all.
+    """
     import pandas as pd
 
-    path = pairs / f"dpo_{name}.parquet" if pairs.is_dir() else pairs
+    if not pairs.is_dir():
+        return pd.read_parquet(pairs) if name == "train" else None
+    path = pairs / f"dpo_{name}.parquet"
     if not path.is_file():
         return None
     return pd.read_parquet(path)
@@ -237,6 +249,11 @@ def main() -> int:
     ap.add_argument("--logit-chunk", type=int, default=512)
     ap.add_argument("--no-split-backward", action="store_true",
                     help="hold both sides' graphs at once (short sequences only)")
+    ap.add_argument("--oom-skip-step", action="store_true",
+                    help="on a CUDA OOM, drop the whole optimizer step and continue "
+                         "instead of aborting. SINGLE PROCESS ONLY -- with more than one "
+                         "rank a dropped step desynchronizes FSDP's collectives and the "
+                         "job hangs, so it aborts there regardless")
     ap.add_argument("--calibration-tol", type=float, default=0.05,
                     help="max |pi - ref| in nats per token at step 0")
     ap.add_argument("--skip-calibration", action="store_true",
@@ -251,10 +268,22 @@ def main() -> int:
     import torch
 
     rank, world_size, local_rank = dist_info()
+    have_cuda = torch.cuda.is_available()
     if world_size > 1:
+        if not have_cuda:
+            sys.exit("multi-process DPO requires CUDA: this path initializes NCCL and "
+                     "shards with FSDP2. Run single-process to train on CPU.")
         torch.distributed.init_process_group("nccl")
         torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank if torch.cuda.is_available() else 0)
+    # `torch.device("cuda", 0)` is constructible without a GPU but every .to(device)
+    # after it raises, so the old is_available() check only picked the index and the
+    # CPU path still died -- several hundred lines later, in a stack trace about
+    # tensors rather than about hardware.
+    device = torch.device("cuda", local_rank) if have_cuda else torch.device("cpu")
+    if not have_cuda:
+        log0(rank, "WARNING: no CUDA device visible -- running on CPU. Useful for the "
+                   "step-0 = log 2 calibration gate on a tiny model, nothing else: "
+                   "expect minutes per step and no bf16 speedup.")
     torch.manual_seed(args.seed)
 
     # ---- data + the three gates -------------------------------------------
@@ -326,6 +355,17 @@ def main() -> int:
     # a working run. Under FSDP the params are fp32 and compute is bf16 via
     # MixedPrecisionPolicy, so fp32 masters cost nothing in matmul throughput.
     runtime_warnings: list[str] = []
+    if holdout is None or holdout.empty:
+        why = ("--pairs is a single file, which is the train split and carries no "
+               "group-disjoint holdout" if not args.pairs.is_dir()
+               else f"no dpo_holdout.parquet under {args.pairs}")
+        runtime_warnings.append(
+            f"no held-out pairs ({why}). holdout_reward_accuracy will be absent from the "
+            f"summary, so the only evidence this run did anything is its own training loss "
+            f"-- which DPO can lower by memorizing a few thousand pairs. Rebuild with "
+            f"17_build_dpo_data.py (it writes a group-disjoint holdout) before quoting a "
+            f"result."
+        )
     load_dtype = torch.float32 if args.param_dtype == "fp32" else torch.bfloat16
     if args.param_dtype == "bf16" and args.lr < 1e-5:
         runtime_warnings.append(
@@ -498,7 +538,26 @@ def main() -> int:
     grad_norms: list[float] = []
     started = time.time()
     cursor = 0
-    skipped_oom = 0
+    oom_steps = 0
+
+    def oom_message(step: int, row, micro: int) -> str:
+        return (
+            f"CUDA OOM at step {step}, micro-batch {micro}/{args.grad_accum}, on pair "
+            f"{row.pair_id} ({int(row.chosen_n_tokens)}/{int(row.rejected_n_tokens)} tokens "
+            f"per side).\n"
+            f"  Remedies, cheapest first:\n"
+            f"    * PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True -- OOM at 32k with a "
+            f"chunked LM head is usually fragmentation, not capacity.\n"
+            f"    * lower --logit-chunk (now {args.logit_chunk}); it trades speed for the "
+            f"peak logits slice. It also regroups the logprob sum, so rescore the reference "
+            f"with the SAME value or gate 3 turns approximate.\n"
+            f"    * do NOT pass --no-split-backward" + (" (it is on: that holds both sides' "
+            "graphs at once, which is what does not fit)" if args.no_split_backward else "") + ".\n"
+            f"    * lower --max-seq-len (now {args.max_seq_len:,}) and rescore the reference "
+            f"with the same value, so 18 and 19 skip the same pairs.\n"
+            f"    * more ranks: FSDP2 shards params and optimizer state, so the fp32 masters "
+            f"and Adam state shrink linearly."
+        )
 
     for step in range(total_steps):
         for group in optimizer.param_groups:
@@ -508,8 +567,10 @@ def main() -> int:
                "reward_margin": 0.0, "accuracy": 0.0, "chosen_logp_per_token": 0.0,
                "rejected_logp_per_token": 0.0}
         counted = 0
+        oom_micro: int | None = None
+        oom_row = None
 
-        for _ in range(args.grad_accum):
+        for micro in range(args.grad_accum):
             row = my_rows.iloc[cursor % len(my_rows)]
             cursor += 1
             scale = 1.0 / args.grad_accum
@@ -553,14 +614,28 @@ def main() -> int:
                                                    dtype=logp.dtype))
                         del logp
             except torch.cuda.OutOfMemoryError:
-                # One pair is not worth aborting a run, but a silent skip would be a
-                # quietly different dataset. Counted here and reported in the summary.
-                optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
-                skipped_oom += 1
-                log0(rank, f"[step {step}] OOM on pair {row.pair_id[:12]} "
-                           f"({row.chosen_n_tokens}/{row.rejected_n_tokens} tokens); skipped")
-                continue
+                # Abandon the WHOLE STEP, and only after the accumulation loop has been
+                # left. The previous handler zeroed the gradients and `continue`d, which
+                # was wrong twice over:
+                #
+                #   * zero_grad() deletes the gradients of the micro-batches that already
+                #     succeeded in THIS step, so optimizer.step() below applied a step
+                #     built from the pairs after the OOM only -- a silently smaller
+                #     effective batch, while `counted` still reported the ones it threw
+                #     away as trained.
+                #   * `continue` makes this rank issue one fewer forward/backward than
+                #     every other rank. Under FSDP2 each backward is a collective
+                #     (all-gather params, reduce-scatter grads), so the ranks desynchronize
+                #     and the job hangs in NCCL until the watchdog kills it, ~10 minutes
+                #     later, with a timeout traceback that says nothing about memory.
+                #
+                # There is no safe mid-backward recovery for the multi-rank case: by the
+                # time the exception is visible, this rank has already failed to enter
+                # collectives its peers are waiting in, so it cannot rejoin them -- not
+                # even to agree that everyone should skip. Single process, there are no
+                # collectives and dropping the step is sound.
+                oom_micro, oom_row = micro + 1, row
+                break
 
             agg["loss"] += float(loss)
             agg["reward_chosen"] += metrics["reward_chosen"]
@@ -570,6 +645,21 @@ def main() -> int:
             agg["chosen_logp_per_token"] += logp_c
             agg["rejected_logp_per_token"] += logp_r
             counted += 1
+
+        if oom_micro is not None:
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+            detail = oom_message(step, oom_row, oom_micro)
+            if world_size > 1 or not args.oom_skip_step:
+                if world_size > 1 and args.oom_skip_step:
+                    detail += ("\n  --oom-skip-step was requested but this is a "
+                               f"{world_size}-rank job, where dropping a step on one rank "
+                               "deadlocks the others in NCCL. Aborting is the only "
+                               "non-hanging option.")
+                sys.exit(detail)
+            oom_steps += 1
+            log0(rank, "WARNING: step dropped, --oom-skip-step is on.\n" + detail)
+            continue
 
         # The pre-clip norm, recorded every step. The objective sums logprobs over
         # thousands of supervised tokens per side, so this is routinely ~1e3 against a
@@ -677,7 +767,7 @@ def main() -> int:
             "data": {
                 "pairs_train_used": int(usable),
                 "pairs_skipped_too_long": int(len(too_long)),
-                "pairs_skipped_oom": int(skipped_oom),
+                "steps_dropped_oom": int(oom_steps),
                 "steps": len(steps),
                 "grad_accum": args.grad_accum,
                 "world_size": world_size,

@@ -200,7 +200,16 @@ def main() -> int:
           f"(identical values would mean loss_mask is being ignored)")
     results["all_masked_loss"] = all_masked_loss
 
-    # trained-token fraction actually reaching the loss
+    # Trained-token fraction actually reaching the loss.
+    #
+    # WHY THIS BAND IS WIDER THAN 30_run_sft_verl.sh's 0.25-0.45: that launcher measures
+    # the fraction over the WHOLE untruncated dataset (32.42% measured for cap10), while
+    # this measures `--rows` rows (4 by default) each truncated to `--seq-len` (4096).
+    # Both knobs move the number legitimately -- four rows have real sampling spread,
+    # and keeping only a prefix retains the long untrained harness preamble while cutting
+    # trained assistant turns off the tail, pushing the fraction down. This check only
+    # asks "is the mask present at all", so 0.15-0.55; the dataset-wide assertion at
+    # train time is the tight one, and a mask bug fails both.
     frac = float(sum(int(sum(list(r.loss_mask)[: args.seq_len])) for r in frame.itertuples()) /
                  max(1, sum(len(list(r.input_ids)[: args.seq_len]) for r in frame.itertuples())))
     check("trained-token fraction in the expected band", 0.15 <= frac <= 0.55,

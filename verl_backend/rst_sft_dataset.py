@@ -139,6 +139,39 @@ class RSTPretokenizedSFTDataset(Dataset):
         if limit and limit > 0:
             self.frame = self.frame.head(limit)
 
+        # Validate the whole table HERE, at configuration time. build_row() raises the
+        # same two errors, but it runs inside a DataLoader worker partway through an
+        # epoch: the job dies after minutes or hours of GPU time, with a stack trace
+        # from a subprocess, and (for `truncation="error"`) for a reason that was
+        # already knowable before the first forward pass. 30_run_sft_verl.sh checks
+        # lengths before launching; this makes the dataset itself do it too, so a
+        # hand-run launch or a different launcher cannot skip the check.
+        id_lengths = self.frame["input_ids"].map(len)
+        mask_lengths = self.frame["loss_mask"].map(len)
+        mismatched = int((id_lengths != mask_lengths).sum())
+        if mismatched:
+            raise ValueError(
+                f"{mismatched} of {len(self.frame)} rows have input_ids and loss_mask of "
+                f"different lengths. The mask does not describe this sequence; re-export "
+                f"with scripts/15_export_pretokenized.py."
+            )
+        if len(self.frame) == 0:
+            raise ValueError("the dataset is empty after filtering; nothing to train on")
+        over = int((id_lengths > self.max_length).sum())
+        if over and self.truncation == "error":
+            raise ValueError(
+                f"{over} of {len(self.frame)} rows are longer than max_length="
+                f"{self.max_length} (longest {int(id_lengths.max()):,} tokens), and "
+                f"truncation='error'. Raise data.max_length, re-export with a smaller "
+                f"--max-seq-len so the drop is counted in the manifest, or set "
+                f"data.truncation=left|right deliberately -- truncating a trajectory "
+                f"changes what is being trained on."
+            )
+        if over:
+            print(f"[RSTPretokenizedSFTDataset] WARNING: {over} row(s) exceed "
+                  f"max_length={self.max_length} and will be truncated "
+                  f"({self.truncation}); trained-token counts below are pre-truncation.")
+
         trained = int(self.frame["loss_mask"].map(sum).sum())
         total = int(self.frame["input_ids"].map(len).sum())
         print(

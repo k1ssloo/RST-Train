@@ -388,12 +388,24 @@ def read_holdout(path: Path, tokenizer_path: str | None, max_seq_len: int,
         frame = frame.head(max_rows)
     info["rows_used"] = int(len(frame))
 
+    # A row longer than --max-seq-len is DROPPED, not shortened. Truncating changes
+    # what is being scored: cut the tail off a trajectory and the held-out loss is
+    # measured over a different, easier target than the one the row describes (see
+    # 17_build_dpo_data.py --max-seq-len: "a truncated trajectory is a different
+    # trajectory"). The drop is deterministic given max_seq_len, so two checkpoints
+    # scored with the same value are still comparable -- which is why the count and
+    # the value both go into the results json.
+    too_long = 0
+
     if "input_ids" in columns and "loss_mask" in columns:
         info["source"] = "pretokenized"
-        rows = [
-            (list(r.input_ids)[:max_seq_len], list(r.loss_mask)[:max_seq_len])
-            for r in frame.itertuples()
-        ]
+        rows = []
+        for r in frame.itertuples():
+            ids, mask = list(r.input_ids), list(r.loss_mask)
+            if len(ids) > max_seq_len:
+                too_long += 1
+                continue
+            rows.append((ids, mask))
     elif "messages" in columns:
         if not tokenizer_path:
             raise SystemExit(
@@ -412,14 +424,31 @@ def read_holdout(path: Path, tokenizer_path: str | None, max_seq_len: int,
             except ValueError:
                 dropped += 1
                 continue
-            rows.append((ids[:max_seq_len], mask[:max_seq_len]))
+            if len(ids) > max_seq_len:
+                too_long += 1
+                continue
+            rows.append((ids, mask))
         info["dropped_contract_failures"] = dropped
     else:
         raise SystemExit(
             f"{path} has neither (input_ids, loss_mask) nor messages; columns={columns}"
         )
+    info["max_seq_len"] = int(max_seq_len)
+    info["dropped_too_long"] = too_long
+    before_unsupervised = len(rows)
     rows = [(i, m) for i, m in rows if sum(m) > 0]
+    info["dropped_no_trained_tokens"] = before_unsupervised - len(rows)
     info["rows_scored"] = len(rows)
+    if too_long:
+        print(f"[holdout] dropped {too_long} row(s) longer than {max_seq_len} tokens "
+              f"(not truncated -- a truncated trajectory is a different trajectory). "
+              f"Raise --max-seq-len to score them.")
+    if not rows:
+        raise SystemExit(
+            f"no scorable rows left from {path}: {info['rows_used']} used, "
+            f"{too_long} over --max-seq-len={max_seq_len}, "
+            f"{info['dropped_no_trained_tokens']} with no trained tokens."
+        )
     return frame, rows, info
 
 

@@ -216,9 +216,11 @@ still be coincidence). **Use `data/sft-v1-cap10/` as the primary run** and keep
 ```bash
 export BASE_FOLDER=/shared/rst SLIME_DIR=$BASE_FOLDER/slime
 export MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile
+export ACTOR_NUM_NODES=4 ACTOR_NUM_GPUS_PER_NODE=8   # the GPU count comes from here only
 export MEM_CLASS=auto WANDB_KEY=<key>        # omit key → offline
 bash scripts/00_preflight.sh --hostfile $HOSTFILE   # do this first, read it
 bash scripts/01b_setup_env_verl.sh   # verl (primary); 01_setup_env.sh only for slime/Megatron
+source $BASE_FOLDER/env-rstverl.sh   # ^ activated in its own process only; this enters it
 bash scripts/02_download.sh
 bash scripts/04_convert_ckpt.sh to_dist      # 20–40 min, CPU-bound, ~120 GB RAM
 bash scripts/05_run_sft.sh

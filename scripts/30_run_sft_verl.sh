@@ -35,6 +35,16 @@ MODEL_KEY="${MODEL_KEY:-qwen3.5-9b}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$REPO_DIR"
 
+# Enter the training env before the first `python`. 20_run_all.sh already did it and
+# rst_enter_env then just confirms it (one find_spec, no re-activation), but this
+# script is also documented as a standalone entry point, and torchrun launching an
+# interpreter without verl in it fails deep inside the worker with a traceback that
+# looks like a verl bug.
+# shellcheck source=lib_env.sh
+source "$REPO_DIR/scripts/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "${ENV_NAME:-rstverl}" || exit 2
+
 GPU_MEM_MIB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
 if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
   if (( GPU_MEM_MIB > 70000 )); then MEM_CLASS=80GB; else MEM_CLASS=40GB; fi
@@ -100,6 +110,10 @@ if too_long:
 # 32.42% measured for cap10. A mask bug typically lands far outside this band: ~100%
 # means nothing is masked (training on the harness prompt and terminal output), ~0%
 # means everything is.
+# This band is tighter than the 0.15-0.55 one in 16_smoke_forward_backward.py on purpose:
+# here the fraction covers every row at full length, there it covers 4 rows truncated to
+# --seq-len, which has both sampling spread and a truncation bias toward the untrained
+# preamble. Tight where the measurement is stable, loose where it is not.
 if not (0.25 <= frac <= 0.45):
     sys.exit(f"REFUSING TO TRAIN: trained fraction {frac:.2%} is outside the 0.25-0.45 band "
              f"measured for this dataset. Near 100% means the mask is absent (you would train "
@@ -111,6 +125,23 @@ EOF_PY
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
 [[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"
 export WANDB_DIR="${BASE_FOLDER}/wandb"; mkdir -p "$WANDB_DIR"
+
+# By default verl's FSDP checkpointer writes sharded weights only: each
+# global_step_<n>/ gets model_world_size_*_rank_*.pt plus a huggingface/ directory
+# holding config.json and the tokenizer and NO weights. 20_run_all.sh handles that
+# by merging the shards afterwards (`python -m verl.model_merger merge --backend
+# fsdp`), which costs a second full read of the checkpoint.
+#
+# SAVE_HF_MODEL=1 asks the checkpointer to write HF weights directly instead. It is
+# opt-in rather than the default because the config key for save_contents has moved
+# between verl versions, and an unknown key makes hydra abort the launch. If it
+# aborts with "Could not override 'trainer.checkpoint.save_contents'", drop the flag
+# (the merge path works regardless) or point SAVE_HF_MODEL_KEY at the right path.
+CKPT_ARGS=()
+if [[ "${SAVE_HF_MODEL:-0}" == "1" ]]; then
+  CKPT_ARGS+=("${SAVE_HF_MODEL_KEY:-trainer.checkpoint.save_contents}=['model','optimizer','extra','hf_model']")
+  echo "SAVE_HF_MODEL=1 -> ${CKPT_ARGS[0]}"
+fi
 
 # FSDP shards params; TP is used only if the registry asked for it. `ulysses` is
 # verl's sequence-parallel knob and is the closest analogue to Megatron CP if you
@@ -148,6 +179,7 @@ torchrun \
   trainer.default_local_dir="$BASE_FOLDER/$RUN_NAME" \
   trainer.logger="['console','wandb']" \
   trainer.save_freq=20 \
+  "${CKPT_ARGS[@]+"${CKPT_ARGS[@]}"}" \
   "$@"
 
 cat <<EOF

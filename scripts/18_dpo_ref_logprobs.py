@@ -42,8 +42,11 @@ WHAT WOULD SILENTLY GO WRONG, AND WHAT STOPS IT
       reproducible on this hardware, and the step-0 gate downstream will be noise.
 
 OUTPUT
-    <out>/ref_logps[_shard<N>].parquet          pair_id + 4 columns
-    <out>/ref_logps[_shard<N>]_manifest.json    fingerprint, dtype, self-check
+    <out>/ref_logps[_shard<N>].parquet             pair_id + 4 columns
+    <out>/ref_logps[_shard<N>]_provenance.json     written BEFORE scoring: the identity
+                                                   a resume must match
+    <out>/ref_logps[_shard<N>]_manifest.json       written after: fingerprint, dtype,
+                                                   self-check, plausibility stats
 """
 
 from __future__ import annotations
@@ -110,6 +113,10 @@ def main() -> int:
                     help="rows to score twice as a determinism probe")
     ap.add_argument("--flush-every", type=int, default=50,
                     help="write partial results this often, so a long run is resumable")
+    ap.add_argument("--force-resume", action="store_true",
+                    help="resume a parquet that has no provenance sidecar (pre-dates it, "
+                         "or was written by an interrupted older run). Only safe if the "
+                         "weights, --dtype and --logit-chunk are provably unchanged.")
     args = ap.parse_args()
 
     import pandas as pd
@@ -134,44 +141,71 @@ def main() -> int:
     tag = "" if args.num_shards == 1 else f"_shard{args.shard}"
     out_path = args.out / f"ref_logps{tag}.parquet"
     manifest_path = args.out / f"ref_logps{tag}_manifest.json"
+    provenance_path = args.out / f"ref_logps{tag}_provenance.json"
+
+    fingerprint = checkpoint_fingerprint(args.model_path)
+    print(f"[model] {args.model_path} fingerprint={fingerprint[:16]}...", flush=True)
+
+    # What makes these numbers valid. A reference logprob is a constant only for one
+    # exact (checkpoint, dataset, mask, dtype, chunking) combination, so the identity
+    # is written BEFORE any scoring -- the end-of-run manifest is too late to protect
+    # a resume, which is precisely when the mix-up happens (crashed pass, re-export of
+    # out-hf-full underneath it, second attempt with a different --dtype).
+    identity = {
+        "pairs_source": str(args.pairs),
+        "split": args.split,
+        "checkpoint_fingerprint": fingerprint,
+        "dtype": args.dtype,
+        "logit_chunk": args.logit_chunk,
+        "max_seq_len": args.max_seq_len,
+        "shard": args.shard,
+        "num_shards": args.num_shards,
+    }
 
     # Resume: a partial file is a resume point, not garbage to overwrite. A 27 B
     # reference pass over thousands of 32k-token pairs is hours of GPU time.
     done: dict[str, dict] = {}
     if out_path.is_file():
+        prior_identity = None
+        if provenance_path.is_file():
+            try:
+                prior_identity = json.loads(provenance_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                sys.exit(f"{provenance_path} is unreadable ({exc}); delete it and {out_path} "
+                         f"to rescore from scratch")
+        if prior_identity is None and not args.force_resume:
+            sys.exit(
+                f"{out_path} exists but {provenance_path.name} does not, so there is no "
+                f"record of which checkpoint produced those rows. Resuming would mix "
+                f"logprobs from two different reference models, which DPO cannot detect "
+                f"-- it would just train on a wrong constant. Either delete {out_path} "
+                f"and rescore, or pass --force-resume if you are certain the weights, "
+                f"--dtype and --logit-chunk are unchanged."
+            )
+        if prior_identity is not None:
+            drift = {k: (prior_identity.get(k), v) for k, v in identity.items()
+                     if prior_identity.get(k) != v}
+            if drift:
+                lines = "\n".join(f"    {k}: was {old!r}, now {new!r}"
+                                  for k, (old, new) in sorted(drift.items()))
+                sys.exit(
+                    f"REFUSING TO RESUME: {out_path} was produced under different "
+                    f"conditions:\n{lines}\n"
+                    f"  Reference logprobs are constants for ONE (checkpoint, dataset, "
+                    f"mask, dtype, chunk) combination. Mixing two of them silently "
+                    f"corrupts every DPO gradient. Delete that file (and its manifest) "
+                    f"to rescore, or write to a different --out."
+                )
         prior = pd.read_parquet(out_path)
         done = {row.pair_id: row._asdict() for row in prior.itertuples(index=False)}
         print(f"[resume] {len(done):,} rows already scored in {out_path}", flush=True)
 
+    provenance_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+
     todo = frame[~frame.pair_id.isin(done)].reset_index(drop=True)
     print(f"[plan] {len(todo):,} of {len(frame):,} rows to score "
           f"(shard {args.shard}/{args.num_shards})", flush=True)
-
-    fingerprint = checkpoint_fingerprint(args.model_path)
-    print(f"[model] {args.model_path} fingerprint={fingerprint[:16]}...", flush=True)
-
-    if todo.empty:
-        print("[done] nothing to do")
-        return 0
-
-    model, auto_class = load_model(args.model_path,
-                                   dtype=getattr(torch, DTYPES[args.dtype]),
-                                   device_map="cuda")
-    model.eval()
-    model.config.use_cache = False
-    print(f"[model] loaded with {auto_class}", flush=True)
-
-    def score(ids, mask, *, expect: int, side: str, pair_id: str) -> float:
-        logp, n = masked_logprob_sum(model, list(int(i) for i in ids),
-                                     list(int(m) for m in mask), chunk=args.logit_chunk)
-        if n != int(expect):
-            sys.exit(
-                f"pair {pair_id} {side}: scored {n} supervised tokens but the dataset "
-                f"says {int(expect)}. The mask this script used and the mask the "
-                f"builder wrote disagree, so these logprobs would be for a different "
-                f"objective than the one being trained. Rebuild the pairs and rerun."
-            )
-        return float(logp)
 
     rows: list[dict] = list(done.values())
     checks: list[float] = []
@@ -180,39 +214,76 @@ def main() -> int:
     def flush() -> None:
         pd.DataFrame(rows).to_parquet(out_path, index=False)
 
-    for i, row in enumerate(todo.itertuples(index=False)):
-        c_logp = score(row.chosen_input_ids, row.chosen_loss_mask,
-                       expect=row.chosen_n_trained, side="chosen", pair_id=row.pair_id)
-        r_logp = score(row.rejected_input_ids, row.rejected_loss_mask,
-                       expect=row.rejected_n_trained, side="rejected", pair_id=row.pair_id)
-        if len(checks) < args.self_check:
-            again = score(row.chosen_input_ids, row.chosen_loss_mask,
-                          expect=row.chosen_n_trained, side="chosen(recheck)",
-                          pair_id=row.pair_id)
-            checks.append(abs(again - c_logp))
-        rows.append({
-            "pair_id": row.pair_id,
-            "split": row.split,
-            "chosen_ref_logp": c_logp,
-            "rejected_ref_logp": r_logp,
-            "chosen_ref_n": int(row.chosen_n_trained),
-            "rejected_ref_n": int(row.rejected_n_trained),
-        })
-        if (i + 1) % args.flush_every == 0:
-            flush()
-            rate = (i + 1) / max(time.time() - started, 1e-6)
-            eta = (len(todo) - i - 1) / max(rate, 1e-9) / 60
-            print(f"[{i + 1:,}/{len(todo):,}] {rate * 60:.1f} pairs/min "
-                  f"eta {eta:.0f} min  last: chosen {c_logp / max(row.chosen_n_trained, 1):.3f} "
-                  f"rejected {r_logp / max(row.rejected_n_trained, 1):.3f} nats/token",
-                  flush=True)
-    flush()
+    auto_class = "not loaded (every row resumed from disk)"
+    if todo.empty:
+        # Everything is already scored. Do NOT return early: the manifest is what
+        # 19_train_dpo.py validates before training, and a pass that crashed after
+        # its last flush but before writing the manifest leaves a COMPLETE parquet
+        # with no manifest -- the exact state where returning here would make the
+        # re-run look successful while the trainer still has nothing to check
+        # against. Fall through and rebuild the manifest from the rows on disk.
+        print("[plan] nothing left to score; rebuilding the manifest from disk", flush=True)
+    else:
+        model, auto_class = load_model(args.model_path,
+                                       dtype=getattr(torch, DTYPES[args.dtype]),
+                                       device_map="cuda")
+        model.eval()
+        model.config.use_cache = False
+        print(f"[model] loaded with {auto_class}", flush=True)
+
+        def score(ids, mask, *, expect: int, side: str, pair_id: str) -> float:
+            logp, n = masked_logprob_sum(model, list(int(i) for i in ids),
+                                         list(int(m) for m in mask), chunk=args.logit_chunk)
+            if n != int(expect):
+                sys.exit(
+                    f"pair {pair_id} {side}: scored {n} supervised tokens but the dataset "
+                    f"says {int(expect)}. The mask this script used and the mask the "
+                    f"builder wrote disagree, so these logprobs would be for a different "
+                    f"objective than the one being trained. Rebuild the pairs and rerun."
+                )
+            return float(logp)
+
+        for i, row in enumerate(todo.itertuples(index=False)):
+            c_logp = score(row.chosen_input_ids, row.chosen_loss_mask,
+                           expect=row.chosen_n_trained, side="chosen", pair_id=row.pair_id)
+            r_logp = score(row.rejected_input_ids, row.rejected_loss_mask,
+                           expect=row.rejected_n_trained, side="rejected", pair_id=row.pair_id)
+            if len(checks) < args.self_check:
+                again = score(row.chosen_input_ids, row.chosen_loss_mask,
+                              expect=row.chosen_n_trained, side="chosen(recheck)",
+                              pair_id=row.pair_id)
+                checks.append(abs(again - c_logp))
+            rows.append({
+                "pair_id": row.pair_id,
+                "split": row.split,
+                "chosen_ref_logp": c_logp,
+                "rejected_ref_logp": r_logp,
+                "chosen_ref_n": int(row.chosen_n_trained),
+                "rejected_ref_n": int(row.rejected_n_trained),
+            })
+            if (i + 1) % args.flush_every == 0:
+                flush()
+                rate = (i + 1) / max(time.time() - started, 1e-6)
+                eta = (len(todo) - i - 1) / max(rate, 1e-9) / 60
+                print(f"[{i + 1:,}/{len(todo):,}] {rate * 60:.1f} pairs/min "
+                      f"eta {eta:.0f} min  last: chosen {c_logp / max(row.chosen_n_trained, 1):.3f} "
+                      f"rejected {r_logp / max(row.rejected_n_trained, 1):.3f} nats/token",
+                      flush=True)
+        flush()
 
     # ---- plausibility, stated as numbers rather than trusted silently ---------
     scored = pd.DataFrame(rows)
     c_per_tok = (scored.chosen_ref_logp / scored.chosen_ref_n).astype(float)
     r_per_tok = (scored.rejected_ref_logp / scored.rejected_ref_n).astype(float)
     determinism = max(checks) if checks else None
+    if determinism is None and manifest_path.is_file():
+        # Carried over from the pass that actually did the scoring, so a resumed run
+        # does not silently drop the one piece of evidence about reproducibility.
+        try:
+            determinism = json.loads(
+                manifest_path.read_text(encoding="utf-8")).get("determinism_max_abs_nats")
+        except (OSError, json.JSONDecodeError):
+            determinism = None
     warnings: list[str] = []
     if determinism is not None and determinism > 1e-3:
         warnings.append(

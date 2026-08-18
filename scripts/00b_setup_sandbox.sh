@@ -67,11 +67,18 @@
 # host's") is satisfied more strongly by both, not waived.
 set -uo pipefail
 
+# A mode is read from the command line ONLY when this file was executed as a
+# program. 20_run_all.sh *sources* it (it has to: RST_HARBOR_ENV has to survive into
+# the caller), and a sourced script sees the PARENT's positional parameters. So
+# `bash scripts/20_run_all.sh --check` used to make this script exit 0 in the middle
+# of the orchestration, and `--diagnose` used to `exec python` over the whole run.
 MODE=select
-case "${1:-}" in
-  --check)    MODE=check ;;
-  --diagnose) MODE=diagnose ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-}" in
+    --check)    MODE=check ;;
+    --diagnose) MODE=diagnose ;;
+  esac
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"

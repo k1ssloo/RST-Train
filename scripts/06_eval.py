@@ -10,13 +10,21 @@ reported as mean +- std. Daytona is replaced by Docker.
 
 WHAT THIS DOES THAT A NAIVE PASS-RATE SCRIPT DOES NOT
 -----------------------------------------------------
-1. **Separates infrastructure failures from model failures.** A Docker build
-   failure is not a wrong answer. Infra failures are excluded from the pass-rate
-   denominator and reported as their own rate; a high rate invalidates the run
-   rather than lowering the score. Conflating them silently deflates results and
-   is the single easiest way to draw a false conclusion here.
+1. **Separates infrastructure failures from model failures, in BOTH directions.**
+   A Docker build failure is not a wrong answer: harness-infrastructure failures
+   are excluded from the pass-rate denominator and reported as their own rate, so
+   a high rate invalidates the run rather than lowering the score. But the
+   converse matters just as much -- an agent that burns its wall clock, or emits a
+   command the harness refuses as too long, has *failed the task*. Those count as
+   reward 0 inside the denominator and are reported separately. Excluding them
+   would inflate the score most on the hardest tasks, which is where it would do
+   the most damage. The taxonomy lives in `rst_common/harbor.py` and is shared
+   with the RL rollout so the two sets of numbers are comparable.
 2. **Reports mean +- std over independent runs**, because that is what the paper
-   reports and a single run on ~100 tasks has a std of several points.
+   reports and a single run on ~100 tasks has a std of several points. The
+   sampling parameters that make those runs independent are recorded in
+   `protocol.sampling` -- including, explicitly, when this script could not set
+   them, because "3 runs of a greedy decode" is one run reported three times.
 3. **Records per-task outcomes**, so a regression can be localized instead of
    guessed at.
 4. **Refuses to invent numbers.** Benchmarks whose verifiers are unavailable are
@@ -35,36 +43,34 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import os
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Narrow marker list: a plain reward-0 must never be classified as infrastructure.
-INFRA_MARKERS = (
-    "connection reset by peer", "could not resolve host", "docker daemon",
-    "docker compose command failed", "error during connect", "failed to pull image",
-    "name or service not known", "no space left on device",
-    "temporary failure in name resolution", "unexpected eof while reading",
-    "command too long", "rate limit exceeded", "timed out", "unable to locate package",
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rst_common.harbor import (  # noqa: E402  (path shim must run first)
+    AGENT_BUDGET,
+    AGENT_BUDGET_MARKERS,
+    HARNESS_INFRA,
+    HARNESS_INFRA_MARKERS,
+    Outcome,
+    apply_proxy_policy,
+    read_reward,
+    refine_with_stdout,
+    wall_clock_timeout,
 )
+from rst_common.paper import PAPER  # noqa: E402
 
 EXPECTED_TASK_COUNTS = {"tb-hard": 100, "tb2": 89}
 UNSCORABLE = {"lhtb": "verifiers withheld upstream (0/46 tasks ship tests/)"}
-
-# Paper Tables 3-4, pass rate %. LHTB kept for reference only.
-PAPER = {
-    "base":    {"tb2": 41.20, "tb-hard": 22.67, "lhtb": 18.10},
-    "sft_r1":  {"tb2": 42.32, "tb-hard": 23.00, "lhtb": 21.32},
-    "sft_r3":  {"tb2": 47.94, "tb-hard": 28.33, "lhtb": 22.44},
-    "rl":      {"tb2": 49.44, "tb-hard": 32.00, "lhtb": 22.07},
-}
 
 
 @dataclass
@@ -74,48 +80,32 @@ class TaskOutcome:
     task_id: str
     reward: float | None = None
     infra_reason: str | None = None
+    budget_reason: str | None = None
     seconds: float = 0.0
     returncode: int = 0
 
+    def apply(self, outcome: Outcome) -> None:
+        self.reward = outcome.reward
+        self.infra_reason = outcome.infra_reason
+        self.budget_reason = outcome.budget_reason
+
     @property
     def scorable(self) -> bool:
+        """In the denominator: a real score, or a budget failure scored as 0."""
         return self.reward is not None and self.infra_reason is None
 
     @property
     def solved(self) -> bool:
-        return self.scorable and self.reward >= 1.0
+        return self.scorable and (self.reward or 0.0) >= 1.0
 
 
 @dataclass
 class BenchmarkResult:
     name: str
     per_run_pass_rate: list[float] = field(default_factory=list)
+    per_run_pass_rate_budget_excluded: list[float] = field(default_factory=list)
     outcomes: list[TaskOutcome] = field(default_factory=list)
     unscorable_reason: str | None = None
-
-
-def classify_infra(text: str) -> str | None:
-    lowered = text.lower()
-    return next((m for m in INFRA_MARKERS if m in lowered), None)
-
-
-def read_reward(job_dir: Path) -> tuple[float | None, str | None]:
-    """Read Harbor's trial result. Layout per terminalevo/runner/harbor.py."""
-    candidates = sorted({*(job_dir / "trials").glob("*/result.json"), *job_dir.glob("*/result.json"),
-                         *job_dir.glob("result.json")})
-    if not candidates:
-        return None, "job artifacts incomplete: no result.json"
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            return None, f"unreadable result.json: {exc}"
-        if payload.get("exception_info"):
-            return None, classify_infra(json.dumps(payload["exception_info"])) or "harness exception"
-        value = ((payload.get("verifier_result") or {}).get("rewards") or {}).get("reward")
-        if isinstance(value, (int, float)):
-            return float(value), None
-    return None, "no verifier reward in result.json"
 
 
 def discover_tasks(root: Path) -> list[Path]:
@@ -150,17 +140,7 @@ def harbor_env_kwargs(args) -> list[str]:
 
 
 def harbor_process_env(args) -> dict[str, str]:
-    """Environment for the harbor subprocess.
-
-    Two different situations, and conflating them breaks one of them:
-
-    * `--env docker`: everything is on this host. Proxy variables must be REMOVED,
-      or the agent's calls to the local vLLM endpoint get routed through a proxy
-      that cannot see it.
-    * an off-machine backend (daytona/e2b/modal/k8s): harbor needs outbound HTTPS
-      to reach the provider, which on a locked-down cluster usually means the
-      proxy IS required. Keep it, and put the local endpoint in NO_PROXY instead.
-    """
+    """Environment for the harbor subprocess. Proxy policy is shared with RL."""
     env = dict(os.environ)
     env.update({
         "HOSTED_VLLM_API_BASE": args.endpoint,
@@ -170,17 +150,56 @@ def harbor_process_env(args) -> dict[str, str]:
     })
     if args.docker_host:
         env["DOCKER_HOST"] = args.docker_host
-    proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    if args.harbor_env == "docker":
-        for key in proxy_keys:
-            env.pop(key, None)
-    elif any(env.get(k) for k in proxy_keys):
-        host = urllib.parse.urlsplit(args.endpoint).hostname or ""
-        extra = [h for h in (host, "127.0.0.1", "localhost") if h]
-        for key in ("NO_PROXY", "no_proxy"):
-            current = [t for t in env.get(key, "").split(",") if t]
-            env[key] = ",".join(dict.fromkeys(current + extra))
+    apply_proxy_policy(env, args.harbor_env, args.endpoint)
     return env
+
+
+@functools.lru_cache(maxsize=4)
+def harbor_run_flags(harbor_bin: str) -> frozenset[str]:
+    """Long options `harbor run` accepts, scraped from its own --help.
+
+    Used to answer one question honestly: can this script pin the sampling
+    parameters, or is it at the mercy of whatever Terminus-2/LiteLLM defaults to?
+    A wrong guess either crashes every trial or silently reports three runs of a
+    greedy decode as mean +- std, so we ask instead of assuming.
+    """
+    try:
+        proc = subprocess.run([harbor_bin, "run", "--help"], capture_output=True,
+                              text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    return frozenset(re.findall(r"--[a-z0-9][a-z0-9-]+", (proc.stdout or "") + (proc.stderr or "")))
+
+
+def sampling_argv(args) -> tuple[list[str], dict]:
+    """`harbor run` sampling flags plus the record that goes into results.json."""
+    wanted = {"temperature": args.temperature, "top_p": args.top_p}
+    requested = {k: v for k, v in wanted.items() if v is not None}
+    record: dict = {"requested": requested or None, "forwarded": {}, "control": ""}
+    if not requested:
+        record["control"] = (
+            "NOT SET by this script: the harness/LiteLLM default was used, and this "
+            "script does not know what it is. If that default is greedy, the 3 runs "
+            "are not independent and std is meaningless -- pass --temperature to fix it."
+        )
+        return [], record
+    flags = harbor_run_flags(args.harbor_bin)
+    argv: list[str] = []
+    unsupported = []
+    for key, value in requested.items():
+        flag = "--" + key.replace("_", "-")
+        if flag in flags:
+            argv += [flag, str(value)]
+            record["forwarded"][key] = value
+        else:
+            unsupported.append(flag)
+    record["control"] = (
+        f"forwarded to harbor: {record['forwarded'] or 'nothing'}"
+        + (f"; NOT SUPPORTED by this harbor build and therefore NOT APPLIED: "
+           f"{unsupported} -- the numbers were produced at the harness default, "
+           f"whatever that is" if unsupported else "")
+    )
+    return argv, record
 
 
 async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.Semaphore,
@@ -198,6 +217,7 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
         "--env", args.harbor_env, "--n-attempts", "1", "--n-concurrent", "1",
         "--max-retries", "0", "--jobs-dir", str(jobs_dir), "--job-name", job_name, "--quiet",
     ]
+    argv += args.sampling_argv
     for kwarg in harbor_env_kwargs(args):
         argv += ["--environment-kwarg", kwarg]
     env = harbor_process_env(args)
@@ -210,7 +230,11 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=args.task_timeout)
         except asyncio.TimeoutError:
             proc.kill(); await proc.wait()
-            outcome.infra_reason = "task wall-clock timeout"
+            # Our wall clock is the only thing capping how long the agent may keep
+            # issuing commands, so this is the budget being enforced: reward 0, in
+            # the denominator. See rst_common/harbor.py for why, and for the caveat
+            # that a hung sandbox is indistinguishable from here.
+            outcome.apply(wall_clock_timeout(args.task_timeout))
             outcome.seconds = time.time() - started
             return outcome
 
@@ -218,10 +242,8 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
     outcome.seconds = time.time() - started
     text = (stdout or b"").decode("utf-8", "replace")
     job_dir = jobs_dir / job_name
-    reward, infra = read_reward(job_dir if job_dir.is_dir() else jobs_dir)
-    outcome.reward, outcome.infra_reason = reward, infra
-    if reward is None and infra is not None:
-        outcome.infra_reason = classify_infra(text) or infra
+    result = read_reward(job_dir if job_dir.is_dir() else jobs_dir)
+    outcome.apply(refine_with_stdout(result, text))
     if not args.keep_jobs:
         shutil.rmtree(job_dir, ignore_errors=True)
     return outcome
@@ -253,10 +275,18 @@ async def eval_benchmark(name: str, root: Path, args, served_name: str) -> Bench
         result.outcomes.extend(outcomes)
         scorable = [o for o in outcomes if o.scorable]
         infra = [o for o in outcomes if o.infra_reason]
+        budget = [o for o in outcomes if o.budget_reason]
         rate = 100.0 * sum(o.solved for o in scorable) / len(scorable) if scorable else 0.0
+        # The same numerator over the stricter denominator, i.e. what the old
+        # taxonomy would have reported. Both are written out so the effect of the
+        # choice is visible instead of being argued about.
+        verified = [o for o in scorable if not o.budget_reason]
+        rate_excl = (100.0 * sum(o.solved for o in verified) / len(verified)) if verified else 0.0
         result.per_run_pass_rate.append(rate)
+        result.per_run_pass_rate_budget_excluded.append(rate_excl)
         print(f"[{name}] run {run}: pass={rate:.2f}% scorable={len(scorable)}/{len(outcomes)} "
-              f"infra_failed={len(infra)}", flush=True)
+              f"agent_budget_failed={len(budget)} infra_failed={len(infra)} "
+              f"(pass excl. budget={rate_excl:.2f}%)", flush=True)
     return result
 
 
@@ -267,18 +297,25 @@ def summarize(results: list[BenchmarkResult]) -> dict:
             out["benchmarks"][r.name] = {"status": "unscorable", "reason": r.unscorable_reason}
             continue
         rates = r.per_run_pass_rate
+        rates_excl = r.per_run_pass_rate_budget_excluded
         total = len(r.outcomes)
         infra = [o for o in r.outcomes if o.infra_reason]
+        budget = [o for o in r.outcomes if o.budget_reason]
         scorable = [o for o in r.outcomes if o.scorable]
         per_task: dict[str, dict] = {}
         for o in r.outcomes:
-            entry = per_task.setdefault(o.task_id, {"attempts": 0, "solved": 0, "infra": 0})
+            entry = per_task.setdefault(o.task_id,
+                                        {"attempts": 0, "solved": 0, "infra": 0, "budget": 0})
             entry["attempts"] += 1
             entry["solved"] += int(o.solved)
             entry["infra"] += int(bool(o.infra_reason))
+            entry["budget"] += int(bool(o.budget_reason))
         infra_reasons: dict[str, int] = {}
         for o in infra:
             infra_reasons[o.infra_reason] = infra_reasons.get(o.infra_reason, 0) + 1
+        budget_reasons: dict[str, int] = {}
+        for o in budget:
+            budget_reasons[o.budget_reason] = budget_reasons.get(o.budget_reason, 0) + 1
         out["benchmarks"][r.name] = {
             "status": "scored",
             "pass_rate_mean": round(statistics.mean(rates), 2) if rates else None,
@@ -287,6 +324,16 @@ def summarize(results: list[BenchmarkResult]) -> dict:
             "runs": len(rates),
             "trials_total": total,
             "trials_scorable": len(scorable),
+            # Agent-budget failures ARE scorable (reward 0). Reported on their own
+            # because a score dominated by timeouts is a different claim from a
+            # score dominated by wrong commands, and because the second denominator
+            # below is what the old "budget == infra" taxonomy would have used.
+            "agent_budget_failures": len(budget),
+            "agent_budget_rate": round(100.0 * len(budget) / total, 2) if total else 0.0,
+            "agent_budget_reasons": dict(sorted(budget_reasons.items(), key=lambda kv: -kv[1])),
+            "pass_rate_mean_budget_excluded":
+                round(statistics.mean(rates_excl), 2) if rates_excl else None,
+            "per_run_pass_rate_budget_excluded": [round(x, 2) for x in rates_excl],
             "infra_failures": len(infra),
             "infra_failure_rate": round(100.0 * len(infra) / total, 2) if total else 0.0,
             "infra_reasons": dict(sorted(infra_reasons.items(), key=lambda kv: -kv[1])),
@@ -302,6 +349,8 @@ def summarize(results: list[BenchmarkResult]) -> dict:
 
 async def main_async(args) -> int:
     served_name = args.served_name
+    args.sampling_argv, args.sampling_record = sampling_argv(args)
+    print(f"[protocol] sampling: {args.sampling_record['control']}", flush=True)
     server = None
     if args.model_path:
         args.endpoint = f"http://127.0.0.1:{args.port}/v1"
@@ -368,14 +417,25 @@ async def main_async(args) -> int:
         "endpoint": args.endpoint,
         "served_name": served_name,
         "agent": "terminus-2",
-        "sandbox": "docker",
+        "sandbox": args.harbor_env,
         "runs": args.runs,
         "n_concurrent": args.n_concurrent,
         "task_timeout_sec": args.task_timeout,
         "label": args.label,
+        # What made the runs (in)dependent. Recorded even when it is "we could not
+        # set this", because that is the case a reader most needs to know about.
+        "sampling": args.sampling_record,
+        "failure_taxonomy": {
+            HARNESS_INFRA: list(HARNESS_INFRA_MARKERS),
+            AGENT_BUDGET: list(AGENT_BUDGET_MARKERS),
+        },
         "paper_reference": PAPER,
-        "note": "Infra failures are excluded from the pass-rate denominator and "
-                "reported separately. LHTB is unscorable locally: its verifiers are withheld.",
+        "note": "Harness-infrastructure failures are excluded from the pass-rate "
+                "denominator and reported separately; agent-budget failures (wall clock "
+                "spent, command too long) count as reward 0 INSIDE it, because those are "
+                "the policy failing. pass_rate_mean_budget_excluded is the same numerator "
+                "over the stricter denominator. LHTB is unscorable locally: its verifiers "
+                "are withheld.",
     }
     out_path = Path(args.out) / "results.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -387,7 +447,11 @@ async def main_async(args) -> int:
             print(f"  {name:8s} UNSCORABLE ({b['reason']})")
         else:
             print(f"  {name:8s} {b['pass_rate_mean']:.2f} +- {b['pass_rate_std']:.2f} %   "
-                  f"(runs={b['per_run_pass_rate']}, infra={b['infra_failure_rate']}%)")
+                  f"(runs={b['per_run_pass_rate']}, agent_budget={b['agent_budget_rate']}%, "
+                  f"infra={b['infra_failure_rate']}%)")
+            if b["runs"] > 1 and b["pass_rate_std"] == 0.0:
+                print("           NOTE: std is exactly 0 over multiple runs -- the runs are "
+                      "probably not independent (greedy decode?). See protocol.sampling.")
     print(f"\nwrote {out_path}")
     return 0
 
@@ -406,6 +470,14 @@ def main() -> int:
     p.add_argument("--tb2-tasks", default=os.environ.get("TB2_TASKS", ""))
     p.add_argument("--lhtb-tasks", default=os.environ.get("LHTB_TASKS", ""))
     p.add_argument("--runs", type=int, default=3)
+    # "mean +- std over 3 runs" is only a claim if the runs are independent. These are
+    # forwarded to `harbor run` when that build supports them, and recorded either way;
+    # see sampling_argv() and protocol.sampling in results.json.
+    p.add_argument("--temperature", type=float, default=None,
+                   help="sampling temperature for the agent's model calls. Leave unset to "
+                        "accept the harness default -- which may be greedy, in which case "
+                        "the 3 runs are one run reported three times.")
+    p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--n-concurrent", type=int, default=8)
     p.add_argument("--max-tasks", type=int, default=0)
     p.add_argument("--task-timeout", type=int, default=1800)

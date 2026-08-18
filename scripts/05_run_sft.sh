@@ -30,6 +30,15 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 2
 
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 : "${MASTER_ADDR:?set MASTER_ADDR}"
+
+# `ray`, `python` and the Megatron/slime stack all live in the conda env; enter it before
+# using any of them. No-op if the caller already did. See scripts/lib_env.sh.
+ENV_NAME="${ENV_NAME:-slime}"
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "$ENV_NAME" || exit 2
+
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
 MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
@@ -178,12 +187,21 @@ ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${ACTOR_NUM_GPUS
   --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 if [[ -n "${HOSTFILE:-}" ]]; then
+  # `ssh host "cmd"` runs a NON-interactive shell: no ~/.bashrc, no conda hook, so `ray` is
+  # not on PATH over there even though it is here, and the worker fails with
+  # "ray: command not found" while the head node waits. $BASE_FOLDER is shared, so the env
+  # stub the setup script wrote is readable from every node -- source it first.
+  # Piped into `bash -s` rather than passed as a command string, because the stub is a
+  # bash script and the remote login shell is not guaranteed to be bash.
   for WORKER_IP in $(awk '{print $1}' "${HOSTFILE}"); do
     [[ "${WORKER_IP}" == "${MASTER_ADDR}" ]] && continue
-    ssh "${SSH_USER:-root}@${WORKER_IP}" \
-      "pkill -9 sglang; ray stop --force; pkill -9 python; \
-       ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
-       --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    ssh "${SSH_USER:-root}@${WORKER_IP}" bash -s <<EOF_REMOTE &
+[ -f "$BASE_FOLDER/env-$ENV_NAME.sh" ] && . "$BASE_FOLDER/env-$ENV_NAME.sh"
+command -v ray >/dev/null || { echo "ray not on PATH on \$(hostname); the env stub at $BASE_FOLDER/env-$ENV_NAME.sh is missing or this node cannot see the shared folder" >&2; exit 127; }
+pkill -9 sglang; ray stop --force; pkill -9 python
+ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
+  --node-ip-address ${WORKER_IP} --disable-usage-stats
+EOF_REMOTE
   done
   wait
 fi

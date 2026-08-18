@@ -50,6 +50,17 @@ export BASE_FOLDER=/shared/rst MODEL_KEY=qwen3.5-27b
 bash scripts/33_run_dpo.sh                      # 8 GPUs by default (nvidia-smi -L)
 ```
 
+The script enters the conda env itself (`scripts/lib_env.sh`) and aborts with instructions
+if it cannot, so running it directly like this is supported — nothing needs activating
+first. `ENV_NAME=rstverl` unless you built the env under another name.
+
+When `20_run_all.sh` runs this stage it gates on `checkpoint_trustworthy` in
+`verdict.json`, **not** `in_range`. The difference is one exempted FAIL — "the benchmarks
+never ran", i.e. no container runtime or no sglang — because that FAIL is about the
+measurement and DPO needs neither a container nor a server. Any other FAIL blocks the
+stage. When it proceeds on an exempted FAIL it says so and lists what it is carrying
+forward, and both checkpoints must then be reported as *not agentically evaluated*.
+
 Three stages, each skipped if its output already exists, so a re-run resumes:
 
 | stage | script | cost | output |
@@ -246,7 +257,7 @@ side rejected, median rejected/chosen supervised-token ratio 0.9758. So
 | `metrics.holdout_reward_accuracy` | likelihood ranking. 0.5 = no preference |
 | `metrics.holdout_*.holdout_ties` | 0.5 from all-ties (no preference) and 0.5 from half-right (preferences that are coin flips) are different findings sharing a number |
 | `optimization.clip_active_fraction` | ~1.0 ⇒ the clip set the step size, not `--lr` |
-| `data.pairs_skipped_oom` | a skipped pair is a quietly different dataset; counted, never silent |
+| `data.steps_dropped_oom` | non-zero only with `--oom-skip-step` (single process). A dropped step is a smaller effective dataset; counted, never silent |
 | `warnings` | empty on a clean run. If not, it belongs in the report |
 
 ## When it fails
@@ -258,7 +269,7 @@ side rejected, median rejected/chosen supervised-token ratio 0.9758. So
 | `GATE 3 FAILED (calibration)` | mask / tokenizer / dtype changed between stages | fix the cause. Do **not** raise `--calibration-tol` to get past it |
 | `--holdout-groups N consumed every group` | too few groups paired | already clamped to `--max-holdout-fraction` (0.15) with a loud message |
 | `REFUSING TO TRAIN: ...` | the pairs parquet itself is malformed (mask misaligned, empty mask, no shared prefix, duplicate `pair_id`, token-identical sides) | rebuild stage 1; the gate reads the tensors, not the manifest |
-| OOM on one pair | a 32k×2 pair at 27B | counted in `data.pairs_skipped_oom` and reported; lower `DPO_LOGIT_CHUNK` or `--max-seq-len` |
+| `CUDA OOM at step N` (run aborts) | a 32k×2 pair at 27B | deliberate: skipping the pair would apply a partial-batch gradient, and on >1 rank it hangs FSDP's collectives. Try `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, then a lower `DPO_LOGIT_CHUNK` or `--max-seq-len` (rescore the reference with the same value). `--oom-skip-step` drops the step instead, single process only |
 
 ## Order of operations
 

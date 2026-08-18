@@ -65,6 +65,51 @@ def base_image(dockerfile: str) -> str:
     return match.group(1) if match else "?"
 
 
+def leak_guard(chosen, task_root: Path, out: Path):
+    """Drop every task whose Docker build context contains the private verifier.
+
+    `environment/` is the build context, so anything in it becomes visible to the
+    agent. If the verifier ends up there the task's reward is hackable and the task
+    must not enter the RL pool.
+
+    ~46 tasks legitimately contain `environment/tests/` holding the *project's own*
+    fixtures (a PHP suite, Ansible playbooks, JSON files) -- workspace content the
+    agent is meant to work on, not the RST verifier. So the check is on the
+    verifier's filenames and on byte-identical content, never on a directory name.
+    Measured: 0 leaks in 5,140 tasks.
+
+    Returns `(chosen, leaked)`.
+    """
+    leaked: list[tuple[str, str]] = []
+    for row in chosen.itertuples():
+        task_dir = task_root / row.task_id
+        env_dir = task_dir / "environment"
+        if not env_dir.is_dir():
+            continue
+        private = {
+            _sha256(task_dir / "tests" / name)
+            for name in ("test.sh", "test_state.py")
+            if (task_dir / "tests" / name).is_file()
+        }
+        for path in env_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name in ("test_state.py", "test.sh") or _sha256(path) in private:
+                leaked.append((row.task_id, str(path.relative_to(task_dir))))
+                break
+    if leaked:
+        print(f"[LEAK] {len(leaked)} tasks expose the private verifier in the build "
+              f"context and are EXCLUDED, e.g. {leaked[:3]}")
+        excluded = {tid for tid, _ in leaked}
+        chosen = chosen[~chosen.task_id.isin(excluded)]
+        (out / "excluded_verifier_leak.json").write_text(
+            json.dumps(leaked, indent=2) + "\n", encoding="utf-8"
+        )
+    else:
+        print("[leak-guard] 0 tasks expose the private verifier to the agent image")
+    return chosen, leaked
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tasks-root", type=Path, required=True, help="dir with data/*.tar + metadata/")
@@ -162,43 +207,19 @@ def main() -> int:
             print(f"[warn] {len(incomplete)} tasks missing tracked files, e.g. {incomplete[:3]}")
         print(f"[materialize] complete task dirs: {materialized:,}")
 
-        # ---- verifier-leak guard -------------------------------------------
-        # `environment/` is the Docker build context, so anything in it becomes
-        # visible to the agent. If the private verifier ends up there, the task's
-        # reward is hackable and must not enter the RL pool.
-        #
-        # NOTE: ~46 tasks legitimately contain `environment/tests/` holding the
-        # *project's own* fixtures (a PHP suite, Ansible playbooks, JSON files) --
-        # that is workspace content the agent is meant to work on, NOT the RST
-        # verifier. So do not flag on the directory name; flag on the verifier's
-        # filenames or on byte-identical content. Measured: 0 leaks in 5,140 tasks.
-        leaked: list[tuple[str, str]] = []
-        for row in chosen.itertuples():
-            task_dir = task_root / row.task_id
-            env_dir = task_dir / "environment"
-            if not env_dir.is_dir():
-                continue
-            private = {
-                _sha256(task_dir / "tests" / name)
-                for name in ("test.sh", "test_state.py")
-                if (task_dir / "tests" / name).is_file()
-            }
-            for path in env_dir.rglob("*"):
-                if not path.is_file():
-                    continue
-                if path.name in ("test_state.py", "test.sh") or _sha256(path) in private:
-                    leaked.append((row.task_id, str(path.relative_to(task_dir))))
-                    break
-        if leaked:
-            print(f"[LEAK] {len(leaked)} tasks expose the private verifier in the build "
-                  f"context and are EXCLUDED, e.g. {leaked[:3]}")
-            excluded = {tid for tid, _ in leaked}
-            chosen = chosen[~chosen.task_id.isin(excluded)]
-            (args.out / "excluded_verifier_leak.json").write_text(
-                json.dumps(leaked, indent=2) + "\n", encoding="utf-8"
-            )
-        else:
-            print("[leak-guard] 0 tasks expose the private verifier to the agent image")
+    # ---- verifier-leak guard ------------------------------------------------
+    # Runs whenever task dirs exist on disk -- NOT only when --materialize was passed
+    # this time. Regenerating rl_tasks.jsonl against an already-extracted pool (the
+    # normal way to change --tier or --max-tasks) used to skip the guard entirely,
+    # which silently reinstated tasks a previous run had excluded.
+    leak_ran = task_root.is_dir()
+    leaked: list[tuple[str, str]] = []
+    if leak_ran:
+        chosen, leaked = leak_guard(chosen, task_root, args.out)
+    else:
+        print(f"[leak-guard] SKIPPED: no task dirs under {task_root}. rl_tasks.jsonl "
+              f"metadata.task_dir will point at paths that do not exist; rerun with "
+              f"--materialize before using this pool for rollouts.")
 
     # ---- slime prompt-data -------------------------------------------------
     jsonl = args.out / "rl_tasks.jsonl"
@@ -233,6 +254,11 @@ def main() -> int:
         "min_trials": args.min_trials,
         "tier_counts_all_tasks": dict(sorted(tier_counts.items())),
         "materialized_task_dirs": materialized,
+        # Whether the verifier-leak guard actually ran, and what it removed. A pool
+        # whose manifest says leak_guard_ran=false has not been checked -- do not
+        # roll it out.
+        "leak_guard_ran": bool(leak_ran),
+        "verifier_leaks_excluded": len(leaked),
         "distinct_base_images": len(images),
         "base_images": dict(images.most_common()),
         "pass_rate_summary": {

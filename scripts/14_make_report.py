@@ -23,28 +23,48 @@ import json
 import math
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-PAPER = {
-    "base":   {"tb2": 41.20, "tb-hard": 22.67, "lhtb": 18.10},
-    "sft_r1": {"tb2": 42.32, "tb-hard": 23.00, "lhtb": 21.32},
-    "sft_r3": {"tb2": 47.94, "tb-hard": 28.33, "lhtb": 22.44},
-    "rl":     {"tb2": 49.44, "tb-hard": 32.00, "lhtb": 22.07},
-}
-REF_TARGET = {"tb2": 47.94, "tb-hard": 28.33}   # released SFT ckpt should land near here
+# `python scripts/14_make_report.py` puts scripts/ on sys.path[0], not the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# The paper only published numbers for Qwen3.5-27B and 122B-A10B. For any other
-# model in configs/models.json there is NO reference point, so the "regression vs
-# base" and "does the reference checkpoint reproduce the paper" checks do not
-# apply -- asserting them anyway would manufacture a finding out of nothing.
-PAPER_MODELS = {"qwen3.5-27b"}
+# One copy of the published numbers, shared with 06_eval.py -- see rst_common/paper.py
+# for why two copies of a reference value is one copy too many.
+from rst_common.paper import (  # noqa: E402
+    PAPER,
+    PAPER_MODELS,
+    REF_TARGET,
+    has_paper_reference,
+)
 
-
-def has_paper_reference(model_key: str | None) -> bool:
-    return (model_key or "qwen3.5-27b") in PAPER_MODELS
+__all__ = ["PAPER", "PAPER_MODELS", "REF_TARGET", "has_paper_reference"]
 
 FAIL, WARN, OK, INFO = "FAIL", "WARN", "OK", "INFO"
+
+# FAILs that mean "this checkpoint was never measured on agentic benchmarks", as
+# opposed to "this checkpoint is not a valid model". The distinction matters because
+# two different downstream stages read this verdict and they do not have the same
+# prerequisites:
+#
+#   GRPO (20_run_all.sh 10a) needs a task container per rollout -- exactly what agentic
+#     eval needs -- so if coverage failed for want of a sandbox, RL could not have run
+#     anyway and blocking it costs nothing.
+#   DPO  (10b) needs NO container, NO network and NO privilege. It is the stage that
+#     exists precisely for the pod that cannot run containers. Blocking it on a
+#     coverage FAIL would mean the container-less pod -- the documented target -- can
+#     produce an SFT checkpoint and then nothing else, which is the opposite of what
+#     DPO_PLAN.md promises.
+#
+# So `in_range` keeps its narrow meaning (zero FAILs of any kind) and a second signal,
+# `checkpoint_trustworthy`, answers the different question DPO actually needs answered:
+# is there any finding suggesting this checkpoint is not a sound model? Being unmeasured
+# on tb-hard says nothing about that. A broken loss mask, a non-finite loss or a
+# regression against the measured base does, and all of those stay blocking.
+#
+# Keep this set tiny. Anything added here is a FAIL somebody decided to train on top of.
+POSTTRAIN_EXEMPT_FAILS = {("eval", "benchmark coverage")}
 
 
 class Findings:
@@ -116,6 +136,26 @@ def parse_training_log(run_dir: Path) -> dict:
             if (m := pat_lr.search(low)):
                 rec["lr"] = float(m.group(1))
             out["steps"].append(rec)
+
+    # Order by step number, not by which file was read first. Up to four log files are
+    # scraped -- typically several ranks, or one run's stdout plus an earlier attempt's
+    # -- and concatenating them in mtime order made `losses[0]` and `losses[-1]` (the
+    # "loss decreased" check) compare arbitrary points from different files. Lines
+    # with no step number cannot be placed on that axis, so they are kept separately
+    # instead of being wedged in at the end.
+    numbered = [rec for rec in out["steps"] if "step" in rec]
+    unnumbered = [rec for rec in out["steps"] if "step" not in rec]
+    if numbered:
+        first_per_step: dict[int, dict] = {}
+        for rec in numbered:
+            first_per_step.setdefault(rec["step"], rec)
+        repeats = len(numbered) - len(first_per_step)
+        out["steps"] = [first_per_step[key] for key in sorted(first_per_step)]
+        out["steps_unnumbered"] = unnumbered
+        if repeats:
+            out["step_numbers_repeated"] = repeats
+            out["note"] = (f"{repeats} scraped line(s) repeated a step number (several ranks "
+                           f"or several log files); the first of each was kept.")
     return out
 
 
@@ -190,6 +230,12 @@ def check_config(findings: Findings, config: dict | None) -> None:
 
 def check_training(findings: Findings, training: dict, manifest: dict | None, config: dict | None) -> None:
     steps = training.get("steps") or []
+    if training.get("steps_unnumbered"):
+        findings.add(INFO, "training", "loss curve",
+                     f"{len(training['steps_unnumbered'])} scraped loss line(s) carried no step "
+                     f"number and are not on the ordered curve")
+    if training.get("step_numbers_repeated"):
+        findings.add(INFO, "training", "loss curve", training.get("note", ""))
     if training.get("warnings"):
         findings.add(FAIL, "training", "numerical stability",
                      f"{len(training['warnings'])} log lines mention NaN near loss/grad, e.g. "
@@ -303,6 +349,12 @@ def check_benchmark_coverage(findings: Findings, evals: dict[str, dict | None],
     unmeasured checkpoint is exactly what this gate is for. On a pod that cannot
     run containers the point is moot anyway -- RL needs the same sandbox eval
     does, so nothing is being blocked that could have run.
+
+    That last sentence is why this finding is in POSTTRAIN_EXEMPT_FAILS: it is true of
+    RL and false of DPO, which needs no sandbox. So this FAIL still turns in_range off
+    -- the checkpoint really is unmeasured and the report must say so -- but it does not
+    claim the checkpoint is unsound, and it does not block the one post-SFT stage a
+    container-less pod can actually run.
     """
     scored = scored_benchmarks(evals)
     if scored:
@@ -323,9 +375,15 @@ def check_benchmark_coverage(findings: Findings, evals: dict[str, dict | None],
            "Not even the container-free fallback ran: `python "
            "scripts/06b_eval_offline.py --model-path <ckpt> --holdout "
            "<pretokenized_holdout.parquet> --out <dir>`. ")
-        + "Report this checkpoint as NOT EVALUATED. To proceed anyway, set RUN_RL=0 "
-          "and make that call explicitly, rather than letting a green verdict imply "
-          "a measurement that does not exist."
+        + "Two things this does NOT mean: it does not mean the checkpoint is unsound "
+          "(nothing here inspected the weights), and it does not block DPO, which needs "
+          "no container -- see POSTTRAIN_EXEMPT_FAILS and `checkpoint_trustworthy` in "
+          "verdict.json. It does mean this checkpoint must be reported as NOT EVALUATED "
+          "on agentic benchmarks. The two prerequisites are a container runtime "
+          "(`bash scripts/00b_setup_sandbox.sh --diagnose`) and sglang "
+          "(`INSTALL_ROLLOUT=1 bash scripts/01b_setup_env_verl.sh`); fix whichever is "
+          "missing rather than letting a green verdict imply a measurement that does "
+          "not exist."
     )
     findings.add(FAIL, "eval", "benchmark coverage", detail)
 
@@ -423,13 +481,42 @@ def check_eval(findings: Findings, label: str, data: dict | None, is_reference: 
         else:
             findings.add(OK, "eval", f"{label}/{name} infra rate", f"{infra}%")
 
-        if b.get("runs", 0) < 3:
+        # Agent-budget failures are the opposite case: they ARE in the denominator
+        # (see rst_common/harbor.py), so they cannot inflate the score -- but a large
+        # share of them says the wall clock, not the policy, is what the number
+        # measures, and that is a fact about the setup the reader needs.
+        budget_rate = b.get("agent_budget_rate")
+        if isinstance(budget_rate, (int, float)):
+            excl = b.get("pass_rate_mean_budget_excluded")
+            delta = (f"; pass rate over non-budget trials only would be {excl}"
+                     if isinstance(excl, (int, float)) and isinstance(mean, (int, float))
+                     and abs(excl - mean) >= 1 else "")
+            reasons = list((b.get("agent_budget_reasons") or {}).items())[:3]
+            level = WARN if budget_rate >= 40 else INFO
+            findings.add(level, "eval", f"{label}/{name} agent budget",
+                         f"{budget_rate}% of trials ended by spending the agent's budget "
+                         f"(counted as reward 0, never excluded){delta}. Top: {reasons}"
+                         + (". Above 40% the score is dominated by the time limit: check "
+                            "--task-timeout and --gen-tokens before reading it as capability."
+                            if level == WARN else ""))
+
+        runs = b.get("runs", 0) or 0
+        if runs < 3:
             findings.add(WARN, "eval", f"{label}/{name} runs",
-                         f"only {b.get('runs')} run(s); the paper reports mean+-std over 3. "
+                         f"only {runs} run(s); the paper reports mean+-std over 3. "
                          f"A single run on ~100 tasks has several points of noise.")
         if isinstance(std, (int, float)) and std > 8:
             findings.add(WARN, "eval", f"{label}/{name} variance",
                          f"std={std} is high; check for flaky tasks or a saturating timeout")
+        elif runs >= 2 and std == 0:
+            sampling = ((data.get("protocol") or {}).get("sampling") or {})
+            findings.add(WARN, "eval", f"{label}/{name} variance",
+                         f"std=0 over {runs} runs. Agentic rollouts essentially never tie "
+                         f"exactly, so the likeliest explanations are that the runs were not "
+                         f"independent or that decoding is deterministic -- in which case "
+                         f"'mean+-std over 3 runs' is one run reported three times and the "
+                         f"+-0 must not be presented as a confidence interval. "
+                         f"Recorded sampling control: {sampling.get('control') or 'not recorded'}.")
 
         if not comparable:
             findings.add(INFO, "eval", f"{label}/{name} comparability",
@@ -486,8 +573,13 @@ def render(args, config, manifest, training, evals, findings: Findings,
 
     # ---- headline table
     A("## Results\n")
-    A("Pass rate %, mean ± std over independent runs. Infrastructure failures are excluded")
-    A("from the denominator and reported separately — they are not model errors.\n")
+    A("Pass rate %, mean ± std over independent runs. Two kinds of failure are counted")
+    A("differently, and the difference is load-bearing:\n")
+    A("- **Infrastructure** (Docker, registry, DNS, disk) — the trial was never measured, so")
+    A("  it is excluded from the denominator and reported as its own rate.")
+    A("- **Agent budget** (wall clock spent, command refused as too long) — the *policy*")
+    A("  failed, so it scores 0 and stays in the denominator. Excluding these would inflate")
+    A("  the score most on the hardest tasks, which is where the whole claim lives.\n")
     cols = ["tb-hard", "tb2", "lhtb"]
     A("| model | " + " | ".join(cols) + " |")
     A("|---|" + "---|" * len(cols))
@@ -643,6 +735,9 @@ def render(args, config, manifest, training, evals, findings: Findings,
         A(f"- endpoint `{proto.get('endpoint')}`, agent `{proto.get('agent')}`, "
           f"sandbox `{proto.get('sandbox')}`, runs {proto.get('runs')}, "
           f"concurrency {proto.get('n_concurrent')}")
+        sampling = proto.get("sampling") or {}
+        if sampling:
+            A(f"- sampling: {sampling.get('control') or sampling}")
         for name, b in (data.get("benchmarks") or {}).items():
             if b.get("status") != "scored":
                 A(f"- **{name}**: unscorable — {b.get('reason')}")
@@ -652,13 +747,18 @@ def render(args, config, manifest, training, evals, findings: Findings,
             # to a gap in one line rather than take the whole report down.
             A(f"- **{name}**: {b.get('pass_rate_mean')} ± {b.get('pass_rate_std')} % "
               f"(per-run {b.get('per_run_pass_rate')}), pass@{b.get('runs')} = "
-              f"{b.get('pass_at_k')}%, infra {b.get('infra_failure_rate')}%")
+              f"{b.get('pass_at_k')}%, infra {b.get('infra_failure_rate')}%, "
+              f"agent budget {b.get('agent_budget_rate')}%")
             never = b.get("tasks_never_solved") or []
             if never:
                 A(f"  - never solved in any run ({len(never)}): "
                   f"`{', '.join(never[:12])}`{' …' if len(never) > 12 else ''}")
             if b.get("infra_reasons"):
-                A(f"  - infra reasons: {b['infra_reasons']}")
+                A(f"  - infra reasons (excluded from denominator): {b['infra_reasons']}")
+            if b.get("agent_budget_reasons"):
+                A(f"  - agent-budget reasons (scored 0, in denominator): "
+                  f"{b['agent_budget_reasons']}; pass rate excluding them would be "
+                  f"{b.get('pass_rate_mean_budget_excluded')}%")
         A("")
 
     A("## How to reproduce\n")
@@ -728,20 +828,35 @@ def main() -> int:
     # nothing downstream (least of all RL) should be built on top of one.
     fails = [r for r in findings.rows if r[0] == FAIL]
     in_range = not fails
+    # See POSTTRAIN_EXEMPT_FAILS. Same rows, different question: "is this a sound
+    # checkpoint?" rather than "is every number in range?". The container-free DPO
+    # stage gates on this one so that an unmeasurable pod is not also an untrainable one.
+    blocking = [r for r in fails if (r[1], r[2]) not in POSTTRAIN_EXEMPT_FAILS]
+    checkpoint_trustworthy = not blocking
     if args.verdict_json:
         args.verdict_json.parent.mkdir(parents=True, exist_ok=True)
         args.verdict_json.write_text(json.dumps({
             "verdict": findings.worst(),
             "in_range": in_range,
+            "checkpoint_trustworthy": checkpoint_trustworthy,
             "n_fail": len(fails),
+            "n_blocking_fail": len(blocking),
             "n_warn": findings.count(WARN),
             "model_key": model_key,
             "fail_reasons": [f"[{a}] {c}: {d}" for _, a, c, d in fails],
+            "blocking_fail_reasons": [f"[{a}] {c}: {d}" for _, a, c, d in blocking],
+            "exempt_fail_reasons": [f"[{a}] {c}: {d}" for _, a, c, d in fails
+                                    if (a, c) in POSTTRAIN_EXEMPT_FAILS],
             "report": str(args.out),
         }, indent=2) + "\n", encoding="utf-8")
 
-    print(f"verdict={findings.worst()} in_range={in_range}  FAIL={findings.count(FAIL)} "
+    print(f"verdict={findings.worst()} in_range={in_range} "
+          f"checkpoint_trustworthy={checkpoint_trustworthy}  FAIL={findings.count(FAIL)} "
           f"WARN={findings.count(WARN)} OK={findings.count(OK)}")
+    if not in_range and checkpoint_trustworthy:
+        print("  note: every FAIL is about benchmark COVERAGE, not the checkpoint. The "
+              "container-free DPO stage still runs; report both checkpoints as NOT "
+              "agentically evaluated.")
     for level, area, check, detail in findings.rows:
         if level in (FAIL, WARN):
             print(f"  {level:4s} [{area}] {check}: {detail[:150]}")

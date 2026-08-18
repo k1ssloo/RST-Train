@@ -29,6 +29,15 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 3
 
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 : "${MASTER_ADDR:?set MASTER_ADDR}"
+
+# ray, sglang and the training stack are all in the conda env. No-op if the caller
+# (20_run_all.sh) already entered it. See scripts/lib_env.sh.
+ENV_NAME="${ENV_NAME:-slime}"
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
+rst_bootstrap_python || exit 2
+rst_enter_env "$ENV_NAME" || exit 2
+
 # Where the rollout sandboxes live. Rootless podman is the primary path when this
 # machine may run containers at all; it serves the Docker API Harbor speaks, so no
 # Harbor patch is needed. When it may NOT -- e.g. an AppArmor profile that denies
@@ -45,6 +54,11 @@ fi
 export RST_HARBOR_ENV RST_HARBOR_ENV_KWARGS
 : "${ADAPTER_PUBLIC_HOST:=$MASTER_ADDR}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
+# Captured BEFORE the `cd "$SLIME_DIR"` below, because it has to end up on the ray
+# workers' PYTHONPATH: that is the only way `--custom-generate-function-path
+# rl.generate.generate` resolves. Using $PWD there was correct only for as long as
+# nothing changed directory, which is exactly what we now have to do.
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TASKSET="${TASKSET:-$BASE_FOLDER/rl-sweet}"
 MODEL_KEY="${MODEL_KEY:-qwen3.5-27b}"
 INIT_CKPT="${INIT_CKPT:-$BASE_FOLDER/${MODEL_KEY}-rst-sft-v1}"
@@ -89,9 +103,10 @@ echo "=== TP=$TP PP=$PP CP=$CP DP=$DP EP=$EP mtpg=$MAX_TOKENS_PER_GPU resp=$MAX_
 CPU_CORES=$(nproc)
 RAM_GB=$(free -g | awk 'NR==2{print $2}')
 if [[ "$RST_HARBOR_ENV" == docker ]]; then
-  # Each Terminus-2 rollout = 1+ containers + a tmux session. Budget ~2 cores and
-  # ~4GB per concurrent sandbox, and never exceed half the cores (training needs
-  # them for the CPU-offloaded optimizer).
+  # Each Terminus-2 rollout = 1+ containers + a tmux session. Budget 4 cores and
+  # 8GB per concurrent sandbox: 2 for the sandbox itself and the same again left to
+  # training, which needs the cores for the CPU-offloaded optimizer. The divisors
+  # below ARE that budget -- keep the two in step if you retune either.
   MAX_SANDBOXES="${RST_MAX_SANDBOXES:-$(( CPU_CORES / 4 < RAM_GB / 8 ? CPU_CORES / 4 : RAM_GB / 8 ))}"
   echo "=== cores=$CPU_CORES ram=${RAM_GB}G -> RST_MAX_SANDBOXES=$MAX_SANDBOXES per node"
 else
@@ -108,9 +123,48 @@ fi
 
 source "${SLIME_DIR}/scripts/models/${SLIME_SPEC}"
 
+# ---- where the initial (and reference) weights come from ---------------------
+# slime's --ref-load wants a MEGATRON torch_dist tree: a directory holding
+# iter_*/ plus latest_checkpointed_iteration.txt. Three things can be that tree,
+# and only one of them is ever present, so resolve it instead of assuming:
+#
+#   1. $INIT_CKPT itself      -- a slime SFT run dir already saves torch_dist.
+#   2. ${INIT_CKPT}_torch_dist -- what you get from `04_convert_ckpt.sh to_dist`
+#                                 with MODEL_NAME pointing at an HF checkpoint.
+#   3. ${MODEL_DIR_NAME}_torch_dist -- RL straight from the base model, no SFT.
+#
+# The old hardcoded `${INIT_CKPT}_torch_dist/` was none of the above for the
+# default INIT_CKPT (a slime SFT run dir), so nothing in this repo created it and
+# Megatron would fail minutes into a 32-GPU job with a path error.
+resolve_ref_load() {
+  local cand
+  for cand in "$INIT_CKPT" "${INIT_CKPT}_torch_dist" \
+              "${BASE_FOLDER}/${MODEL_DIR_NAME}_torch_dist"; do
+    if compgen -G "$cand/iter_*" > /dev/null; then echo "$cand"; return 0; fi
+  done
+  return 1
+}
+if ! REF_LOAD=$(resolve_ref_load); then
+  set +x
+  echo "No Megatron torch_dist checkpoint to start GRPO from. Looked for iter_* in:" >&2
+  echo "  $INIT_CKPT" >&2
+  echo "  ${INIT_CKPT}_torch_dist" >&2
+  echo "  ${BASE_FOLDER}/${MODEL_DIR_NAME}_torch_dist" >&2
+  echo >&2
+  echo "Pick the one that matches what you have:" >&2
+  echo "  * SFT ran on slime      -> INIT_CKPT should be that run dir (it already" >&2
+  echo "                             holds iter_*); check the path." >&2
+  echo "  * SFT ran on verl/FSDP  -> convert the HF export first:" >&2
+  echo "      MODEL_NAME=out-hf-full bash scripts/04_convert_ckpt.sh to_dist" >&2
+  echo "      then INIT_CKPT=$BASE_FOLDER/out-hf-full" >&2
+  echo "  * RL from the base model -> bash scripts/04_convert_ckpt.sh to_dist" >&2
+  exit 1
+fi
+echo "=== ref-load (initial weights): $REF_LOAD"
+
 CKPT_ARGS=(
    --hf-checkpoint "${BASE_FOLDER}/${MODEL_DIR_NAME}"
-   --ref-load      "${INIT_CKPT}_torch_dist/"
+   --ref-load      "${REF_LOAD}/"
    --load          "${BASE_FOLDER}/${RUN_NAME}/"
    --save          "${BASE_FOLDER}/${RUN_NAME}/"
    --save-interval 10
@@ -217,12 +271,19 @@ ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${ACTOR_NUM_GPUS
   --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 if [[ -n "${HOSTFILE:-}" ]]; then
+  # `ssh host "cmd"` runs a non-interactive shell with no ~/.bashrc and no conda hook, so
+  # `ray` is not on PATH there. $BASE_FOLDER is shared, so source the env stub the setup
+  # script wrote. Piped into `bash -s` because the stub is a bash script and the remote
+  # login shell may not be bash.
   for WORKER_IP in $(awk '{print $1}' "${HOSTFILE}"); do
     [[ "${WORKER_IP}" == "${MASTER_ADDR}" ]] && continue
-    ssh "${SSH_USER:-root}@${WORKER_IP}" \
-      "pkill -9 sglang; ray stop --force; pkill -9 python; \
-       ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
-       --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    ssh "${SSH_USER:-root}@${WORKER_IP}" bash -s <<EOF_REMOTE &
+[ -f "$BASE_FOLDER/env-$ENV_NAME.sh" ] && . "$BASE_FOLDER/env-$ENV_NAME.sh"
+command -v ray >/dev/null || { echo "ray not on PATH on \$(hostname); the env stub at $BASE_FOLDER/env-$ENV_NAME.sh is missing or this node cannot see the shared folder" >&2; exit 127; }
+pkill -9 sglang; ray stop --force; pkill -9 python
+ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} \
+  --node-ip-address ${WORKER_IP} --disable-usage-stats
+EOF_REMOTE
   done
   wait
 fi
@@ -252,7 +313,7 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
     "GLOO_SOCKET_IFNAME": "${SOCKET_IFNAME}",
     "TP_SOCKET_IFNAME": "${SOCKET_IFNAME}",
     "MASTER_ADDR": "${MASTER_ADDR}",
-    "PYTHONPATH": "${BASE_FOLDER}/Megatron-LM/:${PWD}",
+    "PYTHONPATH": "${BASE_FOLDER}/Megatron-LM/:${REPO_DIR}",
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
     "NCCL_NVLS_ENABLE": "${HAS_NVLINK}",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
@@ -270,6 +331,15 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
 }
 EOF_JSON
 )
+
+# `ray job submit` takes the submitting process's cwd as the job's working
+# directory, and `train.py` belongs to slime, not to this repo. Without this cd the
+# entrypoint dies with "can't open file 'train.py'" after ray is already up -- and
+# the traceback points at python, not at the launcher. slime's own run scripts cd
+# here for the same reason. REPO_DIR (captured above) is what keeps rl.generate
+# importable afterwards.
+cd "$SLIME_DIR" || { echo "SLIME_DIR=$SLIME_DIR does not exist" >&2; exit 1; }
+[[ -f train.py ]] || { echo "no train.py in $SLIME_DIR -- is that a slime checkout?" >&2; exit 1; }
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \

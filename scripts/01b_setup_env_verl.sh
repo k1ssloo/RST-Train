@@ -22,6 +22,11 @@ set -euo pipefail
 ENV_NAME="${ENV_NAME:-rstverl}"
 mkdir -p "$BASE_FOLDER/logs"
 
+# rst_write_env_stub: records how to re-enter this env, because the `micromamba
+# activate` below only affects THIS process and every launcher runs as a child.
+# shellcheck source=lib_env.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_env.sh"
+
 # ---- 0. what are we actually on? --------------------------------------------
 if ! command -v nvidia-smi >/dev/null; then
   echo "nvidia-smi missing; cannot size the CUDA wheel. Aborting." >&2; exit 1
@@ -162,13 +167,48 @@ for mod in ("verl.trainer.sft_trainer",):
         print(f"[warn] {mod} not importable yet: {e}")
 PY
 
-# ---- 6. rollout engine (RL only) --------------------------------------------
-# Skipped by default: it is a large install and SFT does not need it. sglang/vllm
-# must be built for the SAME torch; installing it with deps can silently swap torch.
-if [[ "${INSTALL_ROLLOUT:-0}" == "1" ]]; then
+# ---- 6. rollout engine (eval serving + RL) ----------------------------------
+# ON by default, and that is a deliberate change. It used to default to 0 on the
+# reasoning that SFT does not need it -- true, but 06_eval.py's ONLY serving path is
+# `python -m sglang.launch_server`, and 20_run_all.sh's default chain evaluates three
+# checkpoints (candidate, base, reference). So the old default shipped an environment
+# that could train and could not measure, and the failure surfaced as "the server
+# never came up" with the real cause buried in $out/sglang.log.
+#
+# INSTALL_ROLLOUT=0 skips it: correct for a train-only node, and 20_run_all.sh then
+# skips the agentic evals loudly instead of failing inside them.
+#
+# The risk that motivated the old default is real, so it is handled rather than
+# avoided: sglang pulls a torch of its own choosing, and training must win that
+# argument. If it swaps the driver-matched build, roll sglang back out.
+if [[ "${INSTALL_ROLLOUT:-1}" == "1" ]]; then
+  TORCH_BEFORE_SGL=$(python -c "import torch;print(torch.__version__)")
   pip install "sglang[all]" --extra-index-url "$TORCH_INDEX" || \
-    echo "[warn] sglang install failed; RL rollout and 06_eval.py serving will not work"
-  python -c "import torch;print('[verify] torch after sglang:',torch.__version__)"
+    echo "[warn] sglang install failed; 06_eval.py cannot serve, so 20_run_all.sh will
+       skip the agentic benchmarks and the report will FAIL on benchmark coverage"
+  TORCH_AFTER_SGL=$(python -c "import torch;print(torch.__version__)" 2>/dev/null || echo BROKEN)
+  echo "[verify] torch after sglang: $TORCH_AFTER_SGL (before: $TORCH_BEFORE_SGL)"
+  if [[ "$TORCH_AFTER_SGL" != "$TORCH_BEFORE_SGL" ]]; then
+    echo "[warn] sglang replaced torch ($TORCH_BEFORE_SGL -> $TORCH_AFTER_SGL)."
+    echo "       Training outranks eval: restoring the driver-matched build and"
+    echo "       removing sglang. Agentic eval will be skipped and reported as not-run."
+    echo "       To get it back, find an sglang built for torch $TORCH_BEFORE_SGL."
+    pip uninstall -y sglang sgl-kernel >/dev/null 2>&1 || true
+    pip install --force-reinstall --no-deps --index-url "$TORCH_INDEX" "torch==$TORCH_BEFORE_SGL"
+    python - <<'PY'
+import sys
+
+import torch
+
+print("[verify] torch restored:", torch.__version__, "cuda_available:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    sys.exit("torch no longer sees the GPU after the sglang rollback. Rebuild this env "
+             "with INSTALL_ROLLOUT=0 before doing anything else.")
+PY
+  fi
+else
+  echo "[info] INSTALL_ROLLOUT=0: no sglang. 06_eval.py cannot serve a checkpoint, so"
+  echo "       20_run_all.sh will skip the agentic benchmarks and record them as not-run."
 fi
 
 # ---- 7. Harbor (eval + RL rollout harness) ----------------------------------
@@ -176,7 +216,10 @@ fi
 pip install "harbor==0.21.0" || echo "[warn] harbor install failed; eval and RL cannot run"
 
 # ---- 8. final report --------------------------------------------------------
-python - <<'PY'
+# Also written to $BASE_FOLDER/env_summary.json so the run report can state what was
+# actually installed instead of what was intended -- in particular whether flash-attn
+# and sglang made it, both of which change what the numbers mean.
+python - "$BASE_FOLDER/env_summary.json" <<'PY'
 import json, sys
 info = {}
 import torch
@@ -199,13 +242,29 @@ for name, mod in (("liger", "liger_kernel"), ("fla", "fla"), ("flash_attn", "fla
         info[name] = None
 print("\n=== ENVIRONMENT SUMMARY (paste into the report) ===")
 print(json.dumps(info, indent=2))
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(info, fh, indent=2, sort_keys=True)
+    fh.write("\n")
 if not info["qwen3_5_supported"]:
     sys.exit("transformers does not know qwen3_5. Upgrade transformers; nothing else will work.")
 PY
 
+# ---- 9. record how to get back in -------------------------------------------
+# The `micromamba activate` at the top of this script applied to THIS process only.
+# Everything downstream runs as a child of some launcher, so hand them the answer
+# instead of a printed instruction nobody executes.
+rst_write_env_stub "$ENV_NAME" "$BASE_FOLDER/env-$ENV_NAME.sh"
+
 cat <<EOF
 
-ENV READY: micromamba activate $ENV_NAME
+ENV READY.
+
+  In a shell:   micromamba activate $ENV_NAME
+  In a script:  source $BASE_FOLDER/env-$ENV_NAME.sh
+
+scripts/20_run_all.sh, 30_run_sft_verl.sh and 33_run_dpo.sh source that file
+themselves and refuse to start if it does not give them a working env, so you do not
+have to remember either form.
 
 Deliberately NOT installed, and do not add them:
   * apex, TransformerEngine, Megatron-LM  -- the slime path only, and the reason it
@@ -213,5 +272,7 @@ Deliberately NOT installed, and do not add them:
   * FlashQLA                              -- requires sm90+; A100 is sm80
   * anything FP8                          -- A100 has no FP8 tensor cores
 
-Set INSTALL_ROLLOUT=1 to add sglang for RL rollout / eval serving.
+sglang (eval serving + RL rollout) is installed unless INSTALL_ROLLOUT=0. Whether it
+actually landed is in $BASE_FOLDER/env_summary.json under "sglang" -- null there means
+the agentic benchmarks cannot run and the report will say so.
 EOF
