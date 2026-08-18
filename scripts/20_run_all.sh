@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end: preflight -> env -> data -> train -> export -> eval -> report.
+# End-to-end: preflight -> env -> data -> train -> export -> eval -> report -> DPO.
+#
+# DPO runs by default once the SFT report is in range (RUN_DPO=0 to skip); agentic
+# GRPO is opt-in with RUN_RL=1, because it is the only stage that needs a sandbox.
 #
 #   export BASE_FOLDER=/shared/rst MASTER_ADDR=<head-ip> HOSTFILE=$BASE_FOLDER/hostfile
 #   export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
@@ -25,7 +28,8 @@ EVAL_RUNS="${EVAL_RUNS:-3}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-tb-hard,tb2}"
 EVAL_REFERENCE="${EVAL_REFERENCE:-1}"   # also score the released SFT ckpt to validate the harness
 EVAL_BASE="${EVAL_BASE:-1}"             # also score the UN-finetuned base model on the same harness
-RUN_RL="${RUN_RL:-0}"                   # 1 = continue into agentic GRPO if SFT lands in range
+RUN_RL="${RUN_RL:-0}"                   # 1 = also run agentic GRPO (needs a sandbox)
+                                        # RUN_DPO defaults to auto=on; see section 10b
 STAGE_DIR="$BASE_FOLDER/.stage"
 mkdir -p "$STAGE_DIR" "$BASE_FOLDER/logs"
 SKIP_STAGES="${SKIP_STAGES:-}"
@@ -370,17 +374,21 @@ if [[ "$RUN_RL" == "1" ]]; then
   fi
 fi
 
-# ------------------------------------- 10b. DPO, the container-free fallback for RL
-# See DPO_PLAN.md. RUN_DPO=auto fires this exactly when GRPO was asked for and cannot
-# run, i.e. there is nowhere to run task containers. That is a fallback, not a second
-# opinion: with a working sandbox the same GPU hours are better spent on-policy, and
-# DPO over other policies' logged trajectories cannot discover a strategy no logged
-# trajectory used. RUN_DPO=1 forces it anyway, RUN_DPO=0 disables it.
+# ----------------------------------------------- 10b. DPO on logged trajectories
+# See DPO_PLAN.md. This is the DEFAULT post-SFT training stage: RUN_DPO=auto runs it
+# whenever the SFT verdict is in range, because it needs no container, no network and
+# no privilege, so it is the one continuation that cannot be blocked by the sandbox
+# question. GRPO (10a) stays explicit opt-in -- it is the stronger, on-policy result
+# and it is also the one that needs days of sandbox time.
+#
+# Running both is fine and they do not interfere: 10a trains from $RUN_NAME into
+# out-hf-rl, 10b trains from out-hf-full into out-dpo. RUN_DPO=0 disables it.
 RUN_DPO="${RUN_DPO:-auto}"
-if [[ "$RUN_DPO" == "auto" ]]; then
-  if [[ "$RUN_RL" == "1" && "$SANDBOX_OK" == "0" ]]; then RUN_DPO=1; else RUN_DPO=0; fi
-fi
+if [[ "$RUN_DPO" == "auto" ]]; then RUN_DPO=1; fi
 DPO_TRAJ_ROOT="${DPO_TRAJ_ROOT:-$BASE_FOLDER/rst-trajectories}"
+# dpo-v2 is the adopted build (--per-side 14 -> 2,673 pairs) and the one published on
+# the Hub. dpo-v1 was the --per-side 5 build (1,330 pairs); do not default to it.
+DPO_PAIRS_DIR="${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v2}"
 if [[ "$RUN_DPO" == "1" ]]; then
   if [[ "$IN_RANGE" != "1" ]]; then
     # DPO starts FROM this checkpoint and scores divergence from it, so a checkpoint
@@ -389,19 +397,22 @@ if [[ "$RUN_DPO" == "1" ]]; then
     echo "=== DPO BLOCKED: the SFT report has FAIL findings, and DPO would use that"
     echo "    checkpoint as both policy and frozen reference. Fix the FAILs first."
     python -c "import json;d=json.load(open('$BASE_FOLDER/verdict.json'));[print('      -',r) for r in d.get('fail_reasons',[])]" 2>/dev/null || true
-  elif [[ ! -d "$DPO_TRAJ_ROOT" && ! -f "${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}/dpo_train.parquet" ]]; then
-    echo "=== DPO SKIPPED: no trajectories at $DPO_TRAJ_ROOT and no prebuilt pairs at"
-    echo "    ${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}. scripts/02_download.sh fetches the release; or set"
-    echo "    DPO_TRAJ_ROOT / DPO_PAIRS_DIR."
+  elif [[ ! -d "$DPO_TRAJ_ROOT" && ! -f "$DPO_PAIRS_DIR/dpo_train.parquet" \
+          && "${DPO_FETCH_HF:-1}" != "1" ]]; then
+    # Only reachable with the published-pairs fetch switched off: 33_run_dpo.sh pulls
+    # them from the Hub otherwise, which needs neither the 23 GB release nor a rebuild.
+    echo "=== DPO SKIPPED: DPO_FETCH_HF=0, no trajectories at $DPO_TRAJ_ROOT, and no"
+    echo "    prebuilt pairs at $DPO_PAIRS_DIR. Allow the fetch, run"
+    echo "    scripts/02_download.sh, or point DPO_PAIRS_DIR at a prebuilt copy."
   else
-    echo "=== SFT in range, no sandbox -> DPO on logged trajectories (this is NOT GRPO)"
+    echo "=== SFT in range -> DPO on logged trajectories (off-policy; this is NOT GRPO)"
     # NNODES=1 by default: 19_train_dpo.py is FSDP2-only and torchrun here is local.
     # For 27B on 8x80GB the launcher's own note applies (fp32 masters + Adam is 444.8
     # GB sharded, so 8 is tight and 16 is comfortable) -- set DPO_NNODES and
     # MASTER_ADDR and run this script on each node if 8 OOMs.
     stage dpo env MODEL_KEY="$MODEL_KEY" MEM_CLASS="$MEM_CLASS" \
       NNODES="${DPO_NNODES:-1}" NGPUS="${DPO_NGPUS:-${ACTOR_NUM_GPUS_PER_NODE:-8}}" \
-      TRAJ_ROOT="$DPO_TRAJ_ROOT" PAIRS_DIR="${DPO_PAIRS_DIR:-$BASE_FOLDER/dpo-v1}" \
+      TRAJ_ROOT="$DPO_TRAJ_ROOT" PAIRS_DIR="$DPO_PAIRS_DIR" \
       POLICY="$BASE_FOLDER/out-hf-full" OUT_DIR="$BASE_FOLDER/out-dpo" \
       MAX_SEQ_LEN="${MAX_SEQ_LEN:-32768}" \
       bash scripts/33_run_dpo.sh

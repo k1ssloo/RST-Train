@@ -28,7 +28,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
-| DPO fallback for a container-less pod (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
+| DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
 
 ## Supported models
 
@@ -37,13 +37,18 @@ serving TP all follow from `configs/models.json`.
 
 ```bash
 python scripts/model_registry.py --list
-MODEL_KEY=qwen3.5-9b RUN_RL=1 bash scripts/20_run_all.sh   # SFT -> eval -> report -> RL
+MODEL_KEY=qwen3.5-9b bash scripts/20_run_all.sh            # SFT -> eval -> report -> DPO
+MODEL_KEY=qwen3.5-9b RUN_RL=1 bash scripts/20_run_all.sh   # ... plus agentic GRPO, if a sandbox exists
 ```
+
+DPO runs by default because it needs no container; agentic GRPO is opt-in (`RUN_RL=1`)
+because every rollout needs one. `RUN_DPO=0` turns DPO off.
 
 `20_run_all.sh` evaluates the **base model on the same harness** as well as the
 fine-tuned one, so "did this help?" is answerable even for sizes the paper never
-published. It writes `verdict.json` with `in_range`, and the RL stage refuses to
-start unless the SFT report has zero FAIL findings.
+published. It writes `verdict.json` with `in_range`, and both post-SFT stages refuse to
+start unless the SFT report has zero FAIL findings — DPO uses that checkpoint as its own
+frozen reference, so an untrustworthy one makes every implicit reward meaningless.
 
 | key | params | ~min/epoch | min GPUs | note |
 |---|---|---|---|---|
@@ -62,7 +67,7 @@ render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged
 PLAN.md                        SFT plan; hardware decision tables; risk register
 BACKENDS.md                    slime+Megatron vs verl+FSDP; why others were rejected
 RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates
-DPO_PLAN.md                    the container-free fallback when GRPO cannot roll out
+DPO_PLAN.md                    DPO on logged trajectories: the container-free default stage
 OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
   00_preflight.sh              detect GPU mem / NVLink / IB / shared FS / RAM → config row
@@ -114,6 +119,7 @@ The derived datasets are published:
 | dataset | contents |
 |---|---|
 | [`NiuNiu0110/RST-SFT-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-SFT-Qwen3.5-27B) | configs `cap10` (10,778 ex), `cap8` (8,886, ablation), `cap10_pretokenized` (`input_ids`+`loss_mask`) |
+| [`NiuNiu0110/RST-DPO-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-DPO-Qwen3.5-27B) | config `v2`: 2,673 pre-tokenized preference pairs (2,448 train / 225 holdout), 48 MB |
 | `NiuNiu0110/RST-RL-Taskset` (private) | GRPO task selection metadata, 5,140 `sweet`-tier tasks |
 
 ```python
@@ -122,6 +128,10 @@ ds = load_dataset("NiuNiu0110/RST-SFT-Qwen3.5-27B", "cap10", split="train")
 # or, with the verified loss mask already applied (what the verl path consumes):
 ds = load_dataset("NiuNiu0110/RST-SFT-Qwen3.5-27B", "cap10_pretokenized", split="train")
 ```
+
+`33_run_dpo.sh` fetches the DPO pairs itself when `$BASE_FOLDER/dpo-v2/` is empty, so
+that stage needs neither the 23 GB trajectory release nor a local rebuild
+(`DPO_FETCH_HF=0` forces the rebuild instead).
 
 The RL taskset is metadata only — task *bodies* are rebuilt from upstream with
 `scripts/10_build_rl_taskset.py --materialize` (~15 s), which also rewrites

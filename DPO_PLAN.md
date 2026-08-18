@@ -1,14 +1,15 @@
-# DPO on logged RST trajectories — the container-free fallback for RL
+# DPO on logged RST trajectories — the container-free post-SFT stage
 
-Companion to `RL_PLAN.md`. Read that first: this exists because the GRPO path has a
-single hard prerequisite — somewhere to run task containers — and on the target pod
-that prerequisite is currently unmet (`AppArmor docker-default` denies `mount(2)`;
-`RL_PLAN.md` §1). SFT is unaffected. RL is blocked outright until either ops grants
+**This is the default stage after SFT** (`20_run_all.sh` runs it unless `RUN_DPO=0`),
+because it needs **no container, no network, no privilege** — and the GRPO path has a
+single hard prerequisite that the target pod does not meet: somewhere to run task
+containers (`AppArmor docker-default` denies `mount(2)`; `RL_PLAN.md` §1). SFT is
+unaffected; GRPO is opt-in via `RUN_RL=1` and blocked until either ops grants
 `--security-opt apparmor=unconfined` or an off-machine backend is wired
 (`BACKENDS.md`).
 
-This path needs **no container, no network, no privilege**. It is not a substitute
-for GRPO and the code says so in its own output.
+Being the default does not make it a substitute for GRPO. It is off-policy, and the
+code says so in its own output — see the next section before writing any report.
 
 ## What it is, stated so the report cannot overclaim
 
@@ -53,11 +54,20 @@ Three stages, each skipped if its output already exists, so a re-run resumes:
 
 | stage | script | cost | output |
 |---|---|---|---|
-| 1 | `17_build_dpo_data.py` | ~25 min CPU (tar I/O bound), cached | `$BASE_FOLDER/dpo-v1/dpo_{train,holdout}.parquet` |
-| 2 | `18_dpo_ref_logprobs.py` | 2 forwards/pair, sharded 1 process/GPU, resumable | `$BASE_FOLDER/dpo-v1/ref/ref_logps*.parquet` |
+| 1 | published pairs, or `17_build_dpo_data.py` | 48 MB download, or ~25 min CPU (tar I/O bound), cached | `$BASE_FOLDER/dpo-v2/dpo_{train,holdout}.parquet` |
+| 2 | `18_dpo_ref_logprobs.py` | 2 forwards/pair, sharded 1 process/GPU, resumable | `$BASE_FOLDER/dpo-v2/ref/ref_logps*.parquet` |
 | 3 | `19_train_dpo.py` | FSDP2, one side's activations at a time | `$BASE_FOLDER/out-dpo/{hf,dpo_training_summary.json}` |
 
 Knobs that matter (all env vars on `33_run_dpo.sh`):
+
+Stage 1 resolves the pairs from three sources, in cost order: whatever is already in
+`PAIRS_DIR`, then the published set
+([`NiuNiu0110/RST-DPO-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-DPO-Qwen3.5-27B),
+48 MB), then a rebuild from the 23 GB trajectory release. All three produce the same
+2,673 pairs (seed 1228, deterministic), so **a pod that never downloaded the release can
+still run this stage.** The fetch stages all three files before writing any of them: a
+`PAIRS_DIR` holding train but not holdout would look complete to stage 2 and silently
+cost the only held-out measurement this path has.
 
 ```bash
 PER_SIDE=14           # candidates per (group, model) per outcome. THE yield lever; see below
@@ -67,7 +77,14 @@ DPO_LENGTH_NORM=1     # 1 = per-token objective (default, see "step size" below)
 PARAM_DTYPE=fp32      # master weights. Do not set bf16 at this lr; see below
 DPO_LOGIT_CHUNK=512   # positions per LM-head slice. Same value reaches stages 2 and 3
 POLICY=$BASE_FOLDER/out-hf-full   # the SFT checkpoint; also the frozen reference
+PAIRS_DIR=$BASE_FOLDER/dpo-v2     # the adopted build; dpo-v1 was the 1,330-pair one
+DPO_PAIRS_REPO=NiuNiu0110/RST-DPO-Qwen3.5-27B   # where stage 1 fetches from
+DPO_FETCH_HF=1        # 0 = never fetch, always rebuild locally
 ```
+
+Via `20_run_all.sh` the same knobs are `DPO_PAIRS_DIR`, `DPO_TRAJ_ROOT`, `DPO_NNODES`
+and `DPO_NGPUS` (it forwards them as `PAIRS_DIR` / `TRAJ_ROOT` / `NNODES` / `NGPUS`),
+and `RUN_DPO=0` skips the stage entirely.
 
 ## The three gates, and what each one caught
 
@@ -236,7 +253,7 @@ side rejected, median rejected/chosen supervised-token ratio 0.9758. So
 
 | symptom | cause | fix |
 |---|---|---|
-| `GATE 1 FAILED (fingerprint)` | `POLICY` is not the checkpoint the reference was scored on (usually `out-hf-full` was re-exported) | `rm -rf $BASE_FOLDER/dpo-v1/ref` and re-run, or point `POLICY` back |
+| `GATE 1 FAILED (fingerprint)` | `POLICY` is not the checkpoint the reference was scored on (usually `out-hf-full` was re-exported) | `rm -rf $BASE_FOLDER/dpo-v2/ref` and re-run, or point `POLICY` back |
 | `GATE 2 FAILED (coverage)` | the reference pass did not finish | re-run `33_run_dpo.sh`; stage 2 resumes from the partial parquet |
 | `GATE 3 FAILED (calibration)` | mask / tokenizer / dtype changed between stages | fix the cause. Do **not** raise `--calibration-tol` to get past it |
 | `--holdout-groups N consumed every group` | too few groups paired | already clamped to `--max-holdout-fraction` (0.15) with a loud message |

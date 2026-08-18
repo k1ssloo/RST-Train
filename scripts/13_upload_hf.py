@@ -4,10 +4,13 @@
     export HF_TOKEN=hf_...
     python scripts/13_upload_hf.py --owner <hf-user> --data-root data [--dry-run]
 
-Two repos, deliberately different visibility:
+Three repos, deliberately different visibility:
 
   <owner>/RST-SFT-Qwen3.5-27B   PUBLIC   two configs (cap10 default, cap8 ablation)
+  <owner>/RST-DPO-Qwen3.5-27B   PUBLIC   preference pairs, pre-tokenized
   <owner>/RST-RL-Taskset        PRIVATE  selection metadata only, no task bodies
+
+`--only sft|dpo|rl` uploads one of them; the default touches all three.
 
 Why the RL repo is metadata-only: the materialized task dirs contain each task's
 `solution/solve.sh` and `tests/` (reference solution + verifier). Upstream already
@@ -26,6 +29,7 @@ import sys
 from pathlib import Path
 
 SFT_REPO = "RST-SFT-Qwen3.5-27B"
+DPO_REPO = "RST-DPO-Qwen3.5-27B"
 RL_REPO = "RST-RL-Taskset"
 
 SFT_CARD = """---
@@ -213,6 +217,112 @@ filtered, reconstructed, normalized, deduplicated, and re-serialized; no new
 rollouts were generated.
 """
 
+DPO_CARD = """---
+license: cc-by-4.0
+task_categories:
+- text-generation
+language:
+- en
+tags:
+- terminal-agent
+- agentic
+- dpo
+- preference
+- qwen3.5
+- recursive-task-synthesis
+pretty_name: RST DPO preference pairs for Qwen3.5
+size_categories:
+- 1K<n<10K
+configs:
+- config_name: v2
+  data_files:
+  - split: train
+    path: data/v2/train.parquet
+  - split: holdout
+    path: data/v2/holdout.parquet
+---
+
+# RST DPO preference pairs for Qwen3.5
+
+**2,673 preference pairs** (2,448 train / 225 holdout) built from
+[Zhongzhi1228/Recursive-Task-Synthesis-Trajectories](https://huggingface.co/datasets/Zhongzhi1228/Recursive-Task-Synthesis-Trajectories).
+Each pair is two agent runs **on the same task**: one whose trajectory the task's own
+verifier scored reward 1, one it scored 0.
+
+Builder, trainer, and the numerical gates: **https://github.com/k1ssloo/RST-Train**
+(`scripts/17_build_dpo_data.py`, `scripts/19_train_dpo.py`, `DPO_PLAN.md`).
+
+## What the preference actually encodes
+
+**Outcome, not model identity.** Cross-model pairs are excluded
+(`cross_model_allowed: false`), so both sides of every pair come from the *same*
+generating model — 2,673 / 2,673 are same-model. Without that rule a "preference"
+could be learned as "prefer whatever the stronger model wrote", which is a different
+and much less useful signal than "prefer the run that solved the task".
+
+Source models, identical on both sides by construction: `qwen35-27b-iter0000161-hf`
+1,419 / `Qwen3.5-27B` 591 / `Qwen3.6-27B-base` 412 / `gpt-oss-120b` 251.
+
+## Pre-tokenized, with the verified loss mask
+
+| column | meaning |
+|---|---|
+| `chosen_input_ids` / `rejected_input_ids` | `list[int]`, **whole-conversation** render |
+| `chosen_loss_mask` / `rejected_loss_mask` | aligned 1:1 with `input_ids`, no offset; `1` = a token the policy produced |
+| `pair_id`, `prompt_sha256`, `task_group_id` | content-addressed ids |
+| `chosen_trajectory_id` / `rejected_trajectory_id` | upstream trajectory ids |
+| `chosen_model` / `rejected_model`, `same_model` | provenance |
+| `chosen_n_trained` / `rejected_n_trained` | supervised token counts |
+| `common_prefix_tokens`, `prompt_tokens`, `prompt_divergence_tokens` | prompt-agreement evidence |
+
+Tokenizer: `Qwen/Qwen3.5-27B` — **byte-identical across the five Qwen3.5 sizes**
+(0.8B / 4B / 9B / 27B / 35B-A3B), so these ids are valid for any of them. The mask is
+slime's `gen_multi_turn_loss_mask_qwen3_5`, the same implementation the SFT export
+verified, so a consumer never recomputes it and never disagrees with it.
+
+## Yield, and why it is not larger
+
+231,092 clean trajectories → 1,290 task groups with **both** outcomes → 5,759
+canonical prompts (3,884 one-sided, i.e. 67 % have only wins or only losses) → 2,820
+candidate pairs → **2,673** after dropping 147 over-length sides at 32,768 tokens.
+Pairing must be per *task variant*, and a variant is only known after reconstruction;
+that is the bottleneck, not the filter thresholds. A `--per-side 5` build yields 1,330
+pairs, `--per-side 14` (this set) yields 2,673.
+
+**The prompt trap, if you rebuild:** hashing prompts verbatim yields ~0 pairs, because
+each run's prompt ends with a per-container UUID hostname. UUIDs and 12-hex docker
+hostnames are masked **for grouping only** — the trained text is verbatim, always.
+Median residual divergence inside a pair's prompt is 40 tokens (max 57), which is
+exactly that hostname.
+
+## Length bias is measured, not assumed
+
+DPO's objective rewards length unless you check: 47.18 % of pairs have the longer side
+as `rejected` (a coin flip is the healthy value), median rejected/chosen token ratio
+0.9815. `length_bias_warning: null`. Train with per-token normalization
+(`--length-normalize`) unless you have a reason not to, and say which you used.
+
+## Read the two caveats before quoting a number
+
+- **This is off-policy.** It reweights behaviour already present in other policies'
+  logged trajectories, so it can sharpen modes a model already has and **cannot**
+  discover a strategy no logged trajectory used. It is not an RL result.
+- `holdout_reward_accuracy` from the trainer is **likelihood ranking** on held-out
+  task groups: how often the model assigns higher likelihood to the run that passed
+  than to the run that failed. **0.5 means no preference**, not 50 % of tasks solved.
+  It is not a pass rate and must not be compared with terminal-bench numbers.
+
+The 225 holdout pairs come from **80 task groups disjoint from train**, so a holdout
+number is not measuring memorized prompts.
+
+## Attribution
+
+Derived from `Zhongzhi1228/Recursive-Task-Synthesis-Trajectories` (CC-BY-4.0) by
+Zhongzhi1228 et al., *Recursive Synthesis for Long-Horizon Terminal Tasks*
+(arXiv:2608.05466). Same license. Trajectories were filtered, reconstructed, paired
+and tokenized; no new rollouts were generated and no verifier was re-run.
+"""
+
 RL_CARD = """---
 license: cc-by-4.0
 task_categories:
@@ -312,6 +422,10 @@ def main() -> int:
     parser.add_argument("--owner", required=True, help="HF user or org")
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--only", choices=("all", "sft", "dpo", "rl"), default="all",
+                        help="upload one repo instead of all three")
+    parser.add_argument("--dpo-dir", default="dpo-v2",
+                        help="which local DPO build to publish (default: the adopted one)")
     args = parser.parse_args()
 
     token = os.environ.get("HF_TOKEN")
@@ -324,6 +438,7 @@ def main() -> int:
     root = args.data_root
 
     sft_repo = f"{args.owner}/{SFT_REPO}"
+    dpo_repo = f"{args.owner}/{DPO_REPO}"
     rl_repo = f"{args.owner}/{RL_REPO}"
 
     uploads: list[tuple[Path, str]] = [
@@ -346,7 +461,7 @@ def main() -> int:
     # the root that `10_build_rl_taskset.py --materialize` writes.
     rl_src = root / "rl-sweet/rl_tasks.jsonl"
     rl_portable = root / "rl-sweet/rl_tasks.portable.jsonl"
-    if rl_src.is_file():
+    if rl_src.is_file() and args.only in ("all", "rl"):
         rewritten = 0
         with rl_src.open(encoding="utf-8") as fin, rl_portable.open("w", encoding="utf-8") as fout:
             for line in fin:
@@ -365,24 +480,41 @@ def main() -> int:
         (root / "rl-sweet/manifest.json", "manifest.json"),
     ]
 
-    for src, _ in uploads + rl_uploads:
-        if not src.is_file():
-            sys.exit(f"missing input: {src}")
+    # The pairs are pre-tokenized ids plus content-addressed provenance -- no text, no
+    # absolute paths (checked: the manifest's paths are repo-relative), and nothing from
+    # any task's solution/ or tests/. Same source and license as the SFT repo, so this
+    # is public. The reconstructed.jsonl.gz cache is deliberately NOT published: it is
+    # 226 MB of intermediate state that 17_build_dpo_data.py regenerates.
+    dpo_root = root / args.dpo_dir
+    dpo_uploads: list[tuple[Path, str]] = [
+        (dpo_root / "dpo_train.parquet", "data/v2/train.parquet"),
+        (dpo_root / "dpo_holdout.parquet", "data/v2/holdout.parquet"),
+        (dpo_root / "manifest.json", "manifest.json"),
+    ]
 
-    print(f"SFT  -> {sft_repo}  (public)")
-    for src, dst in uploads:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size/2**20:.1f} MB)")
-    print(f"RL   -> {rl_repo}  (PRIVATE, metadata only)")
-    for src, dst in rl_uploads:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size/2**20:.1f} MB)")
+    jobs: list[tuple[str, str, bool, str, list[tuple[Path, str]]]] = [
+        ("SFT", sft_repo, False, SFT_CARD, uploads),
+        ("DPO", dpo_repo, False, DPO_CARD, dpo_uploads),
+        ("RL ", rl_repo, True, RL_CARD, rl_uploads),
+    ]
+    if args.only != "all":
+        jobs = [j for j in jobs if j[0].strip().lower() == args.only]
+
+    for _, _, _, _, files in jobs:
+        for src, _dst in files:
+            if not src.is_file():
+                sys.exit(f"missing input: {src}")
+
+    for name, repo, private, _card, files in jobs:
+        vis = "PRIVATE" if private else "public"
+        print(f"{name} -> {repo}  ({vis})")
+        for src, dst in files:
+            print(f"   {src}  ->  {dst}  ({src.stat().st_size/2**20:.1f} MB)")
     if args.dry_run:
         print("\n--dry-run: nothing uploaded")
         return 0
 
-    for repo, private, card, files in (
-        (sft_repo, False, SFT_CARD, uploads),
-        (rl_repo, True, RL_CARD, rl_uploads),
-    ):
+    for _name, repo, private, card, files in jobs:
         api.create_repo(repo, repo_type="dataset", private=private, exist_ok=True)
         print(f"\n[{repo}] created/exists (private={private})")
         for src, dst in files:
@@ -393,8 +525,8 @@ def main() -> int:
                         repo_id=repo, repo_type="dataset")
         print("  uploaded README.md")
 
-    print(f"\nhttps://huggingface.co/datasets/{sft_repo}")
-    print(f"https://huggingface.co/datasets/{rl_repo}  (private)")
+    for _name, repo, private, _card, _files in jobs:
+        print(f"\nhttps://huggingface.co/datasets/{repo}" + ("  (private)" if private else ""))
     return 0
 
 

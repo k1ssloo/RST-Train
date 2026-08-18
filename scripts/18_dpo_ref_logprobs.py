@@ -4,14 +4,14 @@ reference model away.
 
     # single GPU
     python scripts/18_dpo_ref_logprobs.py \
-        --pairs $BASE_FOLDER/dpo-v1 --model-path $BASE_FOLDER/out-hf-full \
-        --out $BASE_FOLDER/dpo-v1/ref
+        --pairs $BASE_FOLDER/dpo-v2 --model-path $BASE_FOLDER/out-hf-full \
+        --out $BASE_FOLDER/dpo-v2/ref
 
     # one process per GPU, no communication needed
     for i in 0 1 2 3 4 5 6 7; do
       CUDA_VISIBLE_DEVICES=$i python scripts/18_dpo_ref_logprobs.py \
-        --pairs $BASE_FOLDER/dpo-v1 --model-path $BASE_FOLDER/out-hf-full \
-        --out $BASE_FOLDER/dpo-v1/ref --shard $i --num-shards 8 &
+        --pairs $BASE_FOLDER/dpo-v2 --model-path $BASE_FOLDER/out-hf-full \
+        --out $BASE_FOLDER/dpo-v2/ref --shard $i --num-shards 8 &
     done; wait
 
 WHY PRECOMPUTE

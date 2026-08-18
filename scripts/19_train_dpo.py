@@ -2,14 +2,14 @@
 """DPO on the RST preference pairs. No sandbox, no rollouts, no reference model in memory.
 
     # local smoke test (small model, a handful of pairs)
-    python scripts/19_train_dpo.py --pairs $BASE_FOLDER/dpo-v1 \
-        --ref-logps $BASE_FOLDER/dpo-v1/ref --model-path $BASE_FOLDER/Qwen3.5-0.8B \
+    python scripts/19_train_dpo.py --pairs $BASE_FOLDER/dpo-v2 \
+        --ref-logps $BASE_FOLDER/dpo-v2/ref --model-path $BASE_FOLDER/Qwen3.5-0.8B \
         --out $BASE_FOLDER/out-dpo --max-steps 4 --max-seq-len 4096
 
     # 4 nodes x 8 GPUs
     torchrun --nnodes 4 --nproc-per-node 8 --rdzv-backend c10d \
         --rdzv-endpoint $MASTER_ADDR:29500 scripts/19_train_dpo.py \
-        --pairs $BASE_FOLDER/dpo-v1 --ref-logps $BASE_FOLDER/dpo-v1/ref \
+        --pairs $BASE_FOLDER/dpo-v2 --ref-logps $BASE_FOLDER/dpo-v2/ref \
         --model-path $BASE_FOLDER/out-hf-full --out $BASE_FOLDER/out-dpo
 
 WHAT THIS IS AND IS NOT

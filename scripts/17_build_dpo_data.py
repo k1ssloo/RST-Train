@@ -4,7 +4,7 @@
     python scripts/17_build_dpo_data.py \
         --traj-root  $BASE_FOLDER/rst-trajectories \
         --tokenizer  $BASE_FOLDER/Qwen3.5-27B \
-        --out-dir    $BASE_FOLDER/dpo-v1
+        --out-dir    $BASE_FOLDER/dpo-v2
 
 WHY THIS EXISTS
     GRPO needs a sandbox: every rollout builds a task image and drives tmux inside

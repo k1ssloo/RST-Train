@@ -13,14 +13,16 @@ outline.
 | GRPO rollout function (`rl/generate.py`) | ⚠️ written against the real slime API; **never executed** |
 | Image prebuild (`scripts/11_prebuild_images.py`) | ⚠️ written; **no image has been built yet** |
 | GRPO launcher (`scripts/12_run_grpo.sh`) | ⚠️ written; needs cluster |
-| **DPO fallback** (`DPO_PLAN.md`, `scripts/33_run_dpo.sh`) | ✅ **run end to end** on 0.8B: 2,673 pairs built, step-0 loss = log 2 exactly. Needs **no container** |
+| **DPO** (`DPO_PLAN.md`, `scripts/33_run_dpo.sh`) | ✅ **run end to end** on 0.8B: 2,673 pairs built, step-0 loss = log 2 exactly. Needs **no container** |
 
-Everything on this page needs a sandbox. If there is nowhere to run task containers,
-`DPO_PLAN.md` is the path that still trains something from this data — off-policy, on
-logged trajectories, no container and no privilege. It is a fallback, not a
-substitute: it reweights behaviour already in other policies' trajectories and cannot
-discover a strategy none of them used. `20_run_all.sh` picks it automatically
-(`RUN_DPO=auto`) exactly when `RUN_RL=1` and the sandbox check fails.
+Everything on this page needs a sandbox, so **GRPO is opt-in (`RUN_RL=1`)** while DPO
+runs by default after SFT (`RUN_DPO=1`, and it fetches its own pairs from the Hub, so it
+works on a pod that never downloaded the release). That ordering is about
+prerequisites, not about which is better. DPO is off-policy: it reweights behaviour
+already in other policies' trajectories and cannot discover a strategy none of them
+used. It is what trains when there is nowhere to run task containers — not a substitute
+for this page, and a DPO checkpoint stays agentically unevaluated until something here
+runs.
 
 `rl/generate.py` is written against APIs I read in slime's source
 (`slime/agent/adapters/common.py`, `slime/utils/types.py`,

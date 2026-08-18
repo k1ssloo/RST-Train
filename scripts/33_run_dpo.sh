@@ -70,7 +70,7 @@ EOF_PY
   MAX_SEQ_LEN="${MAX_SEQ_LEN:-32768}"
 fi
 
-PAIRS_DIR="${PAIRS_DIR:-$BASE_FOLDER/dpo-v1}"
+PAIRS_DIR="${PAIRS_DIR:-$BASE_FOLDER/dpo-v2}"
 REF_DIR="${REF_DIR:-$PAIRS_DIR/ref}"
 TRAJ_ROOT="${TRAJ_ROOT:-$BASE_FOLDER/rst-trajectories}"
 TOKENIZER="${TOKENIZER:-$BASE_FOLDER/$MODEL_DIR_NAME}"
@@ -99,9 +99,64 @@ LOGIT_CHUNK="${DPO_LOGIT_CHUNK:-512}"
 mkdir -p "$BASE_FOLDER/logs" "$OUT_DIR"
 
 # ------------------------------------------------------------------ 1. pairs
+# Three sources, tried in cost order.
+#   a) already on disk          -> nothing to do
+#   b) the published pairs      -> 48 MB, seconds, and it is the exact set every number
+#                                  in DPO_PLAN.md refers to
+#   c) rebuild from the release -> 23 GB of trajectories and ~25 min of CPU to produce
+#                                  the same thing (seed 1228, deterministic)
+# (b) also means a pod that never downloaded the trajectory release can still run this
+# stage. Set DPO_FETCH_HF=0 to force the local rebuild.
+DPO_PAIRS_REPO="${DPO_PAIRS_REPO:-NiuNiu0110/RST-DPO-Qwen3.5-27B}"
+if [[ ! -f "$PAIRS_DIR/dpo_train.parquet" && "${DPO_FETCH_HF:-1}" == "1" ]]; then
+  echo "=== fetching published preference pairs from $DPO_PAIRS_REPO -> $PAIRS_DIR"
+  python - "$DPO_PAIRS_REPO" "$PAIRS_DIR" <<'EOF_PY'
+import shutil
+import sys
+from pathlib import Path
+
+repo, out = sys.argv[1], Path(sys.argv[2])
+try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    sys.exit("huggingface_hub not installed")
+
+# Download everything BEFORE writing anything into place: a half-fetched pairs dir
+# (train but no holdout) would look complete to the next stage and silently cost the
+# only held-out measurement this path has.
+want = {"data/v2/train.parquet": "dpo_train.parquet",
+        "data/v2/holdout.parquet": "dpo_holdout.parquet",
+        "manifest.json": "manifest.json"}
+staged = {}
+for remote, local in want.items():
+    staged[local] = hf_hub_download(repo, remote, repo_type="dataset")
+out.mkdir(parents=True, exist_ok=True)
+for local, src in staged.items():
+    shutil.copyfile(src, out / local)
+print(f"fetched {len(staged)} files into {out}")
+EOF_PY
+  if [[ ! -f "$PAIRS_DIR/dpo_train.parquet" ]]; then
+    echo "    fetch did not produce pairs (offline pod, or no such repo). Falling back to"
+    echo "    building them locally from $TRAJ_ROOT."
+  fi
+fi
+
 if [[ ! -f "$PAIRS_DIR/dpo_train.parquet" ]]; then
   echo "=== building preference pairs -> $PAIRS_DIR"
-  [[ -d "$TRAJ_ROOT" ]] || { echo "no trajectories at TRAJ_ROOT=$TRAJ_ROOT (scripts/02_download.sh fetches them)" >&2; exit 1; }
+  if [[ ! -d "$TRAJ_ROOT" ]]; then
+    {
+      echo "no pairs and nothing to build them from."
+      echo "  local pairs   : $PAIRS_DIR/dpo_train.parquet  (absent)"
+      if [[ "${DPO_FETCH_HF:-1}" == "1" ]]; then
+        echo "  published set : $DPO_PAIRS_REPO  (fetch attempted and failed -- offline?)"
+      else
+        echo "  published set : not tried (DPO_FETCH_HF=0). Unset it to fetch 48 MB and skip the build."
+      fi
+      echo "  trajectories  : $TRAJ_ROOT  (absent; scripts/02_download.sh fetches the 23 GB release)"
+      echo "Make ONE of those three available; any of them produces the same 2,673 pairs."
+    } >&2
+    exit 1
+  fi
   python scripts/17_build_dpo_data.py \
     --traj-root "$TRAJ_ROOT" \
     --tokenizer "$TOKENIZER" \
