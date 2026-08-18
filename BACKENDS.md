@@ -222,6 +222,69 @@ Found by building the actual task pool, not by reading docs:
 so it would quietly remove a third of the pool. `11_prebuild_images.py` therefore
 aborts on it instead of building the other two thirds.
 
-**Apptainer/Singularity does not work unchanged** — it does not serve the Docker
-API, so Harbor cannot drive it without a new environment backend, and that backend
-is not written here.
+**Correction.** An earlier version of this file said Harbor cannot drive
+Apptainer/Singularity without a new backend. That is wrong: Harbor 0.21.0 ships
+`environments/singularity/`. The real limitation is narrower — it wants a docker
+image reference or a `.sif`, not a task `Dockerfile`, so it does not fit the RST task
+format without a build step of your own. Same for `hf-sandbox`, which requires a
+prebuilt `[environment].docker_image` and refuses a Dockerfile.
+
+## When this machine cannot run a container at all
+
+Rootless podman needs `mount(2)`. A pod under AppArmor's `docker-default` profile
+cannot call it — the profile contains a literal `deny mount,` and permits only
+`umount`. Measured signature, on a pod where podman 5.8.4 / crun 1.28 / netavark
+were all installed and `podman info` was clean:
+
+| probe | result |
+|---|---|
+| `unshare -U`, `unshare -Ur` | ✅ succeed |
+| `mount -t tmpfs` | ❌ **EACCES** |
+| `mount --bind` | ❌ **EACCES** |
+| `mount --make-rprivate /` | ❌ **EACCES** |
+| `/proc/self/attr/current` | `docker-default (enforce)` |
+| `Seccomp` in `/proc/self/status` | `0` — not seccomp |
+
+It fails inside a *self-created* user namespace where the process holds full
+capabilities, and EACCES (not EPERM) is the LSM signature. There is no in-pod
+workaround: AppArmor profiles are inherited across `unshare()` and `execve()`, and
+`docker-default` grants no `change_profile` rule, so nothing can transition out of
+it. fuse-overlayfs, vfs, bubblewrap and every other approach mount, so all are dead.
+`bash scripts/00b_setup_sandbox.sh --diagnose` runs these probes and prints the
+verdict; the minimal ops ask is **one flag**, `--security-opt apparmor=unconfined`
+(not SYS_ADMIN, not `/dev/fuse`, not privileged — see `OPERATOR_PROMPT.md`).
+
+### Backends that run the container elsewhere
+
+These need no container privilege on this machine, so they unblock eval and RL
+without waiting for ops. `00b_setup_sandbox.sh` selects one from the credentials it
+finds and exports `RST_HARBOR_ENV` / `RST_HARBOR_ENV_KWARGS`; `06_eval.py`,
+`rl/generate.py` and `verl_backend/harbor_agent_loop.py` all honour it.
+
+| backend | needs | how the task image gets built |
+|---|---|---|
+| `daytona` | outbound HTTPS + `DAYTONA_API_KEY` | declarative build → content-hash snapshot `harbor__<env_hash>__snapshot` |
+| `e2b` | outbound HTTPS + `E2B_API_KEY` | `Template().from_dockerfile` → `AsyncTemplate.build` |
+| `modal` | outbound HTTPS + a Modal token | `Image.from_dockerfile` |
+| remote Docker daemon | reachable `DOCKER_HOST` **and the task tree at the same absolute path on the daemon host** (Harbor bind-mounts it; build contexts stream over the socket and need no sync) | locally-authored, built there |
+| `gke`/`ack`/`openshift` | namespace + RBAC to create sibling pods | in-cluster |
+
+Daytona is what the RST paper itself used. Terminus-2 is a **host-side** agent — it
+drives the container via `environment.exec(...)` — so the agent loop and every model
+call stay in this pod, talking to the local vLLM/SGLang shim. Nothing inbound to the
+pod is required, and `--network none` inside the task container still holds.
+
+Two asymmetries this introduces, both handled in code:
+
+- **Proxy.** `--env docker` must have `HTTP(S)_PROXY` *stripped* (the vLLM shim is
+  local); an off-machine backend must *keep* it, with the local endpoints added to
+  `NO_PROXY`. Ray's `runtime_env` replaces rather than extends the worker
+  environment, so `12_run_grpo.sh` names the proxy vars explicitly in
+  `RUNTIME_ENV_JSON`.
+- **Prebuilding.** `11_prebuild_images.py` cannot warm a cache it does not own. It
+  detects the off-machine case, writes `prebuild_report.json` with `"skipped": true`
+  and a reason, and exits 0 — a warm-cache step that is structurally impossible is
+  not a failure. The first rollout per distinct image pays the provider-side build
+  once. `RST_MAX_SANDBOXES` also stops being a local-resource number and becomes the
+  provider's concurrency quota; exceed it and the 429s are (correctly) classified as
+  infrastructure failures and dropped.

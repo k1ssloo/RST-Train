@@ -192,10 +192,98 @@ FOUR THINGS THAT WILL BITE YOU, all found by actually building the real task ima
        tasks (13.8% of the pool) need podman >= 4.x too, or must be excluded. If you
        exclude them, say so -- it changes which tasks the numbers cover.
 
-If podman is genuinely unavailable, ask for the `podman` + `uidmap` packages. That
-is normally an easier request than Docker access: no daemon, no root, no group
-membership. Apptainer does NOT work unchanged -- it does not serve the Docker API,
-so Harbor cannot drive it without a new backend, which is not written.
+If podman is not installed at all, ask for the `podman` + `uidmap` packages. That is
+normally an easier request than Docker access: no daemon, no root, no group
+membership. But check the next section FIRST -- installed-and-working podman that
+still cannot start a container is a different problem with a different ask.
+
+### When podman is installed, working, and STILL cannot run a container
+
+This happened on a real cluster, so read it before asking for anything. Symptom:
+podman is fine (`podman info` clean, image blobs pull through the proxy), and then
+unpacking a layer fails with
+
+    ApplyLayer ... remount /, flags: 0x44000: permission denied
+
+`0x44000` is `MS_REC|MS_PRIVATE` -- containers/storage isolating mount propagation,
+not tar extraction failing. Probe it directly rather than guessing:
+
+    bash scripts/00b_setup_sandbox.sh --diagnose
+
+That runs `00c_probe_sandbox.py`, which calls `unshare(2)` and `mount(2)` itself and
+reads `/proc/self/attr/current`. The signature to look for: `unshare -U` and
+`unshare -Ur` SUCCEED while every `mount` returns **EACCES** even inside your own
+user namespace where you hold full capabilities, and the AppArmor profile is
+`docker-default (enforce)`.
+
+That is an LSM denial, and there is **no workaround from inside the pod**. AppArmor
+profiles are inherited across `unshare()` and `execve()`; `docker-default` contains a
+literal `deny mount,` (it permits only `umount`) and grants no `change_profile` rule,
+so you cannot transition out of it. fuse-overlayfs, vfs, bubblewrap, a newer podman:
+all dead, because all of them mount. EACCES rather than EPERM is how you tell this
+apart from a missing capability.
+
+**Do not ask for the `podman` + `uidmap` packages in this case.** They are already
+installed and working; the packages were never the problem. The minimal ask is one
+flag on the pod spec:
+
+    --security-opt apparmor=unconfined        # docker/podman
+    # k8s >= 1.30:  securityContext.appArmorProfile.type: Unconfined
+    # k8s <  1.30:  container.apparmor.security.beta.kubernetes.io/<name>: unconfined
+
+You do **not** need `--cap-add SYS_ADMIN` (the user namespace already grants caps
+inside it; AppArmor is overriding them, and it would override SYS_ADMIN too), nor
+`/dev/fuse` (the vfs storage driver needs no FUSE), nor `--privileged`, nor any
+seccomp change (`Seccomp: 0` already). One flag is far likelier to be approved than
+four, so ask for exactly the one.
+
+### You do not have to wait for ops
+
+Harbor 0.21.0 ships ~25 environment backends, and several run the container
+somewhere else entirely, needing **zero** container privilege here:
+
+| backend | what it needs | builds the task Dockerfile? |
+|---|---|---|
+| `daytona`, `e2b`, `modal` | outbound HTTPS + an API key | yes, provider-side |
+| remote Docker daemon | reachability + the task tree at the same absolute path there | yes |
+| `gke`/`ack`/`openshift` | a namespace + RBAC to create sibling pods | yes |
+| `hf-sandbox` | a **prebuilt** image; refuses a Dockerfile | no |
+| `singularity` | a docker image or `.sif`, not a Dockerfile | no |
+
+Terminus-2 is a **host-side** agent: it drives the container through
+`environment.exec(...)`, so with a managed provider the agent loop and every model
+call still run in this pod against the local vLLM/SGLang shim. No reverse tunnel, no
+inbound access to the pod, and `--network none` semantics inside the task container
+are preserved. `00b_setup_sandbox.sh` picks one of these automatically when it finds
+the credentials, and exports `RST_HARBOR_ENV` / `RST_HARBOR_ENV_KWARGS`:
+
+    export RST_HARBOR_ENV=daytona DAYTONA_API_KEY=...   # then eval and RL just work
+
+Two consequences to plan for. `11_prebuild_images.py` cannot warm a cache it does not
+own, so it detects this and exits 0 having built nothing -- the first rollout per
+distinct image pays the provider-side build once. And `RST_MAX_SANDBOXES` becomes a
+provider **quota** number rather than a local-resource one; exceeding it returns 429s,
+which the rollout code classifies as infrastructure failures and drops.
+
+### Either way, the checkpoint does not go unmeasured
+
+SFT needs no container at all, so it is never blocked. If eval is, run the
+container-free fallback. It is a weaker signal and says so in its own output, but
+"unmeasured" is not an acceptable deliverable:
+
+    python scripts/06b_eval_offline.py \
+        --model-path $BASE_FOLDER/out-hf-full \
+        --base-model $BASE_FOLDER/$MODEL_DIR_NAME \
+        --holdout    $DATA_DIR/rst_sft_holdout.parquet \
+        --tokenizer  $BASE_FOLDER/$MODEL_DIR_NAME \
+        --out        $BASE_FOLDER/eval/offline
+
+Held-out loss and next-token accuracy over the supervised spans (with a base-vs-tuned
+delta -- the only thing that answers "did SFT do anything"), plus greedy
+action-protocol agreement: parse rate, first-keystroke match, command-list match. Pass
+the result to `14_make_report.py --offline-eval`. The report still records a **FAIL**
+on benchmark coverage, deliberately: it must never let "we could not measure it" read
+as "it looks good".
 
 ## The one-command path
 

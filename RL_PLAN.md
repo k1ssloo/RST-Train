@@ -66,22 +66,48 @@ Three design choices, each with a reason:
 
 ## The rollout prerequisites — with measured numbers
 
-### 1. A dedicated Docker daemon (hard requirement)
+### 1. Somewhere to run task containers — not necessarily *this* machine
 
 **99 % of the 37,484 task Dockerfiles run `apt-get`/`pip`/`npm install` at build
-time.** These are untrusted third-party build scripts. Both
+time.** These are untrusted third-party build scripts. On the local path, both
 `11_prebuild_images.py` and `rl/generate.py` **refuse to start** unless a
 non-default `DOCKER_HOST` is set.
 
 ```bash
-dockerd-rootless-setuptool.sh install
+dockerd-rootless-setuptool.sh install     # or rootless podman, which serves the same API
 export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 ```
+
+**The hard requirement is a container runtime *somewhere*, not on the training pod.**
+Measured on a real cluster: a pod under AppArmor's `docker-default` profile cannot
+call `mount(2)` at all (the profile carries a literal `deny mount,`), so rootless
+podman fails while unpacking image layers however it is configured, and no package or
+storage driver fixes it. `bash scripts/00b_setup_sandbox.sh --diagnose` says which
+case you are in and names the single fix.
+
+When that is the case, point Harbor elsewhere instead of blocking on ops:
+
+```bash
+export RST_HARBOR_ENV=daytona DAYTONA_API_KEY=...    # or e2b / modal / remote daemon / k8s
+source scripts/00b_setup_sandbox.sh                  # picks one from available credentials
+```
+
+Those backends build the task's own Dockerfile provider-side, so this pod needs zero
+container privilege. Terminus-2 is a host-side agent, so the agent loop and every
+model call still run here against the local shim — nothing inbound to the pod, and
+`--network none` inside the task container still holds. `BACKENDS.md` has the full
+table plus the two behavioural differences: proxy handling inverts, and §2 below is
+skipped rather than failed.
 
 The agent container must have **no network**. Harbor runs on the host and is what
 talks to the adapter; the container only executes shell commands.
 
 ### 2. Prebuilt images — but only ~5,140, not 37,484
+
+*(Local and remote-daemon paths only. With an off-machine backend the provider owns
+the image cache, so `11_prebuild_images.py` detects that, writes
+`prebuild_report.json` with `"skipped": true` and a reason, and exits 0 — the first
+rollout per distinct image pays the build once, provider-side.)*
 
 Lazy building during training turns every rollout into a network-bound build and
 every registry hiccup into a stalled trainer. Prebuild the selected pool:
@@ -202,6 +228,8 @@ throughput after correctness is established.
 | Degenerate all-same-reward groups waste the whole budget | high | tier selection (§3); log the degenerate-group fraction every step and drop tasks that stay degenerate |
 | Infra failures mislabeled as reward 0 | high | narrow marker list + abort path in `rl/generate.py`; watch the abort-reason histogram |
 | Sandbox throughput dominates | high | accepted and budgeted (§4); consider a separate CPU node pool for sandboxes |
+| **The pod cannot run containers at all** (AppArmor `docker-default` denies `mount(2)`; observed, not hypothetical) | **high** | `00b_setup_sandbox.sh --diagnose` identifies it in one command. Two independent unblocks: the one-flag ops ask `--security-opt apparmor=unconfined`, and `RST_HARBOR_ENV=daytona\|e2b\|modal\|<remote daemon>\|k8s`, which needs no local privilege. Pursue both; SFT is unaffected either way |
+| Provider concurrency quota exceeded on an off-machine backend | med | `RST_MAX_SANDBOXES` defaults to a conservative 8 there instead of a cores/RAM formula; 429s surface in the abort-reason histogram as infra failures |
 | 710 compose tasks are heavier / flakier | med | they are tagged in the manifest; drop them for the first run if the abort rate is high |
 | Docker disk exhaustion mid-run | med | `--sample` probe first; `docker system prune` policy between runs |
 | CP correctness on gated-delta-net layers | high | same open question as SFT; see `PLAN.md` §5. Resolve during SFT, inherit the answer here |
