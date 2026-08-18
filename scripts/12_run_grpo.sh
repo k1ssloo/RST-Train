@@ -27,7 +27,12 @@ ray stop --force || true; pkill -9 ray || true; pkill -9 python || true; sleep 3
 
 : "${BASE_FOLDER:?set BASE_FOLDER}"
 : "${MASTER_ADDR:?set MASTER_ADDR}"
-: "${RST_DOCKER_HOST:?set RST_DOCKER_HOST to a dedicated (non-default) docker socket}"
+# Container runtime for the rollout sandboxes. Rootless podman is the primary path;
+# it serves the Docker API Harbor speaks, so no Harbor patch is needed.
+if [[ -z "${RST_DOCKER_HOST:-}" ]]; then
+  source "$(dirname "${BASH_SOURCE[0]}")/00b_setup_sandbox.sh" || {
+    echo "RL requires a container runtime; none available. See BACKENDS.md." >&2; exit 1; }
+fi
 : "${ADAPTER_PUBLIC_HOST:=$MASTER_ADDR}"
 SLIME_DIR="${SLIME_DIR:-$BASE_FOLDER/slime}"
 TASKSET="${TASKSET:-$BASE_FOLDER/rl-sweet}"

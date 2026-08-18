@@ -282,9 +282,13 @@ class HarborTerminusAgentLoop(AgentLoopBase):
         docker_host = os.environ.get("RST_DOCKER_HOST", "")
         if not docker_host:
             raise RuntimeError(
-                "RST_DOCKER_HOST is not set. RST task Dockerfiles are untrusted "
-                "third-party build scripts and must not be built on the host's default "
-                "daemon. Point this at a dedicated/rootless socket."
+                "RST_DOCKER_HOST is not set. Run `source scripts/00b_setup_sandbox.sh` "
+                "first: it finds a usable container runtime and exports this. On a cluster "
+                "without Docker permission the answer is rootless podman, whose "
+                "Docker-compatible API socket Harbor can use unchanged. Task Dockerfiles are "
+                "untrusted third-party build scripts, so they must never be built on a shared "
+                "root Docker daemon -- rootless podman satisfies that more strongly, since "
+                "there is no privileged daemon at all."
             )
         if not task_dir or not (Path(task_dir) / "instruction.md").is_file():
             raise RuntimeError(f"task not materialized: {task_dir} "

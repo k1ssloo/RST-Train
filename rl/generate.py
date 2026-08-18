@@ -85,7 +85,7 @@ class RolloutConfig:
     adapter_public_host: str | None
     adapter_bind_host: str
     adapter_port: int
-    docker_host: str
+    docker_host: str          # Docker-API-compatible socket (docker OR podman)
     agent: str
     agent_timeout_sec: int
     guard_sec: int
@@ -128,10 +128,13 @@ class _AdapterService(metaclass=SingletonMeta):
             )
         if not CONFIG.docker_host:
             raise RuntimeError(
-                "RST_DOCKER_HOST is not set. RST task Dockerfiles are untrusted "
-                "third-party build scripts; they must not be built on the host's "
-                "default Docker daemon. Point this at a dedicated/rootless daemon "
-                "socket (e.g. unix:///run/user/1000/docker.sock)."
+                "RST_DOCKER_HOST is not set. Run `source scripts/00b_setup_sandbox.sh` "
+                "first: it finds a usable container runtime and exports this. On a cluster "
+                "without Docker permission the answer is rootless podman, whose "
+                "Docker-compatible API socket Harbor can use unchanged. Task Dockerfiles are "
+                "untrusted third-party build scripts, so they must never be built on a shared "
+                "root Docker daemon -- rootless podman satisfies that more strongly, since "
+                "there is no privileged daemon at all."
             )
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.max_context_len = int(getattr(args, "rollout_max_context_len", 0) or 0)

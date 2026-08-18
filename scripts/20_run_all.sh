@@ -116,6 +116,14 @@ export_ckpt() {
 stage export export_ckpt
 
 # ------------------------------------------------------------------ 8. eval
+# Eval needs a container runtime; SFT did not. Rootless podman is the primary path
+# on clusters without Docker permission -- it serves the Docker API Harbor speaks.
+if ! source scripts/00b_setup_sandbox.sh; then
+  echo "=== EVAL SKIPPED: no container runtime. SFT results stand, but they are"
+  echo "    UNMEASURED. Do not describe the checkpoint as good; say eval was blocked."
+  SKIP_STAGES="$SKIP_STAGES eval_candidate eval_reference eval_base"
+fi
+export EVAL_TP="${EVAL_TP:-$SERVE_TP}"
 export TB_HARD_TASKS="${TB_HARD_TASKS:-$BASE_FOLDER/terminal-bench-hard/tasks}"
 export TB2_TASKS="${TB2_TASKS:-$BASE_FOLDER/terminal-bench-2}"
 export LHTB_TASKS="${LHTB_TASKS:-$BASE_FOLDER/long-horizon-terminal-bench/tasks}"

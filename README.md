@@ -21,7 +21,8 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | Report generator + anomaly checks | ✅ **tested** on synthetic healthy/faulty runs |
 | Multi-model registry (5 models) | ✅ **tested**: all rows resolve, 4 negative tests reject |
 | Pre-tokenized export (backend-agnostic) | ✅ **run**: 10,578 rows, 0 drops, 32.42 % trained |
-| verl+FSDP SFT path | ⚠️ dataset core unit-tested; launcher not executed |
+| verl+FSDP SFT path (**primary**) | ⚠️ dataset core unit-tested; launcher not executed |
+| Rootless-podman sandbox (no Docker needed) | ✅ **verified**: build 26.6 s, run/exec/tmux/no-net all OK |
 | verl Harbor AgentLoop | ⚠️ assembly logic tested; never run against verl |
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
@@ -77,7 +78,8 @@ scripts/
   14_make_report.py            markdown report + mechanical anomaly checks
   20_run_all.sh                one command: preflight -> ... -> train -> eval -> report
   15_export_pretokenized.py    bake the verified mask into input_ids+loss_mask
-  30_run_sft_verl.sh           alternative backend: verl + FSDP (no Megatron)
+  00b_setup_sandbox.sh         find/start a container runtime (rootless podman)
+  30_run_sft_verl.sh           PRIMARY backend: verl + FSDP (no Megatron)
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
 configs/models.json            the model registry

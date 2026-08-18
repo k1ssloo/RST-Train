@@ -65,11 +65,23 @@ report_local() {
   echo "--- disk ---"
   df -h / /tmp "${BASE_FOLDER:-/root}" 2>/dev/null | sort -u
 
-  echo "--- docker (needed only for RL rollout sandboxes) ---"
-  if command -v docker >/dev/null; then
-    docker info --format 'DOCKER_OK server={{.ServerVersion}} root={{.DockerRootDir}}' 2>&1 | head -2
+  echo "--- container runtime (needed for EVAL and RL, not for SFT) ---"
+  if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    docker info --format '  docker OK server={{.ServerVersion}}' 2>&1 | head -1
   else
-    echo "docker MISSING"
+    echo "  docker: unusable (no daemon permission is normal on a shared cluster)"
+  fi
+  if command -v podman >/dev/null; then
+    echo "  podman: $(podman --version 2>/dev/null)"
+    echo "    subuid entry : $(grep -c "^$(id -un):" /etc/subuid 2>/dev/null || echo 0) (need >=1)"
+    echo "    newuidmap    : $(command -v newuidmap >/dev/null && echo yes || echo NO - install uidmap)"
+    echo "    userns max   : $(cat /proc/sys/user/max_user_namespaces 2>/dev/null)"
+    echo "    cgroup       : $(stat -fc %T /sys/fs/cgroup 2>/dev/null)"
+    echo "    -> rootless podman serves the Docker API, so Harbor works unchanged."
+    echo "       Run: source scripts/00b_setup_sandbox.sh"
+  else
+    echo "  podman: MISSING. Ask for the podman + uidmap packages; that is usually an"
+    echo "          easier request than Docker daemon access, and it needs no root."
   fi
 
   echo "--- egress (HF / wandb) ---"
@@ -105,20 +117,19 @@ fi
 
 cat <<'EOF'
 
-================ CONFIG DECISION TABLE (Qwen3.5-27B SFT, 32 GPUs, seq<=32768) ==
-Pick the row matching MEM_CLASS. TP must stay inside one node (TP<=8, and TP<=4
-without NVLink). CP is what makes a 32K sequence fit: per-GPU tokens = seq/CP.
+================ NEXT STEPS ================
+Parallelism is NOT decided here any more -- configs/models.json + the registry own
+it, and the registry validates the arithmetic:
 
-  MEM_CLASS  TP  PP  CP  DP  --max-tokens-per-gpu  optimizer-cpu-offload
-  80GB        4   2   2   2   16384                 yes
-  40GB        8   2   2   1    8192                 yes  (requires NVLink)
-  40GB-alt    4   2   4   1    8192                 yes  (no NVLink; = slime default)
+  python scripts/model_registry.py --list
+  python scripts/model_registry.py --key qwen3.5-9b --mem-class 80GB --gpus 32
 
-TP*PP*CP*DP must equal 32. Fallback ladder if a config OOMs or CP misbehaves on
-the gated-delta-net layers:
-  1. halve --max-tokens-per-gpu
-  2. raise CP (2 -> 4), lowering DP
-  3. raise PP (2 -> 4)
-  4. last resort: --max-seq-len 16384 (drops ~10% of examples, biased toward the
-     long/hard trajectories you most want -- prefer 1-3 first)
+Container runtime for EVAL and RL (SFT needs none):
+
+  source scripts/00b_setup_sandbox.sh      # prefers rootless podman
+  bash   scripts/00b_setup_sandbox.sh --check
+
+Primary training backend is verl + FSDP (scripts/30_run_sft_verl.sh). See
+BACKENDS.md; the Megatron path needs a cuDNN swap that a shared A100 cluster
+usually will not allow.
 EOF

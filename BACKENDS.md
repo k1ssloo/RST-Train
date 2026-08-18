@@ -1,8 +1,16 @@
 # Training backends
 
-The default path is **slime + Megatron** (`scripts/05_run_sft.sh`, `12_run_grpo.sh`).
-This document covers the alternative, **verl + FSDP** (`scripts/30_run_sft_verl.sh`),
-and why the other candidates were rejected.
+**Primary path: verl + FSDP** (`scripts/30_run_sft_verl.sh`).
+**Secondary: slime + Megatron** (`scripts/05_run_sft.sh`, `12_run_grpo.sh`).
+
+The order is dictated by the cluster, not by preference: getting Megatron built on
+A100 requires swapping cuDNN to satisfy TransformerEngine/apex, which a shared
+cluster will not permit. The slime path is kept because it is the paper's own and
+because its OpenAI adapter is genuinely better for Harbor-driven RL — but it is not
+the one to start with here.
+
+A side benefit of the FSDP path: it has no context parallelism, so the open question
+about CP correctness on the 48 gated-delta-net layers simply does not arise.
 
 ## What leaving Megatron actually costs
 
@@ -146,3 +154,47 @@ sequence, so CP over them is not a free lunch. That is independent corroboration
 for the CP1-vs-CP2 comparison required in `OPERATOR_PROMPT.md` before trusting
 Megatron's CP4 default on the 48 gated-delta-net layers. It is also a reason the
 verl/FSDP path (no CP at all) is a legitimate fallback rather than a downgrade.
+
+
+---
+
+## Container runtime, without Docker
+
+Neither backend needs a container runtime for SFT. Evaluation and RL do, because
+Harbor builds each task's Dockerfile and drives tmux inside the container.
+
+**Rootless podman is the answer**, because it serves the same Docker API Harbor
+speaks. `source scripts/00b_setup_sandbox.sh` finds or starts it and exports
+`DOCKER_HOST`; Harbor then needs no patch. Verified end to end on a box with no
+`docker.sock` permission:
+
+| step | result |
+|---|---|
+| `podman build` of a real RST task Dockerfile | **26.6 s**, incl. `apt-get install`, `git clone`, `pip install` |
+| docker CLI → podman socket | client 29.2.1 / server 3.4.4 / **API 1.40** |
+| `run -d --network none` then `exec` | OK |
+| tmux 3.2a `new-session` / `send-keys` / `capture-pane` | OK |
+| network inside the container | none, confirmed |
+
+Rootless podman is a *stronger* answer to the original security requirement, not a
+compromise: task Dockerfiles are untrusted third-party build scripts, and here there
+is no privileged daemon to hand them to at all.
+
+### Four failure modes that only appear once you build the real images
+
+Found by building the actual task pool, not by reading docs:
+
+| # | symptom | cause | fix |
+|---|---|---|---|
+| 1 | `SHELL is not supported for OCI image format` | 16 % of task Dockerfiles use `SHELL`; podman defaults to OCI | `--format docker` (automatic) |
+| 2 | `Unknown instruction: IF` | 31 % use heredocs (`RUN <<EOF`); needs podman ≥ 4.4, Ubuntu 22.04 ships 3.4.4 | static rootless podman, 32 MB, no root: `podman-static` v5.8.4+ |
+| 3 | `fatal: hardlink different from source` | `git clone` inside a rootless kernel-overlay build | retry in a vfs store under a separate `--root` (automatic) |
+| 4 | `unknown shorthand flag: 'f'` | podman < 4 has no `compose` subcommand; 710 tasks (13.8 %) are multi-service | podman ≥ 4.x, or exclude those tasks and say so |
+
+(2) is the dangerous one: it looks like a broken task rather than a stale toolchain,
+so it would quietly remove a third of the pool. `11_prebuild_images.py` therefore
+aborts on it instead of building the other two thirds.
+
+**Apptainer/Singularity does not work unchanged** — it does not serve the Docker
+API, so Harbor cannot drive it without a new environment backend, and that backend
+is not written here.

@@ -11,9 +11,9 @@ You are starting from an EMPTY directory. Bootstrap first:
 
 Then READ THESE THREE FILES BEFORE RUNNING ANYTHING:
   - README.md    — status table: what is already verified vs. never executed
+  - BACKENDS.md  — READ THIS EARLY. verl + FSDP is the PRIMARY backend, not slime.
   - PLAN.md      — the SFT spec: measured facts, hardware decision tables, risk register
   - RL_PLAN.md   — the RL phase: prerequisites, gates, unverified assumptions
-  - BACKENDS.md  — ONLY if the Megatron stack defeats you: the verl+FSDP fallback
 
 Everything in PLAN.md marked "measured" was verified against the real data and the
 real upstream source trees. Everything marked UNVERIFIED has not been run and is
@@ -54,6 +54,11 @@ marked first_batch=true in the registry. Nothing else is authorized yet.
 
     MODEL_KEY=qwen3.5-27b RUN_RL=1 bash scripts/20_run_all.sh
     MODEL_KEY=qwen3.5-9b  RUN_RL=1 bash scripts/20_run_all.sh
+
+A smaller model has already been used locally to shake out simple bugs in this
+repo's own code (data pipeline, pre-tokenized export, mask semantics, the container
+runtime path). Those fixes are in. What has NOT been exercised anywhere is the
+cluster-scale path: multi-node FSDP, checkpoint conversion, and the RL bridge.
 
 Optional but strongly advised first: one throwaway qwen3.5-0.8b SFT run
 (`MODEL_KEY=qwen3.5-0.8b`, ~5 min/epoch, 2 GPUs). Same architecture as 27B, so it
@@ -98,6 +103,80 @@ TWO MODEL-SPECIFIC THINGS THAT WILL BITE YOU:
 Only qwen3.5-27b has published reference numbers. For any other model the report
 SKIPS (does not pass) the regression-vs-base and reference-reproduction checks, and
 says so. Do not invent a target for 4B/9B/35B.
+
+## Backend: use verl + FSDP. Do NOT start with Megatron.
+
+    MODEL_KEY=qwen3.5-9b bash scripts/30_run_sft_verl.sh
+
+Megatron on A100 requires swapping cuDNN to satisfy the TransformerEngine/apex
+build, which a shared cluster will not let you do. So slime + Megatron
+(scripts/05_run_sft.sh) is the SECONDARY path here: keep it for reference, try it
+only if verl fails and you have somehow obtained the ability to change cuDNN.
+
+Two things on the verl path are mandatory, not optional. Both are explained in
+BACKENDS.md; neither is a style preference:
+
+  1. `model.use_liger=True`. This model's vocab is 248,320, so materialized logits
+     for a 32K sequence are 16.3 GiB in bf16 (~32.6 GiB if the loss upcasts to
+     fp32) -- larger than the activations. Liger's fused cross-entropy is what makes
+     the run fit at all. Without it you OOM and it will look like a parallelism
+     problem.
+  2. Pre-tokenized data via `scripts/15_export_pretokenized.py`. verl's built-in
+     multi-turn dataset tokenizes message-by-message; measured on 200 real rows,
+     200/200 disagree with the whole-conversation render, because the Qwen3.5
+     template puts an empty <think> block on the LAST assistant turn and
+     turn-by-turn building makes every turn "last" (21 blocks instead of 1 in a
+     21-turn conversation). Do NOT set `ignore_input_ids_mismatch: True` to silence
+     that -- it silences the check, not the bug, and you would train on tokens
+     serving never emits. `30_run_sft_verl.sh` builds the pre-tokenized file for you
+     and refuses to start if its trained-token fraction leaves the measured band.
+
+verl's FSDP engine has no context parallelism, so there is no CP correctness
+question to resolve on this path -- one fewer unknown. (For what it is worth,
+torchtitan, PyTorch's own reference implementation of this architecture, also lists
+CP as TODO. It is genuinely unsettled for gated-delta-net layers.)
+
+## No Docker? That is expected, and it is solved
+
+The cluster will not give you Docker daemon access. You do not need it.
+
+    source scripts/00b_setup_sandbox.sh        # finds/starts a runtime, exports DOCKER_HOST
+    bash   scripts/00b_setup_sandbox.sh --check
+
+Rootless **podman** serves the same Docker API that Harbor speaks, so pointing
+DOCKER_HOST at podman's socket makes Harbor work with NO code change. This was
+verified end to end on a box with no docker.sock permission: build a real task image
+(26.6 s, including apt-get/git clone/pip), `run -d --network none`, `exec`, tmux 3.2a
+new-session/send-keys/capture-pane, and no network inside the container.
+
+Scope, precisely: **SFT needs no container runtime at all.** Only eval and RL do. So
+if the runtime is unavailable you can still train -- but you cannot measure whether
+training helped, and you must say the eval was impossible rather than call a
+checkpoint good.
+
+FOUR THINGS THAT WILL BITE YOU, all found by actually building the real task images:
+  1. `--format docker` is required: 16% of task Dockerfiles use `SHELL`, which
+     podman's default OCI format ignores and then errors on.
+  2. **podman >= 4.4 is required**: 31% use Dockerfile heredocs (`RUN <<EOF`).
+     Ubuntu 22.04 ships 3.4.4, which fails them with "Unknown instruction: IF" --
+     looks like a broken task, is actually a stale toolchain, and would silently
+     cost you a third of the pool. If yours is old, install a STATIC rootless podman
+     (32 MB, no root, no package manager):
+       curl -sSL -o /tmp/podman.tgz https://github.com/mgoltzsche/podman-static/releases/latest/download/podman-linux-amd64.tar.gz
+       mkdir -p $HOME/.local && tar xzf /tmp/podman.tgz -C $HOME/.local --strip-components=1
+       export PATH=$HOME/.local/bin:$PATH
+     `11_prebuild_images.py` aborts on this rather than building two thirds quietly.
+  3. A `git clone` inside a build can fail "hardlink different from source" under
+     rootless kernel overlay. Retry in a vfs store under a separate `--root`;
+     `11_prebuild_images.py` does that automatically.
+  4. podman < 4 has no `compose` subcommand, so the 710 docker-compose multi-service
+     tasks (13.8% of the pool) need podman >= 4.x too, or must be excluded. If you
+     exclude them, say so -- it changes which tasks the numbers cover.
+
+If podman is genuinely unavailable, ask for the `podman` + `uidmap` packages. That
+is normally an easier request than Docker access: no daemon, no root, no group
+membership. Apptainer does NOT work unchanged -- it does not serve the Docker API,
+so Harbor cannot drive it without a new backend, which is not written.
 
 ## The one-command path
 

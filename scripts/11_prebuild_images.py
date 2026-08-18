@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,9 +40,35 @@ from pathlib import Path
 IMAGE_PREFIX = "rst-task"
 
 
+# Which CLI to shell out to. Rootless podman is the primary path on clusters where
+# you cannot use the host Docker daemon; it builds task Dockerfiles fine because a
+# rootless build runs as uid 0 inside a user namespace, so `apt-get install` works.
+# Verified: a real RST task image built in 26.6s this way.
+BUILD_CMD = os.environ.get("RST_BUILD_CMD") or (
+    "podman" if shutil.which("podman") else "docker"
+)
+
+
 def docker(*argv: str, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", *argv], capture_output=True, text=True, timeout=timeout, check=False
+        [BUILD_CMD, *argv], capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+VFS_ROOT = os.environ.get("RST_PODMAN_VFS_ROOT", "")
+
+
+def _is_hardlink_failure(proc: subprocess.CompletedProcess) -> bool:
+    text = ((proc.stderr or "") + (proc.stdout or "")).lower()
+    return "hardlink different from source" in text
+
+
+def _build_with_vfs(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
+    root = VFS_ROOT or os.path.join(os.environ.get("TMPDIR", "/tmp"), "rst-podman-vfs")
+    os.makedirs(root, exist_ok=True)
+    return subprocess.run(
+        [BUILD_CMD, "--root", root, "--storage-driver", "vfs", *argv],
+        capture_output=True, text=True, timeout=timeout, check=False,
     )
 
 
@@ -65,8 +92,9 @@ def build_one(row: dict, timeout: int, pull_base: bool) -> dict:
         # `docker compose build` needs the compose file's own context; Harbor
         # handles the lifecycle, we just warm the layers.
         result["compose"] = True
+        # podman implements `podman compose` (delegating to podman-compose/docker-compose)
         proc = subprocess.run(
-            ["docker", "compose", "-f", str(task_dir / "environment" /
+            [BUILD_CMD, "compose", "-f", str(task_dir / "environment" /
               ("docker-compose.yaml" if (task_dir / "environment/docker-compose.yaml").is_file()
                else "docker-compose.yml")), "build"],
             capture_output=True, text=True, timeout=timeout, check=False,
@@ -77,10 +105,25 @@ def build_one(row: dict, timeout: int, pull_base: bool) -> dict:
             result.update(ok=False, reason="no Dockerfile", seconds=0.0)
             return result
         argv = ["build", "-t", image_tag(task_id), "-f", str(env_dir / "Dockerfile")]
+        if BUILD_CMD == "podman":
+            # Discovered by running this rootless on a real task set:
+            #  --format docker : 16% of these Dockerfiles use SHELL, which podman's
+            #                    default OCI image format silently ignores and then
+            #                    errors on. Docker format supports it.
+            #  --network host  : builds legitimately fetch packages; the AGENT
+            #                    sandbox is what must have no network, not the build.
+            argv[:0] = ["--format", "docker"]
+            argv.append("--network=host")
         if pull_base:
             argv.append("--pull")
         argv.append(str(env_dir))
         proc = docker(*argv, timeout=timeout)
+        if proc.returncode != 0 and _is_hardlink_failure(proc):
+            # Rootless kernel-overlay cannot reproduce hardlinks that a `git clone`
+            # inside the build creates ("hardlink different from source"). A vfs
+            # store in a separate root does; verified fix on a real failing task.
+            result["retried_vfs"] = True
+            proc = _build_with_vfs(argv, timeout)
 
     result["seconds"] = round(time.time() - started, 1)
     result["ok"] = proc.returncode == 0
@@ -110,20 +153,25 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true", default=True)
     args = parser.parse_args()
 
-    if not shutil.which("docker"):
-        sys.exit("docker not found on PATH")
-    docker_host = os.environ.get("DOCKER_HOST", "")
-    if not docker_host:
+    if not shutil.which(BUILD_CMD):
+        sys.exit(f"{BUILD_CMD} not found on PATH (set RST_BUILD_CMD)")
+    docker_host = os.environ.get("DOCKER_HOST", "") or os.environ.get("RST_DOCKER_HOST", "")
+    if BUILD_CMD == "docker" and not docker_host:
         sys.exit(
-            "refusing to run: DOCKER_HOST is unset.\n"
-            "RST task Dockerfiles are untrusted third-party build scripts and must not be\n"
-            "built on the host's default daemon. Start a dedicated/rootless daemon and set\n"
-            "  export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock"
+            "refusing to run: DOCKER_HOST is unset and the runtime is docker.\n"
+            "Task Dockerfiles are untrusted third-party build scripts and must not be built\n"
+            "on a shared root daemon. Run `source scripts/00b_setup_sandbox.sh`, which\n"
+            "prefers rootless podman and exports the right socket."
         )
-    info = docker("info", "--format", "{{.ServerVersion}} {{.DockerRootDir}}")
-    if info.returncode != 0:
-        sys.exit(f"cannot reach docker at {docker_host}: {info.stderr.strip()[:300]}")
-    print(f"[docker] host={docker_host} server={info.stdout.strip()}")
+    # `--version` rather than `info --format`: podman's info schema is not Docker's
+    # (.Version.Version vs .ServerVersion), so a Docker-shaped template errors out.
+    ver = docker("--version")
+    if ver.returncode != 0:
+        sys.exit(f"cannot reach {BUILD_CMD}: {(ver.stderr or ver.stdout).strip()[:300]}")
+    reachable = docker("info", timeout=120)
+    if reachable.returncode != 0:
+        sys.exit(f"{BUILD_CMD} present but not usable: {(reachable.stderr or '').strip()[:300]}")
+    print(f"[runtime] {ver.stdout.strip()} host={docker_host or '(local cli)'}")
 
     rows = [json.loads(line)["metadata"] for line in
             (args.taskset / "rl_tasks.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -132,6 +180,31 @@ def main() -> int:
         stride = max(1, len(rows) // args.sample)
         rows = rows[::stride][: args.sample]
     print(f"[plan] {len(rows)} tasks, {len({r['base_image'] for r in rows})} distinct base images")
+
+    # Dockerfile heredocs (RUN <<EOF) need buildah >= 1.29 / podman >= 4.4. On older
+    # podman they fail with `Unknown instruction: IF` or similar, which reads like a
+    # broken task rather than a stale toolchain. Measured on the sweet pool: 31% of
+    # Dockerfiles use heredocs, so an old podman silently loses a third of the pool.
+    if BUILD_CMD == "podman":
+        version = re.search(r"(\d+)\.(\d+)", ver.stdout or "")
+        major, minor = (int(version.group(1)), int(version.group(2))) if version else (0, 0)
+        heredoc = re.compile(r"^\s*(?:RUN|COPY)\s.*<<-?\s*[\'\"]?[A-Za-z_]", re.M)
+        affected = 0
+        for r in rows:
+            df = Path(r["task_dir"]) / "environment" / "Dockerfile"
+            if df.is_file() and heredoc.search(df.read_text(errors="replace")):
+                affected += 1
+        if affected and (major, minor) < (4, 4):
+            print(f"[precheck] podman {major}.{minor} cannot parse Dockerfile heredocs, and "
+                  f"{affected}/{len(rows)} ({affected/len(rows):.0%}) of these tasks use them.")
+            print("[precheck] Install a newer rootless podman WITHOUT root -- a static build is")
+            print("[precheck] ~32 MB and needs no package manager:")
+            print("[precheck]   https://github.com/mgoltzsche/podman-static/releases (v5.8.4+)")
+            print("[precheck]   tar xzf podman-linux-amd64.tar.gz -C $HOME/.local --strip-components=1")
+            print("[precheck] Aborting rather than silently building only two thirds of the pool.")
+            sys.exit(2)
+        elif affected:
+            print(f"[precheck] podman {major}.{minor} OK for the {affected} heredoc Dockerfiles")
 
     if args.skip_existing:
         existing = set()
@@ -165,6 +238,7 @@ def main() -> int:
     sizes = [s for s in (image_size_bytes(r["task_id"]) for r in ok_rows if not r["compose"]) if s]
     total = sum(sizes)
     report = {
+        "runtime": BUILD_CMD,
         "docker_host": docker_host,
         "attempted": len(results),
         "built": len(ok_rows),
