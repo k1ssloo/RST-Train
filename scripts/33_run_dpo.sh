@@ -62,7 +62,11 @@ NGPUS="${NGPUS:-1}"; (( NGPUS > 0 )) || NGPUS=1
 # registry rejects for SFT (tp*pp*cp must divide the world) is perfectly runnable
 # here, and refusing to start would be a false negative. All this needs from the
 # registry is the checkpoint directory name.
+#
+# --backend verl is the honest shape for an FSDP2 trainer, so the fallback below now
+# fires only for a genuinely unknown key rather than for every odd GPU count.
 if REGISTRY=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+                --backend verl \
                 --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
                 --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell 2>/dev/null); then
   eval "$REGISTRY"

@@ -100,8 +100,16 @@ PY
 # without a word. On a box whose driver cannot run the newer build that becomes
 # "torch cannot see the GPU" much later, looking entirely unrelated.
 TORCH_BEFORE=$(python -c "import torch;print(torch.__version__)")
+# transformers is pinned to a WINDOW, and the upper bound is load-bearing. verl 0.9.0's
+# qwen3.5 patch calls `self.chunk_gated_delta_rule(...)` on the attention module
+# (verl/models/transformers/qwen3_5.py:167) -- an instance attribute that transformers
+# 5.11-5.14 set in Qwen3_5GatedDeltaNet.__init__ and that 5.15.0 REMOVED in favour of
+# the `kernels` package's use_kernelized_func/_kernel_funcs indirection. On 5.15 the
+# very first forward raises AttributeError, and verl never calls kernelize(), so
+# installing `kernels` does not restore it. qwen3_5 itself landed in 5.11, so the
+# window is >=5.11,<5.15. Do not "fix" a pip resolver warning by widening it.
 pip install --extra-index-url "$TORCH_INDEX" \
-            "transformers>=5.15.0" "tokenizers>=0.22" accelerate datasets \
+            "transformers>=5.11,<5.15" "tokenizers>=0.22" accelerate datasets \
             pyarrow pandas hf_transfer "huggingface_hub[hf_xet]" wandb jinja2
 
 # Liger, for swiglu + rms_norm. It also ships a qwen3_5 fused cross-entropy, but that
@@ -134,24 +142,111 @@ if missing:
              "from verl's model.use_fused_kernels, not from this kernel.)")
 PY
 
-# ---- 4. attention / linear-attention kernels (optional, sm-dependent) -------
-# transformers' qwen3_5 declares
-#   @use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
-# so `fla` is a SPEED choice, not a requirement -- there is a pure-PyTorch path.
-# We therefore try and continue on failure rather than failing the whole setup.
-pip install flash-linear-attention || echo "[warn] fla not installed; using the pure-PyTorch GDN fallback (slower, correct)"
+# ---- 4. attention / linear-attention kernels (REQUIRED, not optional) -------
+# FLA is a CORRECTNESS dependency on the verl path, not a speed one. verl passes
+# cu_seqlens into the gated-delta-net rule so that packed conversations
+# (data.pad_mode=no_padding) keep separate recurrent states, but it decides whether the
+# rule accepts cu_seqlens with inspect.signature -- and transformers' pure-torch
+# fallback carries an unused **kwargs, so that test always passes. Without FLA's real
+# kernel the argument is silently dropped and documents bleed into each other.
+#
+# And `pip install flash-linear-attention` is NOT enough: the PyPI wheel AND sdist ship
+# only fla/layers and fla/models, with no fla/ops at all (measured on 0.5.2), so
+# `import fla.ops.gated_delta_rule` fails and fla/ops/cp (needed by
+# engine.ulysses_sequence_parallel_size>1) does not exist. Install from git.
+pip install --no-deps "flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention" || \
+  echo "[warn] FLA git install failed -- the verify step below will fail the setup"
+
+# flash-attn is likewise required, and the old "transformers will fall back to sdpa"
+# claim was wrong: verl sets attn_implementation=flash_attention_2 whenever
+# model.use_remove_padding is True (its default, and mandatory for Ulysses SP), so a
+# missing flash_attn is a hard failure at model load -- measured as
+# "FlashAttention2 has been toggled on, but ... doesn't seem to be installed", after
+# transformers first tries kernels-community/flash-attn2 from the Hub and finds no
+# build variant for the interpreter.
 if [[ "$COMPUTE_CAP" == "8.0" || "$COMPUTE_CAP" == "9.0" ]]; then
   pip install flash-attn --no-build-isolation || \
-    echo "[warn] flash-attn build failed; transformers will fall back to sdpa. Note it in the report."
+    echo "[warn] flash-attn build failed -- the verify step below will fail the setup"
 else
   echo "[info] skipping flash-attn on compute_cap $COMPUTE_CAP"
 fi
 # NEVER install FlashQLA here: it requires sm90+, and on A100 it fails or misbehaves.
 
+python - "${SKIP_FLASH_ATTN:-0}" <<'PY'
+import importlib
+import inspect
+import sys
+
+skip_fa = sys.argv[1] == "1"
+fatal = []
+
+try:
+    rule = importlib.import_module("fla.ops.gated_delta_rule").chunk_gated_delta_rule
+except Exception as exc:  # noqa: BLE001
+    fatal.append(
+        f"fla.ops.gated_delta_rule unavailable ({type(exc).__name__}: {exc}). The PyPI "
+        f"wheel has no fla/ops; install from git as above."
+    )
+else:
+    params = inspect.signature(rule).parameters
+    missing = [n for n in ("cu_seqlens", "cp_context") if n not in params]
+    if missing:
+        fatal.append(f"fla chunk_gated_delta_rule lacks {missing}; upgrade FLA")
+    else:
+        print("[verify] fla.ops gated_delta_rule accepts cu_seqlens and cp_context")
+    for mod in ("fla.ops.cp.comm", "fla.ops.cp.context"):
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] {mod} missing ({exc}); ULYSSES_SP>1 will be refused by the launcher")
+
+try:
+    import transformers
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as mq
+except Exception as exc:  # noqa: BLE001
+    fatal.append(f"transformers qwen3_5 not importable ({type(exc).__name__}: {exc})")
+else:
+    if "self.chunk_gated_delta_rule" in inspect.getsource(mq.Qwen3_5GatedDeltaNet.__init__):
+        print(f"[verify] transformers {transformers.__version__} exposes "
+              f"self.chunk_gated_delta_rule (verl 0.9.0's patch needs it)")
+    else:
+        fatal.append(
+            f"transformers {transformers.__version__} does not set "
+            f"self.chunk_gated_delta_rule in Qwen3_5GatedDeltaNet.__init__; verl 0.9.0 "
+            f"raises AttributeError in the first forward. Pin >=5.11,<5.15."
+        )
+
+try:
+    import flash_attn
+
+    print(f"[verify] flash_attn {flash_attn.__version__}")
+except Exception as exc:  # noqa: BLE001
+    msg = (f"flash_attn not importable ({type(exc).__name__}: {exc}). verl sets "
+           f"attn_implementation=flash_attention_2 for use_remove_padding=True, so "
+           f"training dies at model load. Build it, or set model.use_remove_padding=False "
+           f"(which also disables Ulysses SP) and re-run with SKIP_FLASH_ATTN=1.")
+    if skip_fa:
+        print(f"[warn] {msg}")
+    else:
+        fatal.append(msg)
+
+for f in fatal:
+    print(f"FATAL: {f}", file=sys.stderr)
+if fatal:
+    sys.exit(1)
+PY
+
 # ---- 5. verl -----------------------------------------------------------------
 # Installed with --no-deps so it cannot re-resolve and replace the torch build we
 # just matched to the driver. Its own deps are the ones we installed above plus ray.
-pip install ray "omegaconf" "hydra-core" "tensordict" "codetiming" "pylatexenc"
+# pillow, uvicorn and fastapi are NOT in verl 0.9.0's declared requirements (38 of them,
+# checked), yet the SFT path imports all three unconditionally: rl_dataset.py pulls PIL,
+# and verl.workers.engine_workers -> checkpoint_engine.base -> rollout/utils.py:20 pulls
+# uvicorn (then fastapi). Bare `ray` does not bring them. Measured as three consecutive
+# ModuleNotFoundErrors inside torchrun's rank-0 child, each after the model had already
+# been read from disk. peft and torchdata are the same class of omission.
+pip install ray "omegaconf" "hydra-core" "tensordict" "codetiming" "pylatexenc" \
+            pillow uvicorn fastapi torchdata peft
 if [[ -n "${VERL_GIT_REF:-}" ]]; then
   pip install --no-deps "git+https://github.com/verl-project/verl.git@${VERL_GIT_REF}"
 else
@@ -164,11 +259,16 @@ try:
     print("[verify] verl", getattr(verl, "__version__", "(no __version__)"))
 except Exception as e:
     sys.exit(f"verl import failed: {e}")
-for mod in ("verl.trainer.sft_trainer",):
+# This used to be a [warn], which is exactly how three missing runtime deps reached the
+# cluster: the setup script "succeeded" and the failure surfaced inside torchrun. The
+# entrypoint the launcher runs must import here, in this script, or the env is not built.
+for mod in ("verl.trainer.sft_trainer", "verl.workers.engine_workers"):
     try:
         __import__(mod); print(f"[verify] {mod} importable")
     except Exception as e:
-        print(f"[warn] {mod} not importable yet: {e}")
+        sys.exit(f"{mod} does not import: {type(e).__name__}: {e}\n"
+                 f"verl's declared requirements are incomplete; add the missing package "
+                 f"to the pip line above rather than working around it in the launcher.")
 PY
 
 # ---- 6. rollout engine (eval serving + RL) ----------------------------------

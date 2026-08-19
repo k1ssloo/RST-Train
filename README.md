@@ -109,6 +109,7 @@ scripts/
   19_train_dpo.py              DPO with a step-0 = log 2 calibration gate (FSDP2)
   dpo_common.py                the one logprob implementation both 18 and 19 use
   33_run_dpo.sh                the three DPO stages, resumable, container-free
+  34_diagnose_oom.py           why an OOM does not move when you cut the token budget
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
 rst_common/                    definitions that must be identical in eval and RL
@@ -199,7 +200,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 42 tests, ~1 s (10 of them skip without torch)
+python -m pytest tests/ -q     # 66 tests, ~1 s (10 of them skip without torch)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -210,7 +211,9 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_loss_mask.py` | the two ports of slime's `qwen3_5` mask (producer in `15_export_pretokenized.py`, independent auditor in `03b_validate_sft_data.py`) stay behaviourally identical, on a synthetic tokenizer and on a per-character one; plus the semantics — no prompt/header/user token is ever a target, the `<think>\n` opener is prompt, `step_loss_mask=0` turns are excluded |
 | `tests/test_harbor_outcomes.py` | the `HARNESS_INFRA` vs `AGENT_BUDGET` split in `rst_common/harbor.py`: marker precedence, all three `result.json` layouts, "unmeasured ≠ reward 0", escalate-only stdout refinement, the proxy policy |
 | `tests/test_verl_dataset.py` | `build_row` padding never becomes a training target, and an oversized row is an error rather than a silent truncation; plus `RSTPretokenizedSFTDataset.__init__` raising on a misaligned mask, an oversized table or an empty one *before* the first forward pass (those need torch) |
-| `tests/test_launcher_memory_flags.py` | that `30_run_sft_verl.sh` still passes verl's own fused-CE switch (`model.use_fused_kernels` + `impl_backend=torch`) *inside* the torchrun invocation, keeps `use_liger` for swiglu/rms_norm without relying on it for the cross-entropy, gates on the config keys existing before launching 32 processes, and names the log line that proves the kernel was used |
+| `tests/test_launcher_memory_flags.py` | that `30_run_sft_verl.sh` still passes verl's own fused-CE switch (`model.use_fused_kernels` + `impl_backend=torch`) *inside* the torchrun invocation, keeps `use_liger` for swiglu/rms_norm without relying on it for the cross-entropy, gates on the config keys existing before launching 32 processes, names the log line that proves the kernel was used, and — the OOM that no data change fixes — computes the 16 B/param static footprint and refuses a launch whose rendezvous would silently make each node its own `world_size=8` job |
+| `tests/test_launcher_correctness_gates.py` | the gates that protect *correctness*, not memory: FLA's real `chunk_gated_delta_rule` (the PyPI wheel ships no `fla/ops`, and the pure-torch fallback silently drops `cu_seqlens`, so packed documents would share one recurrent state), the `transformers>=5.11,<5.15` window checked by looking for the attribute verl calls rather than by version string, `flash_attn` being mandatory whenever `use_remove_padding=True`, and the SP note saying what SP *cannot* fix |
+| `tests/test_model_registry.py` | `--backend verl` reshapes the Megatron row before validating it — TP/PP/CP pinned to 1 and CP folded into `max_tokens_per_gpu`, announced not silent, `slime` still shaped like Megatron, `tp*pp*cp*dp == world`, an undividable GPU count rejected, and the 27B-on-8-GPUs case warned about (it passes every shape assert and then OOMs) |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

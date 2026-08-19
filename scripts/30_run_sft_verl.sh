@@ -57,8 +57,68 @@ if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
 fi
 NNODES="${NNODES:-4}"; NGPUS="${NGPUS:-8}"
 eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+          --backend verl \
           --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
           --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell)"
+
+# ---- multi-node rendezvous gate ---------------------------------------------
+# torchrun's defaults below are MASTER_ADDR=127.0.0.1 NODE_RANK=0, which is right for
+# one node and catastrophic for four: every node then forms its OWN world_size=8 group,
+# FSDP shards 8 ways instead of 32, and the per-GPU static footprint quadruples. That
+# failure does not announce itself -- training starts and OOMs in backward, and the
+# peak does not move when you cut the token budget, because the static term dominates.
+# Fail here instead.
+if (( NNODES > 1 )); then
+  if [[ -z "${MASTER_ADDR:-}" || "${MASTER_ADDR}" == "127.0.0.1" || "${MASTER_ADDR}" == "localhost" ]]; then
+    echo "FATAL: NNODES=$NNODES but MASTER_ADDR=${MASTER_ADDR:-<unset>}." >&2
+    echo "       Export MASTER_ADDR=<rank-0 host> on every node, or set NNODES=1." >&2
+    exit 2
+  fi
+  if [[ -z "${NODE_RANK:-}" ]]; then
+    echo "FATAL: NNODES=$NNODES but NODE_RANK is unset, so every node would claim rank 0." >&2
+    echo "       Export a distinct NODE_RANK (0..$((NNODES - 1))) per node." >&2
+    exit 2
+  fi
+fi
+
+# ---- static footprint gate ---------------------------------------------------
+# Under engine.strategy=fsdp2 with verl 0.9.0 defaults (engine/fsdp.yaml: model_dtype
+# fp32, dtype bfloat16, no offload) every parameter costs a FIXED 16 B per GPU divided
+# by the shard degree: fp32 master 4 + fp32 grad 4 + Adam exp_avg 4 + exp_avg_sq 4.
+# No token-budget knob touches it. Note 16 B/param over 8 ranks is exactly 2 B/param,
+# i.e. numerically identical to the whole bf16 model -- if a run reports a static term
+# that looks like "the bf16 model size", the shard degree is 8.
+OFFLOAD_ARGS=()
+if [[ "${OFFLOAD_OPTIM:-0}" == "1" ]]; then
+  OFFLOAD_ARGS+=("engine.offload_policy=true")
+fi
+python - "$PARAMS_B" "$(( NNODES * NGPUS ))" "${FSDP_SIZE:--1}" "$GPU_MEM_MIB" \
+        "${OFFLOAD_OPTIM:-0}" "${FORCE_STATIC:-0}" <<'EOF_PY' || exit 2
+import sys
+
+params_b, world, fsdp_size, card_mib, offload, force = (
+    float(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]),
+    sys.argv[5] == "1", sys.argv[6] == "1",
+)
+shard = world if (fsdp_size < 0 or fsdp_size >= world) else fsdp_size
+gib = params_b * 1e9 * 16 / shard / (1 << 30)
+card = card_mib / 1024
+print(f"[gate] shard degree {shard} (world {world}, fsdp_size {fsdp_size}): "
+      f"params+grads+Adam = {gib:.1f} GiB/GPU of a {card:.0f} GiB card, "
+      f"before any activation")
+if offload:
+    print("[gate] engine.offload_policy=true moves that shard to CPU; GPU static ~0")
+    raise SystemExit(0)
+if gib > 0.55 * card and not force:
+    print(f"FATAL: {gib:.1f} GiB static is {100 * gib / card:.0f}% of the card. The activations for a",
+          file=sys.stderr)
+    print("       whole sequence will not fit beside it, and no data-length change can help.",
+          file=sys.stderr)
+    print("       Fix one of: more nodes in ONE process group; FSDP_SIZE=-1; OFFLOAD_OPTIM=1", file=sys.stderr)
+    print("       (engine.offload_policy=true, CPU optimizer+param offload, slower but fits).", file=sys.stderr)
+    print("       Set FORCE_STATIC=1 to launch anyway and report the OOM as expected.", file=sys.stderr)
+    raise SystemExit(2)
+EOF_PY
 
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
 PRETOK="$DATA_DIR/pretokenized_train.parquet"
@@ -226,57 +286,242 @@ export WANDB_DIR="${BASE_FOLDER}/wandb"; mkdir -p "$WANDB_DIR"
 #
 # SAVE_HF_MODEL=1 asks the checkpointer to write HF weights directly instead. It is
 # opt-in rather than the default because the config key for save_contents has moved
-# between verl versions, and an unknown key makes hydra abort the launch. If it
-# aborts with "Could not override 'trainer.checkpoint.save_contents'", drop the flag
-# (the merge path works regardless) or point SAVE_HF_MODEL_KEY at the right path.
+# between verl versions: in 0.9.0 it is top-level `checkpoint.save_contents`, in
+# older layouts it lived under `trainer.`. The override gate below names the key it
+# rejected, and SAVE_HF_MODEL_KEY points it somewhere else without editing this file.
 CKPT_ARGS=()
 if [[ "${SAVE_HF_MODEL:-0}" == "1" ]]; then
-  CKPT_ARGS+=("${SAVE_HF_MODEL_KEY:-trainer.checkpoint.save_contents}=['model','optimizer','extra','hf_model']")
+  CKPT_ARGS+=("${SAVE_HF_MODEL_KEY:-checkpoint.save_contents}=['model','optimizer','extra','hf_model']")
   echo "SAVE_HF_MODEL=1 -> ${CKPT_ARGS[0]}"
 fi
 
-# FSDP shards params; TP is used only if the registry asked for it. `ulysses` is
-# verl's sequence-parallel knob and is the closest analogue to Megatron CP if you
-# do need to shard the sequence -- it is NOT enabled here because it has not been
-# validated on the gated-delta-net layers either.
+# ---- packed-varlen correctness gate (runs even at ULYSSES_SP=1) --------------
+# data.pad_mode=no_padding packs several conversations into one sequence and relies on
+# cu_seqlens to keep the recurrence from running across the boundaries. verl passes
+# cu_seqlens into the gated-delta-net rule, but decides whether the rule accepts it
+# with inspect.signature (verl/models/transformers/qwen3_5.py:41). The pure-torch
+# fallback in transformers carries an unused **kwargs, so that check is a PERMANENT
+# false positive: without FLA's real kernel, cu_seqlens is silently dropped and
+# documents bleed into each other. That is a correctness failure, not a slowdown, and
+# it is invisible in the loss curve.
 #
-# model.use_liger=True stays: swiglu and rms_norm are still real savings. It is just
-# not what fuses the cross-entropy here -- FUSED_ARGS is.
+# The PyPI wheel `flash-linear-attention` ships only fla/layers and fla/models -- no
+# fla/ops -- so `pip install flash-linear-attention` is NOT enough. Install from git:
+#   pip install --no-deps "flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention"
+python - "${ULYSSES_SP:-1}" "$BASE_FOLDER/$MODEL_DIR_NAME" "${ALLOW_UNSAFE_PACKING:-0}" "$*" \
+        <<'EOF_PY' || exit 2
+import inspect
+import json
+import sys
+from pathlib import Path
+
+sp, model_dir, allow = int(sys.argv[1]), Path(sys.argv[2]), sys.argv[3] == "1"
+problems: list[str] = []
+
+# Not bypassable by ALLOW_UNSAFE_PACKING: this one does not degrade quality, it aborts
+# the run. model.use_remove_padding defaults to True (verl hf_model.yaml:40) and verl
+# then sets attn_implementation=flash_attention_2, so a missing flash_attn kills the job
+# at model load, after every rank has read the weights.
+passthrough = sys.argv[4] if len(sys.argv) > 4 else ""
+try:
+    if "use_remove_padding=False" in passthrough.replace("=false", "=False"):
+        raise RuntimeError("skipped: caller passed model.use_remove_padding=False")
+    import flash_attn  # noqa: F401
+except RuntimeError as exc:
+    print(f"[gate] flash_attn check {exc}")
+except Exception as exc:  # noqa: BLE001
+    print(f"FATAL: flash_attn not importable ({type(exc).__name__}: {exc}).", file=sys.stderr)
+    print("       verl sets attn_implementation=flash_attention_2 for use_remove_padding=True.",
+          file=sys.stderr)
+    print("       Install it (pip install flash-attn --no-build-isolation) or pass",
+          file=sys.stderr)
+    print("       model.use_remove_padding=False to this launcher (disables Ulysses SP).",
+          file=sys.stderr)
+    raise SystemExit(2) from None
+
+try:
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule as fla_rule
+except Exception as exc:  # noqa: BLE001
+    fla_rule = None
+    problems.append(f"cannot import fla.ops.gated_delta_rule ({type(exc).__name__}: {exc})")
+else:
+    params = inspect.signature(fla_rule).parameters
+    for name in ("cu_seqlens", "cp_context"):
+        if name not in params:
+            problems.append(f"fla chunk_gated_delta_rule has no explicit `{name}` parameter")
+
+try:
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as mq
+except Exception as exc:  # noqa: BLE001
+    problems.append(f"cannot import transformers qwen3_5 modeling ({type(exc).__name__}: {exc})")
+else:
+    import transformers
+
+    src = inspect.getsource(mq.Qwen3_5GatedDeltaNet.__init__)
+    if "self.chunk_gated_delta_rule" not in src:
+        problems.append(
+            f"transformers {transformers.__version__} does not set "
+            f"self.chunk_gated_delta_rule in Qwen3_5GatedDeltaNet.__init__; verl 0.9.0's "
+            f"qwen3_5 patch reads that attribute (removed in 5.15.0 in favour of "
+            f"kernels' _kernel_funcs). Pin transformers >=5.11,<5.15."
+        )
+    # Only meaningful on the layouts that keep a module-level symbol (5.11-5.14): there
+    # `chunk_gated_delta_rule or torch_chunk_gated_delta_rule` silently picks the torch
+    # fallback when FLA is missing. On 5.15 the name is gone and the check above covers it.
+    if "chunk_gated_delta_rule" in vars(mq) and vars(mq)["chunk_gated_delta_rule"] is None:
+        problems.append(
+            "transformers' qwen3_5 module resolved chunk_gated_delta_rule to None, so the "
+            "layer will use the pure-torch fallback that ignores cu_seqlens"
+        )
+
+if sp > 1:
+    for mod in ("fla.ops.cp.comm", "fla.ops.cp.context"):
+        try:
+            __import__(mod)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"ULYSSES_SP={sp} needs {mod} ({type(exc).__name__}: {exc})")
+    cfg_path = model_dir / "config.json"
+    if cfg_path.is_file():
+        cfg = json.loads(cfg_path.read_text())
+        cfg = cfg.get("text_config", cfg)
+        heads = int(cfg.get("num_attention_heads", 0))
+        if heads and heads % sp:
+            problems.append(f"num_attention_heads={heads} is not divisible by ULYSSES_SP={sp}")
+    print(f"[gate] ULYSSES_SP={sp}: every packed micro-batch's total length must also be a "
+          f"multiple of {sp}, or verl raises ValueError at qwen3_5.py:215 mid-step.")
+
+if not problems:
+    print("[gate] gated-delta-net varlen path is real (FLA ops present, cu_seqlens honored)"
+          + (f", CP APIs present for SP={sp}" if sp > 1 else ""))
+    raise SystemExit(0)
+
+for p in problems:
+    print(f"{'WARNING' if allow else 'FATAL'}: {p}", file=sys.stderr)
+if allow:
+    print("ALLOW_UNSAFE_PACKING=1 -- launching anyway. Packed documents may share a "
+          "recurrent state; say so in the report.", file=sys.stderr)
+    raise SystemExit(0)
+print("Fix: pip install --no-deps 'flash-linear-attention @ "
+      "git+https://github.com/fla-org/flash-linear-attention' and pin "
+      "transformers>=5.11,<5.15. Or set data.pad_mode=padding (slower, no packing), "
+      "or ALLOW_UNSAFE_PACKING=1 to accept the contamination knowingly.", file=sys.stderr)
+raise SystemExit(2)
+EOF_PY
+
+# `ulysses` is verl's sequence-parallel knob and the closest analogue to Megatron CP
+# if you do need to shard the sequence. verl 0.9.0 DOES implement it for this
+# architecture -- cross-rank recurrent-state passing through FLA's cp_context plus a
+# causal-conv1d halo exchange (verl/models/transformers/qwen3_5.py:75-226,
+# monkey_patch.py:497-548) -- but only when the preconditions checked just above hold.
+# It also requires model.use_remove_padding=True (default) and one packed micro-batch
+# per rank. There is no TP on this path at all -- verl 0.9.0's engine/fsdp.yaml has no
+# tensor_parallel_size key, which is why model_registry.py --backend verl reports TP=1
+# and folds the row's CP into MAX_TOKENS_PER_GPU instead of pretending either exists.
+SP_ARGS=()
+if [[ "${ULYSSES_SP:-1}" != "1" ]]; then
+  SP_ARGS+=("engine.ulysses_sequence_parallel_size=${ULYSSES_SP}")
+  echo "ULYSSES_SP=${ULYSSES_SP}: activations are sharded ${ULYSSES_SP}-ways; the static" >&2
+  echo "         params+grads+Adam footprint is unchanged. It is the fix for long" >&2
+  echo "         sequences, not for a static-footprint OOM." >&2
+fi
+
+# One array, used twice: validated below, then handed to torchrun. Writing the
+# overrides twice is how a launcher ends up validating flags it does not pass.
+VERL_ARGS=(
+  data.train_files="$PRETOK"
+  data.custom_cls.path="$REPO_DIR/verl_backend/rst_sft_dataset.py"
+  data.custom_cls.name=RSTPretokenizedSFTDataset
+  data.pad_mode=no_padding
+  data.use_dynamic_bsz=True
+  data.max_length="${MAX_SEQ_LEN:-32768}"
+  data.max_token_len_per_gpu="$MAX_TOKENS_PER_GPU"
+  data.train_batch_size="$GLOBAL_BATCH_SIZE"
+  data.truncation=error
+  model.path="$BASE_FOLDER/$MODEL_DIR_NAME"
+  # model.use_liger=True stays: swiglu and rms_norm are still real savings. It is just
+  # not what fuses the cross-entropy here -- FUSED_ARGS is.
+  model.use_liger=True
+  "${FUSED_ARGS[@]+"${FUSED_ARGS[@]}"}"
+  model.enable_gradient_checkpointing=True
+  engine.strategy=fsdp2
+  engine.fsdp_size="${FSDP_SIZE:--1}"
+  "${OFFLOAD_ARGS[@]+"${OFFLOAD_ARGS[@]}"}"
+  "${SP_ARGS[@]+"${SP_ARGS[@]}"}"
+  optim.lr="$LR"
+  optim.lr_scheduler_type=cosine
+  optim.min_lr_ratio=0.1
+  optim.lr_warmup_steps_ratio="$LR_WARMUP_FRACTION"
+  optim.weight_decay=0.1
+  optim.betas="[0.9,0.98]"
+  trainer.total_epochs="$NUM_EPOCH"
+  trainer.project_name="${WANDB_PROJECT:-rst-qwen35-verl}"
+  trainer.experiment_name="$RUN_NAME"
+  trainer.default_local_dir="$BASE_FOLDER/$RUN_NAME"
+  trainer.logger="['console','wandb']"
+  trainer.save_freq=20
+  "${CKPT_ARGS[@]+"${CKPT_ARGS[@]}"}"
+  "$@"
+)
+
+# ---- do these overrides exist in THIS verl? ---------------------------------
+# hydra rejects an unknown override with "Could not override 'x.y'" -- and it does so
+# in every rank after torchrun has already started them and each has read the model
+# from disk. verl renames config keys between versions (measured on 0.9.0:
+# `engine.tensor_parallel_size` does not exist for FSDP at all,
+# `optim.warmup_steps_ratio` is spelled `optim.lr_warmup_steps_ratio`, and
+# `checkpoint.save_contents` has moved out from under `trainer.`), so a launcher that
+# hardcodes names is a version-drift trap. Compose the real config with the real
+# overrides here, name every rejected one, and stop before the launch.
+python - "${VERL_ARGS[@]}" <<'EOF_PY' || exit 2
+import sys
+
+try:
+    from hydra import compose, initialize_config_module
+    from hydra.core.global_hydra import GlobalHydra
+except ImportError as exc:
+    sys.exit(f"hydra is not importable ({exc}); verl cannot start either. Fix the env.")
+
+# Flags (a leading '-') are passed through to hydra/torchrun untouched: --config-name
+# and friends are not overrides and composing them here would be wrong.
+overrides = [a for a in sys.argv[1:] if not a.startswith("-")]
+passthrough = [a for a in sys.argv[1:] if a.startswith("-")]
+
+
+def compose_ok(items: list[str]) -> str:
+    GlobalHydra.instance().clear()
+    with initialize_config_module(config_module="verl.trainer.config", version_base=None):
+        try:
+            compose(config_name="sft_trainer_engine", overrides=items)
+        except Exception as exc:  # hydra raises several distinct types here
+            return str(exc).splitlines()[0]
+    return ""
+
+
+whole = compose_ok(overrides)
+if whole:
+    # Bisect to the individual offenders so the message names all of them at once
+    # rather than one per failed launch.
+    bad = [(item, why) for item in overrides if (why := compose_ok([item]))]
+    if not bad:  # the overrides are individually fine but conflict as a set
+        sys.exit(f"REFUSING TO TRAIN: verl rejected this override set as a whole: {whole}")
+    lines = "\n".join(f"    {item}\n      {why}" for item, why in bad)
+    sys.exit(f"REFUSING TO TRAIN: {len(bad)} override(s) do not exist in the installed "
+             f"verl:\n{lines}\n"
+             f"  This is version drift, not a typo in your command. Check the key against\n"
+             f"  verl/trainer/config/{{engine,optim,model,data}}/*.yaml in the installed\n"
+             f"  package and fix scripts/30_run_sft_verl.sh -- do not delete the flag if it\n"
+             f"  is load-bearing (the fused-kernel and gradient-checkpointing ones are).")
+print(f"[gate] {len(overrides)} hydra overrides all exist in this verl"
+      + (f" ({len(passthrough)} flag(s) passed through unchecked)" if passthrough else ""))
+EOF_PY
+
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \
   --node_rank "${NODE_RANK:-0}" \
   --master_addr "${MASTER_ADDR:-127.0.0.1}" --master_port "${MASTER_PORT:-29500}" \
   -m verl.trainer.sft_trainer \
   --config-name sft_trainer_engine \
-  data.train_files="$PRETOK" \
-  data.custom_cls.path="$REPO_DIR/verl_backend/rst_sft_dataset.py" \
-  data.custom_cls.name=RSTPretokenizedSFTDataset \
-  data.pad_mode=no_padding \
-  data.use_dynamic_bsz=True \
-  data.max_length="${MAX_SEQ_LEN:-32768}" \
-  data.max_token_len_per_gpu="$MAX_TOKENS_PER_GPU" \
-  data.train_batch_size="$GLOBAL_BATCH_SIZE" \
-  data.truncation=error \
-  model.path="$BASE_FOLDER/$MODEL_DIR_NAME" \
-  model.use_liger=True \
-  "${FUSED_ARGS[@]+"${FUSED_ARGS[@]}"}" \
-  model.enable_gradient_checkpointing=True \
-  engine.strategy=fsdp2 \
-  engine.tensor_parallel_size="$TP" \
-  optim.lr="$LR" \
-  optim.lr_scheduler_type=cosine \
-  optim.min_lr_ratio=0.1 \
-  optim.warmup_steps_ratio="$LR_WARMUP_FRACTION" \
-  optim.weight_decay=0.1 \
-  optim.betas="[0.9,0.98]" \
-  trainer.total_epochs="$NUM_EPOCH" \
-  trainer.project_name="${WANDB_PROJECT:-rst-qwen35-verl}" \
-  trainer.experiment_name="$RUN_NAME" \
-  trainer.default_local_dir="$BASE_FOLDER/$RUN_NAME" \
-  trainer.logger="['console','wandb']" \
-  trainer.save_freq=20 \
-  "${CKPT_ARGS[@]+"${CKPT_ARGS[@]}"}" \
-  "$@"
+  "${VERL_ARGS[@]}"
 
 cat <<EOF
 

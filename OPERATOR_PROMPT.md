@@ -217,7 +217,8 @@ Say which one you are claiming — never describe a correctness bug as flakiness
 | symptom | what it actually is | do this |
 |---|---|---|
 | Megatron / TransformerEngine / apex will not build | A100 needs a cuDNN swap a shared cluster will not allow | already handled: `BACKEND=verl` is the default. Do not fight it |
-| OOM during SFT | expected at 32K | ladder **in order**: ① halve `max-tokens-per-gpu` ② CP 2→4 ③ PP 2→4 ④ only last, reduce `max-seq-len` — that drops the long-horizon examples the data exists to teach |
+| OOM during SFT **whose peak barely moves when you halve `MAX_TOKENS_PER_GPU`** | not an activation problem at all. fp32 master + fp32 grad + Adam m + v is a fixed **16 B/param ÷ shard degree**, and the shard degree is the *runtime* `world_size`, not the config | **`python scripts/34_diagnose_oom.py --from-log <log> --key <model-key>`** — it reads verl's own `After FSDP, memory allocated (GB)` line and divides to get the real shard degree. See "the OOM that ignores your data" below |
+| OOM during SFT that *does* respond to the token budget | genuine activation pressure at 32K | ladder **in order**: ① halve `MAX_TOKENS_PER_GPU` ② `ULYSSES_SP=2` then 4 (verl 0.9.0 does implement SP for the gated-delta-net layers; the launcher gates its four preconditions) ③ `OFFLOAD_OPTIM=1` ④ only last, reduce `max-seq-len` — that drops the long-horizon examples the data exists to teach. **CP and PP do not exist on this backend** — `engine/fsdp.yaml` has neither key, so raising them changes nothing |
 | loss sits near `log(vocab)` = 12.42 and flat | the model is predicting noise — usually the loss mask never reached the loss | stop. `16_smoke_forward_backward.py` checks exactly this on one GPU and prints the comparison; then re-run `03b_validate_sft_data.py` |
 | `MODEL_DIR_NAME: unbound variable` from the registry | the registry rejected your GPU count for its TP/PP/CP plan | fine for DPO (FSDP2 only, no TP/PP/CP) — `33_run_dpo.sh` already falls through. For SFT, fix `configs/models.json` |
 | 0.8B generates nothing sane at eval | its own template defaults thinking **off** while training targets open with `\n</think>\n\n` | the launcher fetches the thinking-on template via the registry — do not remove that step; if you serve by hand, pass `--chat-template` |
@@ -236,6 +237,57 @@ Say which one you are claiming — never describe a correctness bug as flakiness
 | DPO OOMs on 8 GPUs at 27B | fp32 masters + Adam is 444.8 GB sharded; 8 is tight, 16 is comfortable | go to 2 nodes — `DPO_NNODES=2` for `20_run_all.sh`, or `NNODES=2` if you call `33_run_dpo.sh` directly — plus `MASTER_ADDR` and one launch per node. Or raise `DPO_GRAD_ACCUM` |
 | DPO `holdout_reward_accuracy` = 0.5 | at step 0 this is *correct* — an exact tie scores 0.5, and `holdout_ties` tells you which kind of 0.5 it is | not a failure. Read `holdout_ties`: nonzero = ties, zero = genuinely no preference |
 | DPO `clip_active_fraction` = 1.0 | `--max-grad-norm`, not `--lr`, is setting your real step size | expected with summed logprobs (\|g\| ≈ 1e3). `--length-normalize` is on by default and drops it to ~1. Quote whichever one actually set the step size |
+
+### The OOM that ignores your data
+
+If you halve the token budget and the reported peak does not move, **stop cutting data**.
+You are looking at a constant. Under `engine.strategy=fsdp2` with verl's defaults
+(`engine/fsdp.yaml`: `model_dtype: fp32`, no offload) every parameter costs the same
+16 bytes on every step — fp32 master 4 + fp32 gradient 4 + Adam `exp_avg` 4 +
+`exp_avg_sq` 4 — divided by the shard degree, and no data knob touches it:
+
+| model | shard 32 | shard 16 | shard 8 |
+|---|---|---|---|
+| `qwen3.5-9b` (9.65 B) | 4.5 GiB | 9.0 GiB | 18.0 GiB |
+| `qwen3.5-27b` (27.78 B) | 12.9 GiB | 25.9 GiB | **51.7 GiB** |
+
+Note the last cell: 16 B ÷ 8 = 2 B/param, which is *numerically identical to the whole
+bf16 model*. So a 27B job that OOMs in backward at ~77 GiB, with a static term that looks
+suspiciously like "the model is not sharded at all", is almost always sharded 8 ways
+rather than 32 — and `fsdp_size=-1` does **not** rule that out.
+`create_device_mesh` (`verl/workers/engine/fsdp/utils.py:35`) builds a 1-D mesh over
+`world_size`; `world_size` comes from torchrun. Four nodes that never rendezvoused are
+four independent `world_size=8` jobs, each sharding 8 ways, each with no error message
+saying so. Two ways to make that happen: `MASTER_ADDR=127.0.0.1` with `NNODES=4`, or
+every node launching with `NODE_RANK=0`. `30_run_sft_verl.sh` now refuses both.
+
+Measure it instead of arguing about it — three commands, cheapest first:
+
+```bash
+# ① zero cost, works on a log you already have. verl prints this line itself.
+grep "After FSDP" $BASE_FOLDER/logs/sft_verl_*.log
+#    params_b * 4 GB / that_number == your real shard degree  (it is the fp32 master shard)
+python scripts/34_diagnose_oom.py --from-log $BASE_FOLDER/logs/sft_verl_*.log --key qwen3.5-27b
+
+# ② arithmetic only, no cluster: what SHOULD the footprint be, and what is left for activations
+python scripts/34_diagnose_oom.py --key qwen3.5-27b --observed-peak-gib 77.01
+
+# ③ 30 s on the real allocation: prints WORLD_SIZE, distinct hostnames, ranks/node,
+#    the mesh shape and the EFFECTIVE SHARD DEGREE. Launch it exactly like the trainer.
+torchrun --nnodes 4 --nproc_per_node 8 --node_rank $NODE_RANK --master_addr $MASTER_ADDR \
+         scripts/34_diagnose_oom.py --runtime
+```
+
+It exits nonzero when the static footprint exceeds 55 % of the card, so it is usable as a
+gate and not only as a report.
+
+Two traps while you are in here. **A 9B single-node control does not test this**: 9.65 B ×
+16 B ÷ 8 = 18.0 GiB, which fits easily, so it passes whether or not the rendezvous is broken
+and tells you nothing about the 27B. And **Ulysses SP shards activations, not the static
+term** — it is the right answer for a long-sequence OOM and the wrong answer for this one.
+The only knobs that move the constant are the shard degree itself and `OFFLOAD_OPTIM=1`
+(`engine.offload_policy=true`), which moves the 12 B/param of optimizer state to host RAM
+and costs step time.
 
 ### If eval has nowhere to run containers
 

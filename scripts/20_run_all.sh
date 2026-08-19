@@ -118,15 +118,20 @@ echo "=== planning for $NODES_WANT node(s) x $GPN_WANT GPU(s) = $TOTAL_GPUS GPUs
 # Capture the registry output before eval'ing it: on failure `eval ""` leaves every
 # downstream variable unset, and `set -u` then reports it as "MODEL_DIR_NAME: unbound
 # variable" -- which reads like a launcher bug rather than a rejected config.
+# --backend matters: configs/models.json is a Megatron layout, and verl's FSDP engine
+# has no PP or CP. Passing BACKEND through is what stops a verl run from inheriting a
+# divisibility rule it does not obey and a token budget half its sequence length.
 if ! REGISTRY_SHELL=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+          --backend "$BACKEND" \
           --gpus "$TOTAL_GPUS" --gpus-per-node "$GPN_WANT" \
           --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell); then
   echo "=== the model registry rejected this configuration (its reason is above)." >&2
-  echo "    MODEL_KEY=$MODEL_KEY gpus=$TOTAL_GPUS gpus-per-node=$GPN_WANT" >&2
+  echo "    MODEL_KEY=$MODEL_KEY gpus=$TOTAL_GPUS gpus-per-node=$GPN_WANT backend=$BACKEND" >&2
   echo "    mem-class=$MEM_CLASS max-seq-len=${MAX_SEQ_LEN:-32768}" >&2
   echo "    Its asserts are load-bearing (tp*pp*cp*dp == gpus, and" >&2
-  echo "    max_tokens_per_gpu*CP >= max_seq_len). Change the GPU count or fix the row" >&2
-  echo "    in configs/models.json -- do not relax the assert." >&2
+  echo "    max_tokens_per_gpu*CP >= max_seq_len; on --backend verl PP=CP=1 and the" >&2
+  echo "    budget is the row's max_tokens_per_gpu*cp). Change the GPU count or fix the" >&2
+  echo "    row in configs/models.json -- do not relax the assert." >&2
   echo "    python scripts/model_registry.py --list" >&2
   exit 2
 fi

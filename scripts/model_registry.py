@@ -17,6 +17,14 @@ loudly, instead of being re-derived by hand in every launcher:
   * ep <= cp * dp                              (expert parallelism lives inside
                                                 the non-TP/PP dimensions)
 
+`--backend verl` RESHAPES the row first, because `configs/models.json` describes a
+Megatron 3-D parallel layout and verl's FSDP engine has neither pipeline stages nor
+context parallelism: PP and CP are pinned to 1 and CP is folded into
+max_tokens_per_gpu, since one GPU then holds a whole sequence. Without that, the
+verl launchers inherit a divisibility rule they do not obey (a 27B row of
+tp4/pp2/cp2 forces the GPU count to be a multiple of 16) and a token budget that is
+half the sequence length. See BACKENDS.md.
+
 Exits non-zero with an explanation when a config is impossible, so a launcher
 fails at the config step rather than 40 minutes into a run.
 """
@@ -37,7 +45,7 @@ def load() -> dict:
 
 
 def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len: int,
-            phase: str = "sft") -> dict:
+            phase: str = "sft", backend: str = "megatron") -> dict:
     reg = load()
     models, defaults = reg["models"], reg.get("defaults", {})
     if key not in models:
@@ -70,11 +78,43 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
     mtpg = p["max_tokens_per_gpu"]
     ep = p.get("ep", 1)
 
+    # verl's FSDP engine shards PARAMETERS across the whole world. It has no pipeline
+    # stages, and no context parallelism (`engine/fsdp.yaml` has no such key at all --
+    # its nearest analogue is ulysses_sequence_parallel_size, which is not validated on
+    # the gated-delta-net layers). So the Megatron row's pp and cp are not just unused
+    # here, they are actively wrong:
+    #
+    #   * pp*cp inflates the divisibility rule. qwen3.5-27b/80GB is tp4/pp2/cp2, so
+    #     tp*pp*cp=16 and any GPU count that is not a multiple of 16 is rejected --
+    #     including the 1- and 2-GPU smoke tests, which need no such shape.
+    #   * cp deflates the token budget. max_tokens_per_gpu is per-GPU-per-microbatch;
+    #     with cp=2 a 32K sequence is placed as 2x16K. Under FSDP one GPU holds the
+    #     whole 32K, so its budget is the row's mtpg*cp. Leaving mtpg at 16384 makes
+    #     verl reject (or silently split) every sequence over 16K.
+    #
+    # Folding cp into mtpg keeps the "longest sequence must be placeable" assert below
+    # meaningful instead of accidentally satisfied.
+    # TP goes too, and for the same reason: `verl/trainer/config/engine/fsdp.yaml` has no
+    # tensor_parallel_size key in verl 0.9.0, so nothing on this path splits a tensor.
+    # SERVE_TP is unaffected -- serving is SGLang, not the training engine.
+    row_tp = tp
+    shape_note = ""
+    if backend == "verl":
+        if (tp, pp, cp) != (1, 1, 1):
+            shape_note = (f"{key}/{mem_class} is a Megatron row (tp{tp} pp{pp} cp{cp}); verl's FSDP "
+                          f"engine has no TP, PP or CP, so all three are pinned to 1, DP becomes "
+                          f"the whole world, and max_tokens_per_gpu becomes {mtpg}*{cp}="
+                          f"{mtpg * cp} (one GPU holds a whole sequence). Activation memory per "
+                          f"GPU is therefore ~{cp}x the Megatron row's.")
+            print(f"# note: {shape_note}", file=sys.stderr)
+        mtpg, tp, pp, cp = mtpg * cp, 1, 1, 1
+
     # If the model is small enough to need fewer GPUs than the cluster has, we still
     # use them all via data parallelism -- dp absorbs the remainder.
     denom = tp * pp * cp
     if gpus % denom:
-        sys.exit(f"{key}/{mem_class}: tp*pp*cp={denom} does not divide {gpus} GPUs. "
+        sys.exit(f"{key}/{mem_class} on backend {backend}: tp*pp*cp={denom} "
+                 f"(tp{tp} pp{pp} cp{cp}) does not divide {gpus} GPUs. "
                  f"Adjust configs/models.json or pass a different --gpus.")
     dp = gpus // denom
 
@@ -84,7 +124,10 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
                         f"cross a node boundary, which is very slow (and impossible without NVLink)")
     if mtpg * cp < max_seq_len:
         problems.append(f"max_tokens_per_gpu*cp = {mtpg}*{cp} = {mtpg*cp} < max_seq_len={max_seq_len}: "
-                        f"the longest sequence cannot be placed. Raise cp or max_tokens_per_gpu.")
+                        f"the longest sequence cannot be placed. Raise cp or max_tokens_per_gpu"
+                        + ("" if backend != "verl" else " (cp is unavailable on this backend, so "
+                                                        "raise max_tokens_per_gpu -- and check the "
+                                                        "activation budget before you do)") + ".")
     if m.get("moe") and ep > cp * dp:
         problems.append(f"ep={ep} > cp*dp={cp*dp}: expert parallelism must fit inside the "
                         f"non-TP/PP dimensions")
@@ -93,6 +136,9 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
 
     out = {
         "PHASE": phase,
+        # Which parallelism shape the numbers below describe. Named BACKEND_SHAPE, not
+        # BACKEND: 20_run_all.sh eval()s this output and already owns a BACKEND variable.
+        "BACKEND_SHAPE": backend,
         "MODEL_KEY": key,
         "HF_REPO": m["hf_repo"],
         "MODEL_DIR_NAME": m["hf_repo"].split("/")[-1],
@@ -108,7 +154,7 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "MAX_TOKENS_PER_GPU": mtpg,
         "MAX_SEQ_LEN": max_seq_len,
         "TOTAL_GPUS": gpus,
-        "SERVE_TP": m.get("serve_tp", tp),
+        "SERVE_TP": m.get("serve_tp", row_tp),
         "SERVE_ENABLE_THINKING": int(bool(m.get("serve_enable_thinking"))),
         "SERVE_CONTEXT_LENGTH": defaults.get("serve_context_length", 65536),
         "GLOBAL_BATCH_SIZE": defaults.get("global_batch_size", 128),
@@ -130,6 +176,17 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
     unvalidated = m.get("unvalidated", "")
     if rl_fallback:
         unvalidated = (unvalidated + " " + rl_fallback).strip()
+    # min_gpus is a memory statement, not a shape one, so it is a warning rather than a
+    # rejection: CPU optimizer offload or a shorter sequence can make a smaller world
+    # work. But it must be said, because the arithmetic above cannot see memory --
+    # qwen3.5-27b on 8 GPUs passes every assert here and then OOMs (444.8 GB of
+    # params+grads+Adam over 8 cards is 55.6 GB/GPU before a single activation).
+    min_gpus = m.get("min_gpus")
+    if min_gpus and gpus < min_gpus:
+        unvalidated = (unvalidated + f" {gpus} GPUs is below this model's min_gpus={min_gpus}; "
+                                     f"expect OOM unless you enable optimizer offload or lower "
+                                     f"max_seq_len, and say which in the report.").strip()
+    out["_shape_note"] = shape_note
     out["_unvalidated"] = unvalidated
     out["_role"] = m.get("role", "")
     out["_paper_reference"] = m.get("paper_reference")
@@ -144,6 +201,10 @@ def main() -> int:
     ap.add_argument("--gpus-per-node", type=int, default=8)
     ap.add_argument("--max-seq-len", type=int, default=32768)
     ap.add_argument("--phase", default="sft", choices=["sft", "rl"])
+    # `slime` is spelled out because 20_run_all.sh's BACKEND is verl|slime and passes it
+    # straight through; slime IS the Megatron shape.
+    ap.add_argument("--backend", default="megatron", choices=["megatron", "slime", "verl"],
+                    help="verl pins PP=CP=1 and folds CP into max_tokens_per_gpu")
     ap.add_argument("--shell", action="store_true", help="emit eval-able shell assignments")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true")
@@ -164,7 +225,8 @@ def main() -> int:
     if not args.key:
         sys.exit("--key required (or --list)")
     cfg = resolve(args.key, args.mem_class, args.gpus, args.gpus_per_node, args.max_seq_len,
-                  phase=args.phase)
+                  phase=args.phase,
+                  backend="megatron" if args.backend == "slime" else args.backend)
 
     if args.json:
         print(json.dumps(cfg, indent=2))
