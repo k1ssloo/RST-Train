@@ -26,6 +26,17 @@
 # The four imports every python stage in this repo needs. Deliberately checked with
 # find_spec rather than a real import: locating them costs milliseconds, importing
 # torch costs seconds and would run on every stage.
+# Remember whether the caller pinned the list, so the backend marker below is only
+# added to the default and never overrides an explicit override. Written as an if
+# rather than `[[ ... ]] && x=1`, whose non-zero status would abort a `set -e`
+# caller at source time, and guarded so sourcing this file twice keeps the first
+# verdict instead of mistaking our own default for the caller's.
+if [[ -z "${RST_ENV_REQUIRE_PINNED:-}" ]]; then
+  RST_ENV_REQUIRE_PINNED=0
+  if [[ -n "${RST_ENV_REQUIRE:-}" ]]; then
+    RST_ENV_REQUIRE_PINNED=1
+  fi
+fi
 RST_ENV_REQUIRE="${RST_ENV_REQUIRE:-torch transformers pandas pyarrow}"
 
 rst_has_modules() {  # rst_has_modules <module...>  -> 0 if every one is importable
@@ -92,6 +103,21 @@ rst_bootstrap_python() {
 rst_enter_env() {  # rst_enter_env [env_name]
   local want="${1:-${ENV_NAME:-rstverl}}"
   local stub="${BASE_FOLDER:-}/env-$want.sh"
+
+  # The four shared imports cannot tell the env this repo built apart from a stock
+  # ML image whose system interpreter already ships them. Where they cannot, step 0
+  # answers "already in it" for the WRONG interpreter, nothing enters the env, and
+  # the run proceeds on whatever transformers that image happens to carry -- which
+  # may sit below the >= 5.15.0 floor, and has no verl at all. The backend's own
+  # package is the discriminator no stock image satisfies by accident, so require it
+  # too whenever the caller did not pin the list.
+  if [[ "${RST_ENV_REQUIRE_PINNED:-0}" == 0 ]] &&
+     { [[ "${BACKEND:-}" == "verl" ]] || [[ "$want" == "rstverl" ]]; }; then
+    case " $RST_ENV_REQUIRE " in
+      *" verl "*) ;;
+      *) RST_ENV_REQUIRE="$RST_ENV_REQUIRE verl" ;;
+    esac
+  fi
 
   # 0. Already in it? Covers the normal case (20_run_all.sh activated, then invoked
   #    30_run_sft_verl.sh as a child) and the operator who activated it by hand, and
