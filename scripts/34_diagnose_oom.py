@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Decide, in under a minute, WHY a verl FSDP2 run OOMs -- static footprint or activations.
+"""Decide, in under a minute, WHY a verl FSDP2 run OOMs.
+
+Three distinct failure modes, in the order they were hit on the 4x8 A100 cluster:
+
+  1. STATIC FOOTPRINT -- torchrun never rendezvoused, so the shard degree is 8 (one
+     node) instead of 32, and 16 B/param / 8 = 2 B/param fills the card before a single
+     activation. Detected from the `After FSDP` memory line.
+  2. UNSHARDED GRADIENT ACCUMULATION -- the shard degree is right, but verl skips FSDP
+     gradient sync on non-final micro-batches and FSDP2 retains a full UNSHARDED fp32
+     gradient (params x 4 B, 103.5 GiB at 27.78B) until the final backward. Detected
+     from an OOM whose traceback is inside `loss.backward()` with a large
+     `allocated by PyTorch` figure and a small requested size, and no `[rst-fsdp2]` line.
+     Fixed by verl_backend/fsdp2_grad_accum.py.
+  3. ACTIVATIONS -- the residual after 1 and 2 are accounted for. This is the only one
+     that responds to `data.max_token_len_per_gpu`, `data.max_length` or ULYSSES_SP.
 
     # 1. from a log you already have (no cluster time, no GPU)
     python scripts/34_diagnose_oom.py --from-log outputs/sft-27b/train.log --key qwen3.5-27b
@@ -109,17 +123,87 @@ LOG_OOM = re.compile(r"GiB.{0,80}?(?:is allocated by PyTorch|of which)", re.S)
 LOG_CAP = re.compile(r"has a total capacity of ([\d.]+) GiB")
 LOG_INUSE = re.compile(r"Of the allocated memory ([\d.]+) GiB")
 LOG_PROC = re.compile(r"Including non-PyTorch memory, this process has ([\d.]+) GiB")
+LOG_TRIED = re.compile(r"Tried to allocate ([\d.]+) (GiB|MiB)")
+LOG_BACKWARD = re.compile(r"^\s+loss\.backward\(\)|torch/autograd/graph\.py", re.M)
+LOG_FSDP2_PATCH = re.compile(r"\[rst-fsdp2\]")
+LOG_SYNC_SKIP = re.compile(r"set_requires_gradient_sync|to_accumulated_grad_if_needed")
+
+
+def grad_accum_verdict(text: str, params: float) -> int:
+    """Failure mode 2: an unsharded fp32 gradient retained across micro-batches.
+
+    The signature is specific enough to name from a log alone: the OOM is raised inside
+    backward, the process is already holding most of the card, and the allocation that
+    failed is small -- memory is not being requested in one impossible chunk, it has been
+    accumulating layer by layer as backward walked the model. Combined with the absence
+    of `[rst-fsdp2]`, that is verl's `_gradient_sync_context` path.
+    """
+    in_backward = bool(LOG_BACKWARD.search(text))
+    inuse = LOG_INUSE.search(text)
+    cap = LOG_CAP.search(text)
+    tried = LOG_TRIED.search(text)
+    patched = bool(LOG_FSDP2_PATCH.search(text))
+
+    if not (in_backward and inuse and cap):
+        return 0
+
+    held, card = float(inuse.group(1)), float(cap.group(1))
+    tried_gib = 0.0
+    if tried:
+        tried_gib = float(tried.group(1)) / (1 if tried.group(2) == "GiB" else 1024)
+    unsharded = gib(params * 4)
+
+    print(f"\nOOM was raised INSIDE backward, holding {held:.2f} GiB of a {card:.2f} GiB card")
+    if tried_gib:
+        print(f"and the allocation that failed was only {tried_gib:.2f} GiB.")
+    if patched:
+        print("`[rst-fsdp2]` IS in this log, so unsharded gradient accumulation was already")
+        print("disabled. This is failure mode 3 (activations); see the estimate below.")
+        return 0
+
+    print("`[rst-fsdp2]` is NOT in this log, so verl_backend/fsdp2_grad_accum.py did not run.")
+    print("\nVERDICT: unsharded gradient accumulation. verl calls")
+    print("         set_requires_gradient_sync(False) on every non-final micro-batch")
+    print("         (workers/engine/fsdp/transformer_impl.py::_gradient_sync_context), and")
+    print("         FSDP2 then upcasts each parameter's bf16 gradient to the fp32 reduce")
+    print("         dtype and holds it UNSHARDED until the final backward")
+    print("         (_fsdp_param.py::to_accumulated_grad_if_needed).")
+    print(f"         Full model: {params / 1e9:.2f}B x 4 B = {unsharded:.1f} GiB/GPU, which is")
+    print(f"         why the process died {100 * held / card:.0f}% of the way through the card.")
+    print("         This term is proportional to PARAMETERS, so cutting max_token_len_per_gpu,")
+    print("         max_length or the dataset cannot fix it, and neither can more GPUs or")
+    print("         engine.optimizer_offload. Raising ULYSSES_SP cannot even change the")
+    print("         micro-batch count: prepare_micro_batches scales the token budget by")
+    print("         sp_size, so tokens-per-group and budget-per-group move together.")
+    print("\n         Fix: run with data.custom_cls.path=verl_backend/rst_sft_dataset.py so")
+    print("         fsdp2_grad_accum.apply() runs in every rank (it imports at module load),")
+    print("         or call verl_backend.fsdp2_grad_accum.apply() from your own launcher")
+    print("         before training starts. Then `[rst-fsdp2]` appears and every micro-batch")
+    print("         reduce-scatters into the fp32 SHARDED gradient instead.")
+    return 1
 
 
 def from_log(path: Path, params: float) -> int:
     text = path.read_text(errors="replace")
     hits = [m.groupdict() for m in LOG_MEM.finditer(text)]
     if not hits:
-        print(f"FAIL: no verl `log_gpu_memory_usage` line in {path}.")
-        print("      Expected e.g. `After FSDP, memory allocated (GB): 3.47, ...`.")
-        print("      verl prints it at workers/engine/fsdp/transformer_impl.py:595 with")
-        print("      logger=None, so it goes to stdout -- make sure stdout is captured.")
-        return 2
+        # Not fatal any more. A rank log from a torchrun whose stdout went elsewhere has
+        # no `log_gpu_memory_usage` line but still carries the whole OOM traceback, which
+        # is enough to separate failure mode 2 from failure mode 3. Only the shard-degree
+        # inference needs the memory lines, so say what is missing and keep going.
+        print(f"note: no verl `log_gpu_memory_usage` line in {path.name}, so the shard")
+        print("      degree cannot be inferred from it (expected e.g. `After FSDP, memory")
+        print("      allocated (GB): 3.47, ...`; verl prints it with logger=None, so it goes")
+        print("      to stdout). Diagnosing from the OOM traceback instead.")
+        rc = grad_accum_verdict(text, params)
+        cap, proc = LOG_CAP.search(text), LOG_PROC.search(text)
+        if cap and proc:
+            print(f"\nOOM line says: card capacity {cap.group(1)} GiB, this process holding "
+                  f"{proc.group(1)} GiB.")
+        if rc == 0 and not LOG_OOM.search(text):
+            print("\nNo OOM message in this log either -- nothing to diagnose.")
+            return 2
+        return rc
 
     print(f"parsed {len(hits)} memory lines from {path.name}\n")
     for h in hits[:12]:
@@ -154,6 +238,10 @@ def from_log(path: Path, params: float) -> int:
             print("         shard degree (one process group over all nodes, engine.fsdp_size=-1) or")
             print("         move the optimizer off the GPU (engine.offload_policy=true).")
             rc = 1
+
+    # The shard degree can be right and the run still OOM: check failure mode 2 too, and
+    # let it upgrade the return code. A clean static footprint is not an all-clear.
+    rc = max(rc, grad_accum_verdict(text, params))
 
     cap = LOG_CAP.search(text)
     proc = LOG_PROC.search(text)

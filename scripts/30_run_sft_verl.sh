@@ -30,6 +30,12 @@
 #   working set                               ~  2   GB/GPU
 #                                             ------------
 #                                             ~ 37   GB/GPU   -> fits 80GB
+#   That budget also assumes the gradient stays SHARDED across micro-batches. verl's
+#   own path does not: it skips FSDP gradient sync on non-final micro-batches, and FSDP2
+#   answers by keeping a full unsharded fp32 gradient (27.78e9 x 4 B = 103.5 GiB/GPU)
+#   until the final backward. verl_backend/fsdp2_grad_accum.py removes that term; the
+#   gate below reports it, and "[rst-fsdp2]" in the log is the proof it was applied.
+#
 #   That budget assumes the CE is fused. Unfused, add ~30 GB of logits on top and
 #   the same run reports ~78 GB/GPU of activations beside ~2 GB of sharded params.
 #   On 40GB cards this does not fit; use optimizer CPU offload and/or drop to
@@ -187,6 +193,25 @@ if not (0.25 <= frac <= 0.45):
              f"spending GPU time.")
 EOF_PY
 
+
+# ---- unsharded-gradient-accumulation gate ------------------------------------
+# The OOM that survives a CORRECT shard degree. verl skips FSDP gradient sync on every
+# non-final micro-batch (FSDPEngine._gradient_sync_context), and FSDP2 answers that by
+# upcasting each parameter's gradient to reduce_dtype (fp32 by default beside bf16
+# params) and keeping it UNSHARDED until the final backward -- params x 4 B per GPU,
+# 103.5 GiB at 27.78B. It needs >= 2 micro-batches per step to trigger, it is
+# proportional to parameters rather than tokens, and it does not shrink with more GPUs
+# or with engine.optimizer_offload. verl_backend/fsdp2_grad_accum.py removes it; this
+# gate reports whether the run would have needed it and refuses if it is switched off.
+python verl_backend/fsdp2_grad_accum.py \
+  --lengths "$PRETOK" \
+  --params-b "$PARAMS_B" \
+  --world-size "$(( NNODES * NGPUS ))" \
+  --ulysses-sp "${ULYSSES_SP:-1}" \
+  --max-token-len-per-gpu "$MAX_TOKENS_PER_GPU" \
+  --train-batch-size "$GLOBAL_BATCH_SIZE" \
+  --shard-degree "$(( ${FSDP_SIZE:--1} < 0 ? NNODES * NGPUS : FSDP_SIZE ))" \
+  --card-gib "$(python -c "print($GPU_MEM_MIB/1024)")" || exit 2
 
 # ---- the fused cross-entropy switch, and why it is NOT model.use_liger -------
 # model.use_liger=True does NOT give you a fused cross-entropy on this path. verl's
@@ -532,6 +557,13 @@ Done. Notes for the report:
     model.use_liger -- verl's FSDP engine disables Liger's FLCE on purpose. Confirm
     it in the log: "Using Torch backend for fused kernels in ..." must appear, and
     "Skipping monkey patch ... use_fused_kernels is False" must NOT.
+  * "[rst-fsdp2]" must appear too. That line is verl_backend/fsdp2_grad_accum.py
+    reporting that FSDP2 now reduce-scatters every micro-batch. Without it, any step
+    that splits into two or more micro-batches retains a full UNSHARDED fp32 gradient
+    ($(python -c "print(f'{$PARAMS_B * 1e9 * 4 / 2**30:.0f}')") GiB/GPU here) and the
+    run dies inside loss.backward() with a large "allocated by PyTorch" figure and a
+    small requested size. It is applied from the dataset module, so it is present on
+    any launcher that uses data.custom_cls.path=verl_backend/rst_sft_dataset.py.
   * engine.strategy=fsdp2 shards parameters only. If you enabled ulysses sequence
     parallelism to fit longer sequences, SAY SO -- it has not been validated on the
     gated-delta-net layers, same open question as Megatron CP.

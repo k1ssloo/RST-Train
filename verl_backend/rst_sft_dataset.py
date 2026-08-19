@@ -32,11 +32,32 @@ Expected columns: `input_ids` (list[int]), `loss_mask` (list[int]).
 Returned dict matches verl's MultiTurnSFTDataset:
   pad_mode="no_padding"  -> {input_ids, position_ids, loss_mask}
   otherwise              -> {input_ids, attention_mask, position_ids, loss_mask}
+
+IMPORT SIDE EFFECT, ON PURPOSE
+------------------------------
+Importing this module also applies `fsdp2_grad_accum.apply()`, which stops FSDP2 from
+retaining a full unsharded fp32 gradient across micro-batches (a 103.5 GiB/GPU term at
+27.78B -- see that module's header). The hook is here rather than in a launcher because
+verl loads THIS file through `data.custom_cls.path` with `load_extern_object` in every
+rank before training starts, so a hand-rolled or cluster-side launcher cannot miss it.
+Grep the log for `[rst-fsdp2]` to confirm it ran; `RST_FSDP2_ALWAYS_REDUCE=0` opts out.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
+
+# verl loads this file by PATH, not as a package member, so `from . import ...` is not
+# available and the sibling module has to be reachable on sys.path.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import fsdp2_grad_accum  # noqa: E402
+
+fsdp2_grad_accum.apply()
 
 # --------------------------------------------------------------------------
 # Pure-python core, kept free of torch so it can be unit-tested anywhere.

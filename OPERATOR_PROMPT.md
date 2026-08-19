@@ -41,9 +41,10 @@ result layer or the dataset code:
 python tests/run_tests.py       # or: python -m pytest tests/ -q
 ```
 
-37 tests, ~1 s, no GPU / cluster / dataset needed (10 of them need torch and say SKIP
-without it — run them again inside the training venv). They pin the loss mask, the infra-vs-budget failure split and the padding rules —
-the three things that break a run silently instead of loudly. A green run says nothing
+107 tests, ~1 s, no GPU / cluster / dataset needed (11 of them need torch and say SKIP
+without it — run them again inside the training venv). They pin the loss mask, the
+infra-vs-budget failure split, the padding rules and the two OOM failure modes below —
+the things that break a run silently instead of loudly. A green run says nothing
 about anything needing real weights, a container runtime, or more than one node.
 
 ## Run it
@@ -218,6 +219,7 @@ Say which one you are claiming — never describe a correctness bug as flakiness
 |---|---|---|
 | Megatron / TransformerEngine / apex will not build | A100 needs a cuDNN swap a shared cluster will not allow | already handled: `BACKEND=verl` is the default. Do not fight it |
 | OOM during SFT **whose peak barely moves when you halve `MAX_TOKENS_PER_GPU`** | not an activation problem at all. fp32 master + fp32 grad + Adam m + v is a fixed **16 B/param ÷ shard degree**, and the shard degree is the *runtime* `world_size`, not the config | **`python scripts/34_diagnose_oom.py --from-log <log> --key <model-key>`** — it reads verl's own `After FSDP, memory allocated (GB)` line and divides to get the real shard degree. See "the OOM that ignores your data" below |
+| OOM during SFT **inside `loss.backward()`, already holding ~95 % of the card, asking for a few hundred MiB**, and the shard degree checks out at 32 | the *second*, different constant: verl skips FSDP gradient sync on non-final micro-batches, so FSDP2 upcasts each gradient to fp32 and keeps it **unsharded** — `params × 4 B` = **103.5 GiB/GPU** at 27B — until the final backward | `grep '\[rst-fsdp2\]' <log>`. If it is absent the fix never loaded: pass `data.custom_cls.path=verl_backend/rst_sft_dataset.py` (it applies at import, in every rank) or call `verl_backend.fsdp2_grad_accum.apply()` from your launcher. See "the OOM that ignores your GPU count" below |
 | OOM during SFT that *does* respond to the token budget | genuine activation pressure at 32K | ladder **in order**: ① halve `MAX_TOKENS_PER_GPU` ② `ULYSSES_SP=2` then 4 (verl 0.9.0 does implement SP for the gated-delta-net layers; the launcher gates its four preconditions) ③ `OFFLOAD_OPTIM=1` ④ only last, reduce `max-seq-len` — that drops the long-horizon examples the data exists to teach. **CP and PP do not exist on this backend** — `engine/fsdp.yaml` has neither key, so raising them changes nothing |
 | loss sits near `log(vocab)` = 12.42 and flat | the model is predicting noise — usually the loss mask never reached the loss | stop. `16_smoke_forward_backward.py` checks exactly this on one GPU and prints the comparison; then re-run `03b_validate_sft_data.py` |
 | `MODEL_DIR_NAME: unbound variable` from the registry | the registry rejected your GPU count for its TP/PP/CP plan | fine for DPO (FSDP2 only, no TP/PP/CP) — `33_run_dpo.sh` already falls through. For SFT, fix `configs/models.json` |
@@ -288,6 +290,78 @@ term** — it is the right answer for a long-sequence OOM and the wrong answer f
 The only knobs that move the constant are the shard degree itself and `OFFLOAD_OPTIM=1`
 (`engine.offload_policy=true`), which moves the 12 B/param of optimizer state to host RAM
 and costs step time.
+
+### The OOM that ignores your GPU count
+
+Fixing the section above and OOMing again is not a regression — it is the *next* constant,
+and it is the one that killed the 27B run in `logs/train_rank1.log`. Signature: the
+traceback is inside `loss.backward()`, the process is holding **75.36 GiB of a 79.33 GiB**
+card, and the allocation that failed is **552 MiB**. Nothing asks for an impossible chunk;
+memory accumulated layer by layer as backward walked the model. Meanwhile the shard degree
+was provably right — the NCCL line `NumelIn=11982408, NumelOut=383437056` is exactly 32.0×.
+
+The cause is one line of verl. `FSDPEngine._gradient_sync_context`
+(`workers/engine/fsdp/transformer_impl.py`) calls `set_requires_gradient_sync(False)` on
+every non-final micro-batch to save a collective. FSDP2 answers by skipping the
+reduce-scatter and calling `to_accumulated_grad_if_needed`, which stores
+`unsharded_grad.to(reduce_dtype)` — a **whole-parameter fp32 tensor, not a shard** — until
+the final micro-batch. verl's mixed-precision policy is `param_dtype=bf16,
+reduce_dtype=fp32`, so the early-return guard never fires. At 27.78 B that is
+**27.78e9 × 4 B = 103.5 GiB per GPU**.
+
+Read that number carefully, because it decides which knobs are useless:
+
+| knob | effect on this term |
+|---|---|
+| more GPUs / higher shard degree | **none** — the tensor is unsharded by construction |
+| `MAX_TOKENS_PER_GPU`, `max-seq-len`, less data | **none** — the term is ∝ parameters, not tokens |
+| `OFFLOAD_OPTIM=1` | **none** — Adam state is already off-GPU during backward |
+| `ULYSSES_SP` | **none, not even indirectly** — `prepare_micro_batches` sets the budget to `max_token_len_per_gpu × sp_size`, so tokens-per-group and budget-per-group scale together and the micro-batch count cannot change |
+| `mp_reduce_dtype=bf16` | halves it to 51.7 GiB. Still fatal |
+| **reduce-scatter every micro-batch** | 103.5 → 3.2 GiB/GPU sharded. This is the fix |
+
+It only triggers with **≥ 2 micro-batches per optimizer step**; with one,
+`is_last_micro_batch` is true immediately and the path is unreachable. That is why a
+smaller run of the same config looks healthy. At `train_batch_size=128`, `world=32`,
+`ULYSSES_SP=8`, `MAX_TOKENS_PER_GPU=32768` over the cap-10 data it is 2 typical and 4
+worst-case — measured, not assumed.
+
+`verl_backend/fsdp2_grad_accum.py` replaces `_gradient_sync_context` with a no-op so FSDP2
+reduce-scatters on every micro-batch and accumulates into the fp32 **sharded** gradient
+(`_fsdp_collectives.py`: `sharded_param.grad._local_tensor += new_sharded_grad`). A sum of
+reduce-scatters is the reduce-scatter of a sum, so this is the same arithmetic, not an
+approximation — `scripts/35_probe_fsdp2_grad_accum.py` measures a max relative gradient
+difference of **0.000e+00** on a real FSDP2 model. The cost is one extra reduce-scatter per
+micro-batch, i.e. the gradient traffic plain DDP would move anyway.
+
+```bash
+# ① is this run going to take that path at all? runs before torchrun, no GPU needed
+python verl_backend/fsdp2_grad_accum.py --lengths $PRETOK --params-b 27.78 \
+    --world-size 32 --ulysses-sp 8 --max-token-len-per-gpu 32768 --train-batch-size 128
+#    exit 0 = safe or patched, exit 2 = will OOM in backward, and it prints why
+
+# ② name the failure mode from a log you already have (both modes, one command)
+python scripts/34_diagnose_oom.py --from-log $BASE_FOLDER/logs/train_rank*.log --key qwen3.5-27b
+
+# ③ prove the mechanism on ONE GPU in seconds, before spending cluster time
+python scripts/35_probe_fsdp2_grad_accum.py --hidden 4096 --layers 8
+```
+
+**The one thing you must verify.** The patch is hooked into
+`verl_backend/rst_sft_dataset.py`, which verl loads through `data.custom_cls.path` with
+`load_extern_object` in every rank before training starts — deliberately, so it survives
+your own launcher instead of only `30_run_sft_verl.sh`. If you drop `custom_cls.path` or
+build the dataset another way, **call `verl_backend.fsdp2_grad_accum.apply()` yourself**.
+The proof it ran is one line near the top of every rank log:
+
+```
+[rst-fsdp2] FSDPEngine._gradient_sync_context neutralized: FSDP2 now reduce-scatters every micro-batch, ...
+```
+
+No `[rst-fsdp2]` line means no fix, whatever else the log says. `RST_FSDP2_ALWAYS_REDUCE=0`
+turns it off; the only legitimate reason is a 1–2 GPU memory measurement, where
+reduce-scattering over one rank reduces nothing and the patch costs a few hundred MiB
+(break-even is shard degree 3). At shard 32 it frees **93.8 GiB/GPU**.
 
 ### If eval has nowhere to run containers
 

@@ -28,6 +28,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL task pool + leak guard | ✅ **run locally**: 5,140 tasks / 999 groups materialized, 0 verifier leaks |
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
+| FSDP2 unsharded-gradient-accumulation fix (`verl_backend/fsdp2_grad_accum.py`) | ✅ **measured** on one H100: verl's path retains fp32 unsharded gradients covering every parameter, the patched path retains none, gradients differ by 0.000e+00. Projects to 93.8 GiB/GPU freed at shard 32 — ⏳ the 4×8 launch it unblocks has not rerun yet |
 | DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
 
 ## Supported models
@@ -112,8 +113,10 @@ scripts/
   dpo_common.py                the one logprob implementation both 18 and 19 use
   33_run_dpo.sh                the three DPO stages, resumable, container-free
   34_diagnose_oom.py           why an OOM does not move when you cut the token budget
+  35_probe_fsdp2_grad_accum.py measures the unsharded-gradient claim on one GPU
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
+  fsdp2_grad_accum.py          stops FSDP2 retaining a full unsharded fp32 gradient
 rst_common/                    definitions that must be identical in eval and RL
 tests/                         no-GPU, no-cluster unit tests (see "Tests" below)
 configs/models.json            the model registry
@@ -257,7 +260,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 94 tests, ~1 s (10 of them skip without torch)
+python -m pytest tests/ -q     # 107 tests, ~1 s (11 of them skip without torch)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -273,6 +276,7 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_model_registry.py` | `--backend verl` reshapes the Megatron row before validating it — TP/PP/CP pinned to 1 and CP folded into `max_tokens_per_gpu`, announced not silent, `slime` still shaped like Megatron, `tp*pp*cp*dp == world`, an undividable GPU count rejected, and the 27B-on-8-GPUs case warned about (it passes every shape assert and then OOMs) |
 | `tests/test_assistant_normalization.py` | `normalize_assistant` — the single canonical form every dataset here shares. Two cases are regressions from real data: a **literal newline inside a JSON string** is repaired (invalid by spec, unambiguous in meaning) and `find . -exec ls {} \;` in a prose preamble no longer **balances as `{}` and masks the real response two lines down**. The boundary is also pinned: an unescaped inner quote stays a drop, because guessing where the string ends invents training content |
 | `tests/test_openthoughts_convert.py` | the upstream→ours mapping in `03d_build_openthoughts_sft.py`, where the shapes are so close that the dangerous failures are quiet: a `system` turn shifting the rendered prefix (refused, not folded in), a trailing user turn with nothing to predict, one bad turn dropping the whole trajectory rather than being skipped, and the stale `Previous response had warnings:` preamble being stripped **only** when the turn it complains about was actually renormalized |
+| `tests/test_fsdp2_grad_accum.py` | the second, distinct 27B OOM: verl skipping FSDP gradient sync on non-final micro-batches makes FSDP2 retain a full **unsharded** fp32 gradient (`params × 4 B` = 103.5 GiB/GPU at 27B) until the final backward. Pins the micro-batch estimator that decides whether a config reaches that path at all — including that raising `ULYSSES_SP` **cannot** change the count, because `prepare_micro_batches` scales the token budget by `sp_size` too — that the worst case is taken over dp ranks (`same_micro_num_in_dp=True`), that the retained tensor does not shrink with the shard degree, and that the patch is still applied from the module verl loads in every rank rather than from a launcher a cluster-side wrapper can bypass. The allocation and numerics claims are *measured* instead, by `scripts/35_probe_fsdp2_grad_accum.py` |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the
