@@ -24,12 +24,19 @@
 #   the fused-kernel gate below. Getting that wrong is a ~78 GB/GPU mistake that
 #   presents as a parallelism problem.
 #
-# ROUGH BUDGET, 27.8B on 32x80GB, seq 32K, fused CE:
+# ROUGH BUDGET, 27.8B on 32x80GB, seq 32K, fused CE, ULYSSES_SP=1:
 #   sharded params+grads+Adam  444.8 GB / 32  = 13.9 GB/GPU
 #   activations (full recompute, 64 layers)   = 21.5 GB/GPU
 #   working set                               ~  2   GB/GPU
 #                                             ------------
 #                                             ~ 37   GB/GPU   -> fits 80GB
+#
+#   ULYSSES_SP=N divides ONLY the activation line, and only because the registry divides
+#   data.max_token_len_per_gpu by N (`--ulysses-sp`). Per-GPU activation memory is
+#   max_token_len_per_gpu tokens at every N; SP's whole contribution is letting that budget
+#   drop below max_seq_len, which sp=1 cannot do because bin packing cannot split one
+#   sample. Launch with N>1 and an undivided budget and you get the 21.5 GB line unchanged
+#   plus every SP cost -- the gate at the ULYSSES_SP block refuses that combination.
 #   That budget also assumes the gradient stays SHARDED across micro-batches. verl's
 #   own path does not: it skips FSDP gradient sync on non-final micro-batches, and FSDP2
 #   answers by keeping a full unsharded fp32 gradient (27.78e9 x 4 B = 103.5 GiB/GPU)
@@ -62,8 +69,12 @@ if [[ "${MEM_CLASS:-auto}" == "auto" ]]; then
   if (( GPU_MEM_MIB > 70000 )); then MEM_CLASS=80GB; else MEM_CLASS=40GB; fi
 fi
 NNODES="${NNODES:-4}"; NGPUS="${NGPUS:-8}"
+# --ulysses-sp is not decoration: the registry divides max_tokens_per_gpu by it, because
+# the unit that holds a whole sequence under Ulysses is the SP GROUP, not one GPU. Omit it
+# and you launch with engine.ulysses_sequence_parallel_size=8 while still asking each GPU
+# for a whole 32K sequence's activations -- see the ULYSSES_SP block further down.
 eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
-          --backend verl \
+          --backend verl --ulysses-sp "${ULYSSES_SP:-1}" \
           --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
           --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell)"
 
@@ -84,6 +95,25 @@ if (( NNODES > 1 )); then
     echo "FATAL: NNODES=$NNODES but NODE_RANK is unset, so every node would claim rank 0." >&2
     echo "       Export a distinct NODE_RANK (0..$((NNODES - 1))) per node." >&2
     exit 2
+  fi
+
+  # ---- interconnect note (a throughput fact, not a correctness one) -----------
+  # 05_run_sft.sh and 12_run_grpo.sh already detect this; the PRIMARY path did not, which
+  # is how a run can be network-bound with nothing in its log saying so. FSDP2 all-gathers
+  # every parameter of every layer on every micro-batch, so on this model that is 64
+  # unshards of ~766 MB (bf16) per forward and again per recompute. Over NVLink+IB that is
+  # background noise; over TCP sockets it is the run. Reported, never fatal: a slow run
+  # that finishes still beats a launcher that refuses to start one.
+  if [[ ! -d /sys/class/infiniband ]] || [[ -z "$(ls -A /sys/class/infiniband 2>/dev/null)" ]]; then
+    echo "NOTE: no InfiniBand/RoCE device under /sys/class/infiniband, so NCCL will fall back" >&2
+    echo "      to TCP over ${NCCL_SOCKET_IFNAME:-the default interface} across $NNODES nodes." >&2
+    echo "      FSDP2 moves every parameter across that fabric on every micro-batch, and" >&2
+    echo "      verl_backend/fsdp2_grad_accum.py adds one reduce-scatter per micro-batch on" >&2
+    echo "      top. If the step time is unusable, the shape to try is HSDP -- FSDP_SIZE=$NGPUS" >&2
+    echo "      keeps all-gathers inside a node and leaves only one gradient all-reduce" >&2
+    echo "      between nodes per step -- which needs OFFLOAD_OPTIM=1 to fit the smaller" >&2
+    echo "      shard degree. Record whichever you used in the report: it changes tokens/s" >&2
+    echo "      by an order of magnitude and therefore what the epoch estimate means." >&2
   fi
 fi
 
@@ -113,7 +143,18 @@ print(f"[gate] shard degree {shard} (world {world}, fsdp_size {fsdp_size}): "
       f"params+grads+Adam = {gib:.1f} GiB/GPU of a {card:.0f} GiB card, "
       f"before any activation")
 if offload:
-    print("[gate] engine.offload_policy=true moves that shard to CPU; GPU static ~0")
+    # Only true of `engine.offload_policy=true`, which is FSDP2's CPUOffloadPolicy and moves
+    # the sharded PARAMS, GRADS and optimizer state to host memory. It is NOT true of
+    # `engine.optimizer_offload=True`, a different key that moves the Adam state alone and
+    # leaves fp32 master + fp32 grad (8 B/param / shard) resident. The two are one word
+    # apart and OFFLOAD_OPTIM's name suggests the weaker one, so spell out which is which --
+    # a launcher that reports "GPU static ~0" while the run holds 6.5 GiB before its first
+    # activation has spent the operator's next hour on the wrong hypothesis.
+    print(f"[gate] OFFLOAD_OPTIM=1 -> engine.offload_policy=true (FSDP2 CPUOffloadPolicy): "
+          f"params + grads + Adam all live on the host, GPU static ~0.")
+    print(f"       If you instead pass engine.optimizer_offload=True by hand, only Adam "
+          f"moves and {params_b * 1e9 * 8 / shard / (1 << 30):.1f} GiB/GPU of fp32 master + "
+          f"fp32 grad stays resident.")
     raise SystemExit(0)
 if gib > 0.55 * card and not force:
     print(f"FATAL: {gib:.1f} GiB static is {100 * gib / card:.0f}% of the card. The activations for a",
@@ -176,6 +217,15 @@ if misaligned:
 if empty:
     sys.exit(f"REFUSING TO TRAIN: {empty} rows have zero trained tokens. They contribute no "
              f"gradient and, with per-token loss normalization, skew the average. Re-export.")
+# data.pad_mode=no_padding makes verl align the mask with a CYCLIC roll over the packed
+# micro-batch (workers/utils/losses.py::sft_loss), so a supervised token 0 trains the
+# PREVIOUS document's last hidden state to predict this document's first token. Free to
+# check, and invisible in the loss curve if it is ever wrong.
+leading = int((df.loss_mask.map(lambda m: int(m[0]) if len(m) else 0) != 0).sum())
+if leading:
+    sys.exit(f"REFUSING TO TRAIN: {leading} rows have loss_mask[0] == 1. Under "
+             f"pad_mode=no_padding that leaks supervision across the packed document "
+             f"boundary. Re-export with scripts/15_export_pretokenized.py.")
 if too_long:
     sys.exit(f"REFUSING TO TRAIN: {too_long} rows exceed max_seq_len={max_len}. Re-export with "
              f"--max-seq-len {max_len} so the drop is counted, or raise the limit.")
@@ -445,9 +495,36 @@ EOF_PY
 SP_ARGS=()
 if [[ "${ULYSSES_SP:-1}" != "1" ]]; then
   SP_ARGS+=("engine.ulysses_sequence_parallel_size=${ULYSSES_SP}")
-  echo "ULYSSES_SP=${ULYSSES_SP}: activations are sharded ${ULYSSES_SP}-ways; the static" >&2
-  echo "         params+grads+Adam footprint is unchanged. It is the fix for long" >&2
+  echo "ULYSSES_SP=${ULYSSES_SP} -> data.max_token_len_per_gpu=${MAX_TOKENS_PER_GPU}" >&2
+  echo "         (the registry divided the budget by ${ULYSSES_SP}; group budget" >&2
+  echo "         $(( MAX_TOKENS_PER_GPU * ULYSSES_SP )) >= max_seq_len ${MAX_SEQ_LEN:-32768})." >&2
+  echo "         Activations per GPU are ~1/${ULYSSES_SP} of the SP=1 figure. The static" >&2
+  echo "         params+grads+Adam footprint is unchanged: SP is the fix for long" >&2
   echo "         sequences, not for a static-footprint OOM." >&2
+  # The trap this gate exists for. verl computes max_token_len = max_token_len_per_gpu *
+  # sp_size, so if the budget was NOT divided, every GPU still holds max_seq_len tokens and
+  # SP buys exactly nothing while costing: an all-to-all per full-attention layer, FLA
+  # cp_context recurrent-state passing plus a conv1d halo exchange per gated-delta-net
+  # layer, and -- because this config has a vision_config, so verl pads but does NOT slice
+  # input_ids (the slice happens after embed_tokens) -- an inputs_embeds tensor SP times
+  # larger, twice over, since verl adds `0.0 * image_embeds.mean()` to keep the ViT in the
+  # graph. At 27B/SP=8 that last term alone is ~5 GiB/GPU of pure waste.
+  #
+  # The criterion below is exact, not a heuristic. Per-GPU activation memory is
+  # max_token_len_per_gpu tokens at EVERY sp, so the one thing SP buys is the ability to put
+  # that budget BELOW max_seq_len -- which sp=1 can never do, because bin packing cannot
+  # split a single sample. Once max_token_len_per_gpu >= max_seq_len, sp=1 gives the same
+  # packing and the same per-GPU footprint for none of the cost: SP is strictly dominated.
+  if (( MAX_TOKENS_PER_GPU >= ${MAX_SEQ_LEN:-32768} )); then
+    echo "FATAL: ULYSSES_SP=${ULYSSES_SP} with data.max_token_len_per_gpu=${MAX_TOKENS_PER_GPU} >=" >&2
+    echo "       max_seq_len=${MAX_SEQ_LEN:-32768}. Each GPU would hold ${MAX_TOKENS_PER_GPU} tokens of" >&2
+    echo "       activations -- exactly what it holds at ULYSSES_SP=1 -- so sequence" >&2
+    echo "       parallelism buys no memory here and costs the SP collectives, the" >&2
+    echo "       ${ULYSSES_SP}x unsliced inputs_embeds, and an unvalidated GDN context-parallel path." >&2
+    echo "       Fix: let the registry size the budget (do not set MAX_TOKENS_PER_GPU by" >&2
+    echo "       hand), or set ULYSSES_SP=1. ALLOW_OVERSIZED_SP_BUDGET=1 launches anyway." >&2
+    [[ "${ALLOW_OVERSIZED_SP_BUDGET:-0}" == "1" ]] || exit 2
+  fi
 fi
 
 # One array, used twice: validated below, then handed to torchrun. Writing the

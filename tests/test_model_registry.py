@@ -144,6 +144,106 @@ def test_the_same_count_is_fine_once_verl_has_reshaped_it():
     assert out["DP"] == 24, "FSDP has no divisibility constraint left to violate"
 
 
+# --------------------------------------------------------------------------
+# ULYSSES_SP is verl's context parallelism, so it must divide the token budget the
+# same way cp does on Megatron. Getting this wrong is not a mis-sizing, it throws
+# away the entire point of sequence parallelism: verl computes
+# `max_token_len = max_token_len_per_gpu * sp_size`, so an undivided budget leaves
+# each GPU holding a whole sequence's activations at SP=8 exactly as at SP=1, while
+# paying the SP collectives and (on a VLM config, where verl pads but does not slice
+# input_ids) an SP-times-larger inputs_embeds.
+# --------------------------------------------------------------------------
+
+
+def test_ulysses_sp_divides_the_per_gpu_budget():
+    base = resolve(backend="verl")
+    out = resolve(backend="verl", ulysses_sp=8)
+    assert out["MAX_TOKENS_PER_GPU"] * 8 == base["MAX_TOKENS_PER_GPU"], (
+        f"SP=8 must divide the budget: got {out['MAX_TOKENS_PER_GPU']} against a "
+        f"SP=1 budget of {base['MAX_TOKENS_PER_GPU']}"
+    )
+    assert out["MAX_TOKENS_PER_GPU"] == 4096
+    assert out["ULYSSES_SP_USED"] == 8
+
+
+def test_the_group_budget_still_holds_the_longest_sequence():
+    # The invariant that keeps the division honest. One sample cannot be split by bin
+    # packing, so max_token_len_per_gpu * sp must stay >= max_seq_len at every sp.
+    for sp in (1, 2, 4, 8, 16, 32):
+        out = resolve(backend="verl", ulysses_sp=sp, gpus=32)
+        assert out["MAX_TOKENS_PER_GPU"] * sp >= 32768, (
+            f"sp={sp} leaves a group budget of {out['MAX_TOKENS_PER_GPU'] * sp} < 32768, so "
+            f"the longest sequence cannot be placed"
+        )
+
+
+def test_the_registry_does_not_export_the_input_name():
+    # Every launcher does `eval "$(model_registry.py --shell)"`. Exporting ULYSSES_SP
+    # would let the default of 1 overwrite an operator's ULYSSES_SP=8 between the eval
+    # and the line that reads it -- silently reverting the whole point.
+    out = resolve(backend="verl", ulysses_sp=8)
+    assert "ULYSSES_SP" not in out, (
+        "the registry emits ULYSSES_SP, which the launcher's eval would use to clobber "
+        "the operator's own value; it must be echoed under a distinct name"
+    )
+    assert out["ULYSSES_SP_USED"] == 8
+
+
+def test_ulysses_sp_on_the_megatron_path_is_refused():
+    # There cp shards the sequence and the row already sets it; accepting both would
+    # double-divide the budget.
+    try:
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            reg.resolve(key="qwen3.5-27b", mem_class="80GB", gpus=32, gpus_per_node=8,
+                        max_seq_len=32768, backend="megatron", ulysses_sp=8)
+    except SystemExit as exc:
+        assert "only meaningful for --backend verl" in str(exc)
+        return
+    raise AssertionError("--ulysses-sp was accepted on the Megatron path")
+
+
+def test_an_sp_that_does_not_divide_the_world_is_refused():
+    try:
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            reg.resolve(key="qwen3.5-27b", mem_class="80GB", gpus=32, gpus_per_node=8,
+                        max_seq_len=32768, backend="verl", ulysses_sp=5)
+    except SystemExit as exc:
+        assert "does not divide" in str(exc)
+        return
+    raise AssertionError("sp=5 on 32 GPUs was accepted; verl cannot build a (dp, sp) mesh")
+
+
+def test_an_sp_group_that_spans_nodes_is_warned_about_not_rejected():
+    # Slow, not impossible: the all-to-all and the gated-delta-net state exchange then
+    # cross the inter-node fabric on every layer.
+    out = resolve(backend="verl", ulysses_sp=16, gpus=32, gpus_per_node=8)
+    assert out["MAX_TOKENS_PER_GPU"] == 2048
+    assert "spans nodes" in out["_unvalidated"], out["_unvalidated"]
+
+
+def test_sp_one_is_byte_identical_to_not_passing_it():
+    # Every other launcher calls resolve() without the argument; the default must be inert.
+    with_flag = resolve(backend="verl", ulysses_sp=1)
+    without = resolve(backend="verl")
+    with_flag.pop("_stderr"), without.pop("_stderr")
+    assert with_flag == without
+
+
+def test_the_launcher_passes_the_operators_sp_into_the_registry():
+    # The division happens in the registry, so a launcher that omits the flag gets the
+    # undivided budget and the whole fix evaporates.
+    src = (ROOT / "scripts" / "30_run_sft_verl.sh").read_text(encoding="utf-8")
+    assert '--ulysses-sp "${ULYSSES_SP:-1}"' in src, (
+        "30_run_sft_verl.sh resolves the shape without --ulysses-sp, so "
+        "data.max_token_len_per_gpu would stay at max_seq_len while "
+        "engine.ulysses_sequence_parallel_size is set"
+    )
+    assert 'MAX_TOKENS_PER_GPU >= ${MAX_SEQ_LEN:-32768}' in src, (
+        "the launcher no longer refuses ULYSSES_SP>1 with an undivided budget, which is "
+        "the configuration that costs SP's price and buys none of its memory"
+    )
+
+
 def test_the_shell_output_is_evalable_and_quotes_its_values():
     out = resolve(backend="verl")
     buf = io.StringIO()

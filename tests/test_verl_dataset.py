@@ -158,6 +158,31 @@ def test_an_empty_table_is_refused():
     raise AssertionError("an empty dataset was accepted; the run would train on nothing")
 
 
+def test_a_supervised_first_token_is_refused_because_packing_rolls_cyclically():
+    # verl's sft_loss aligns the mask to the log-probs with
+    # `torch.roll(loss_mask_flatten, shifts=-1, dims=0)` over the WHOLE packed
+    # micro-batch, not per sample. So mask[0]==1 on any row means the preceding
+    # document's last hidden state is trained to predict this document's first token,
+    # and the batch's final position is trained on the batch's first. Nothing in the
+    # loss curve shows it, which is why it has to be refused rather than warned about.
+    try:
+        _build([(IDS, [1, 0, 0, 1, 1, 1])], max_length=32)
+    except ValueError as exc:
+        message = str(exc)
+        assert "loss_mask[0]" in message, message
+        assert "cyclically" in message or "rolls" in message, message
+        return
+    raise AssertionError("a supervised first token was accepted; under pad_mode=no_padding "
+                         "that leaks supervision across a packed document boundary")
+
+
+def test_the_ordinary_mask_from_the_exporter_still_constructs():
+    # Guard against the check above being written so tightly that real data trips it:
+    # every row 15_export_pretokenized.py emits opens on <|im_start|> with mask 0.
+    dataset = _build([(IDS, MASK), (IDS, [0, 0, 1, 1, 1, 0])], max_length=32)
+    assert len(dataset) == 2
+
+
 if __name__ == "__main__":
     from run_tests import run_module
 

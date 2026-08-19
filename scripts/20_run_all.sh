@@ -121,8 +121,12 @@ echo "=== planning for $NODES_WANT node(s) x $GPN_WANT GPU(s) = $TOTAL_GPUS GPUs
 # --backend matters: configs/models.json is a Megatron layout, and verl's FSDP engine
 # has no PP or CP. Passing BACKEND through is what stops a verl run from inheriting a
 # divisibility rule it does not obey and a token budget half its sequence length.
+# --ulysses-sp only applies to the verl shape; passing it on the slime/Megatron path is a
+# hard error in the registry (there cp shards the sequence), so gate it on BACKEND.
+SP_REGISTRY_ARGS=()
+[[ "$BACKEND" == "verl" ]] && SP_REGISTRY_ARGS+=(--ulysses-sp "${ULYSSES_SP:-1}")
 if ! REGISTRY_SHELL=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
-          --backend "$BACKEND" \
+          --backend "$BACKEND" "${SP_REGISTRY_ARGS[@]+"${SP_REGISTRY_ARGS[@]}"}" \
           --gpus "$TOTAL_GPUS" --gpus-per-node "$GPN_WANT" \
           --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell); then
   echo "=== the model registry rejected this configuration (its reason is above)." >&2
