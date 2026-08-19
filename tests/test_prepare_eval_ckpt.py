@@ -178,9 +178,34 @@ def test_the_launcher_restores_the_vision_tower_and_diffs_against_the_base():
     assert "REFUSING: every sampled text tensor is bit-identical to the base" in text, (
         "the launcher no longer checks that training changed the weights"
     )
-    assert "signature of a partial merge" in text, (
-        "the launcher no longer catches a merge where only some tensors moved"
+
+
+def test_the_diff_gate_separates_bf16_rounding_from_a_partial_merge():
+    """The distinction the gate got wrong the first time it ran for real.
+
+    Training keeps fp32 masters; the merge saves bf16. bf16 has 8 mantissa bits, so at a
+    norm weight's magnitude the spacing is ~2e-3 while 82 steps at lr 3e-6 move it ~6e-5 --
+    it rounds straight back to the base value. Measured on the 4B step-82 checkpoint:
+
+        layers.26.input_layernorm.weight   fp32 |d| 5.77e-05 -> identical after bf16
+        layers.26.mlp.down_proj.weight     fp32 |d| 9.24e-05 -> NOT identical after bf16
+
+    So "some tensors identical" is only an alarm for MULTI-DIM weights. Treating a 1-D norm
+    as evidence of a partial merge refuses a perfectly good checkpoint, which is what it did.
+    """
+    text = LAUNCHER.read_text(encoding="utf-8")
+    assert "still_matrix" in text and "still_flat" in text, (
+        "the gate no longer distinguishes 1-D tensors from matrices, so bf16 rounding on a "
+        "norm weight will be reported as a partial merge again"
     )
+    assert "below bf16 resolution" in text, (
+        "the 1-D case is refused or reported without saying why it is expected"
+    )
+    assert "cannot round back to the base wholesale" in text, (
+        "the matrix case no longer explains why IT is the informative one"
+    )
+    # The sample must actually contain matrices, or the alarm can never fire.
+    assert "spread(matrices, 16)" in text, "the sample no longer guarantees matrix coverage"
 
 
 if __name__ == "__main__":

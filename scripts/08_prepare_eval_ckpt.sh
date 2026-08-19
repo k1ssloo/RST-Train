@@ -161,17 +161,26 @@ elif compgen -G "$CKPT/*.safetensors" > /dev/null; then
 else
   echo "==> merging FSDP shards -> $MERGED"
   rm -rf "$MERGED"; mkdir -p "$MERGED"
-  # verl renamed this CLI: 0.9.x takes a `merge` subcommand, older builds do not.
+  # Three attempts, cheapest first. verl renamed this CLI (0.9.x takes a `merge`
+  # subcommand, older builds do not), and separately its merger reads the shard layout off
+  # a PICKLED DeviceMesh, which an unrelated torch cannot always reconstruct -- see
+  # verl_backend/fsdp_merge_compat.py. The fallback replaces one method and calls verl's
+  # own merge, so it is not a second implementation of the format.
   if ! python -m verl.model_merger merge --backend fsdp \
          --local_dir "$CKPT" --target_dir "$MERGED"; then
     echo "  'merge' subcommand failed; trying the older CLI without it" >&2
-    python -m verl.model_merger --backend fsdp \
-      --local_dir "$CKPT" --target_dir "$MERGED" || {
-        echo "FATAL: both verl.model_merger spellings failed. The shards are present (the" >&2
-        echo "       gate above checked), so this is verl-side. Check that this env's verl" >&2
-        echo "       matches the one that WROTE the checkpoint -- the shard format is not" >&2
-        echo "       guaranteed across versions." >&2
-        exit 2; }
+    if ! python -m verl.model_merger --backend fsdp \
+           --local_dir "$CKPT" --target_dir "$MERGED"; then
+      echo "  both verl CLIs failed; retrying with the pickled-DeviceMesh workaround" >&2
+      python verl_backend/fsdp_merge_compat.py \
+        --local_dir "$CKPT" --target_dir "$MERGED" || {
+          echo "FATAL: the merge failed three ways. The shards are present (the gate above" >&2
+          echo "       checked), so this is not a download problem." >&2
+          echo "       If the last error mentions _MeshLayout / device_mesh, the checkpoint" >&2
+          echo "       was pickled by a torch this one cannot read and the workaround did" >&2
+          echo "       not cover it; merge on the cluster that wrote it instead." >&2
+          exit 2; }
+    fi
   fi
 fi
 
@@ -249,36 +258,71 @@ def load(name: str, mapping: dict[str, Path]) -> torch.Tensor:
         return handle.get_tensor(name).float()
 
 
-# Spread the sample across the depth: a merge that dropped one FSDP unit changes some
-# layers and not others, which a sample from the first shard alone would miss.
-sample = text[:: max(1, len(text) // 24)][:24]
-moved, still = [], []
+# Sample 1-D and multi-dim tensors SEPARATELY, because only one of the two can carry the
+# alarm and a naive stride can miss the matrices entirely. Spread each across the depth: a
+# merge that dropped an FSDP unit changes some layers and not others.
+def spread(names: list[str], count: int) -> list[str]:
+    return names[:: max(1, len(names) // count)][:count]
+
+
+def shape_of(name: str, mapping: dict[str, Path]) -> tuple[int, ...]:
+    with safe_open(mapping[name], framework="pt") as handle:
+        return tuple(handle.get_slice(name).get_shape())
+
+
+flat = [k for k in text if len(shape_of(k, tmap)) < 2]
+matrices = [k for k in text if len(shape_of(k, tmap)) >= 2]
+sample = spread(matrices, 16) + spread(flat, 8)
+if not matrices:
+    sys.exit(f"no multi-dimensional text weights found in {trained}; without a projection "
+             f"matrix to compare, this check cannot distinguish training from rounding.")
+
+moved, still_flat, still_matrix = [], [], []
 for name in sample:
     t, b = load(name, tmap), load(name, bmap)
     if t.shape != b.shape:
         continue
     denom = b.norm().item() or 1.0
     rel = (t - b).norm().item() / denom
-    (still if rel == 0.0 else moved).append((name, rel))
+    if rel != 0.0:
+        moved.append((name, rel))
+    elif t.dim() < 2:
+        still_flat.append(name)
+    else:
+        still_matrix.append(name)
 
-print(f"[diff] {len(moved)}/{len(moved) + len(still)} sampled text tensors differ from base")
+print(f"[diff] {len(moved)}/{len(sample)} sampled text tensors differ from base "
+      f"({len(matrices)} matrices / {len(flat)} 1-D available)")
 if moved:
     rels = sorted(r for _, r in moved)
     print(f"[diff] relative L2 change: min {rels[0]:.2e}  median {rels[len(rels) // 2]:.2e}  "
           f"max {rels[-1]:.2e}")
-if still:
-    print(f"[diff] IDENTICAL to base: {[n for n, _ in still][:6]}")
+
+# A 1-D norm going bit-identical is EXPECTED and not evidence of anything. Training keeps
+# fp32 masters while the merge saves bf16, and bf16 has 8 mantissa bits: at magnitude ~0.33
+# the spacing is ~2e-3, so the ~6e-5 that 82 steps at lr 3e-6 moves a norm weight rounds
+# straight back to the base value. Measured on this very checkpoint:
+#   layers.26.input_layernorm.weight  fp32 |delta| max 5.77e-05  -> identical after bf16
+#   layers.26.mlp.down_proj.weight    fp32 |delta| max 9.24e-05  -> NOT identical after bf16
+# The matrices are the informative ones: a [d, d] projection has enough elements far from a
+# bf16 tie boundary that some always move.
+if still_flat:
+    print(f"[diff] {len(still_flat)} 1-D tensor(s) identical to base, e.g. "
+          f"{still_flat[:3]} -- expected: an fp32 update of ~1e-5 is below bf16 resolution "
+          f"at these magnitudes, so it rounds away when the merge saves bf16. Not a merge "
+          f"fault; the fp32 master weights did move.")
 
 if not moved:
     sys.exit("REFUSING: every sampled text tensor is bit-identical to the base model. The "
              "merge produced the base weights, so eval would measure the base model under "
              "the trained model's name. Check that --ckpt is the step you meant and that "
              "the merge read all shards.")
-if still:
-    sys.exit(f"REFUSING: {len(still)} of {len(sample)} sampled text tensors are identical to "
-             f"the base while others moved. That is the signature of a partial merge (one "
-             f"FSDP unit's shards missing or unread), not of training. Re-merge from a "
-             f"complete shard set.")
+if still_matrix:
+    sys.exit(f"REFUSING: {len(still_matrix)} multi-dimensional text weight(s) are "
+             f"bit-identical to the base while others moved, e.g. {still_matrix[:4]}. Unlike "
+             f"a 1-D norm, a projection matrix cannot round back to the base wholesale, so "
+             f"this is a partial merge (an FSDP unit's shards missing or unread) rather than "
+             f"a precision effect. Re-merge from a complete shard set.")
 
 if vision:
     name = vision[0]
