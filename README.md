@@ -91,6 +91,7 @@ scripts/
   02_download.sh               model + datasets, sha256-verified against the manifests
   03_build_sft_data.py         327,189 trajectories → slime `messages` parquet
   03b_validate_sft_data.py     ports slime's qwen3_5 mask; asserts the training target
+  03d_build_openthoughts_sft.py  OpenThoughts-Agent-v1 → this format, via the same normalizer
   04_convert_ckpt.sh           HF ↔ Megatron torch_dist
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
@@ -99,6 +100,7 @@ scripts/
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
+  13c_upload_openthoughts_hf.py  publish the OpenThoughts build; gates the card on manifests
   14_make_report.py            markdown report + mechanical anomaly checks
   20_run_all.sh                one command: preflight -> ... -> train -> eval -> report
   15_export_pretokenized.py    bake the verified mask into input_ids+loss_mask
@@ -124,6 +126,7 @@ data/
   rl-sweet/                    5,140 materialized RL tasks (pass-rate 10-90% band)
   dpo-v2/                      ★ adopted DPO pairs: 2,673 (--per-side 14)
   dpo-v1/                      first DPO build, --per-side 5 → 1,330; kept for the yield table
+  openthoughts-agent-v1/       second SFT source, same format: 14,312 examples
   rst-tasks/                   3.7 GB task release (8 tars)
 probe/                         paper.pdf + the upstream sources I read
 .venv/                         local CPU-only env for the data pipeline
@@ -138,6 +141,7 @@ The derived datasets are published:
 | [`NiuNiu0110/RST-SFT-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-SFT-Qwen3.5-27B) | configs `cap10` (10,778 ex), `cap8` (8,886, ablation), `cap10_pretokenized` (`input_ids`+`loss_mask`) |
 | [`NiuNiu0110/RST-DPO-Qwen3.5-27B`](https://huggingface.co/datasets/NiuNiu0110/RST-DPO-Qwen3.5-27B) | config `v2`: 2,673 pre-tokenized preference pairs (2,448 train / 225 holdout), 48 MB |
 | `NiuNiu0110/RST-RL-Taskset` (private) | GRPO task selection metadata, 5,140 `sweet`-tier tasks |
+| [`NiuNiu0110/OpenThoughts-Agent-v1-SFT-terminus`](https://huggingface.co/datasets/NiuNiu0110/OpenThoughts-Agent-v1-SFT-terminus) | configs `default` (14,312 ex) and `pretokenized`; a second source in **this same format**, mixable row-for-row with `cap10` |
 
 ```python
 from datasets import load_dataset
@@ -186,6 +190,59 @@ rebuild now defaults to `--holdout-mode group`, which puts no `task_group_id` in
 splits. `manifest.json` records `holdout_mode` either way; quote it next to any holdout
 number.
 
+## A second SFT source in the same format
+
+`open-thoughts/OpenThoughts-Agent-v1-SFT` is already the same agent contract —
+`terminus-2`, the same `{analysis, plan, commands}` assistant JSON, the same
+`New Terminal Output:` observations. So `03d_build_openthoughts_sft.py` is a
+*converter*, not another builder: it puts those turns through the **same**
+`normalize_assistant` (loaded by path out of `03_build_sft_data.py`, never
+reimplemented) and the same chat-template contract gate, so one canonical form and
+one mask cover both datasets and they concatenate safely.
+
+```bash
+curl -L -o data/openthoughts-agent-v1/source-train.parquet \
+  https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-SFT/resolve/main/data/train-00000-of-00001.parquet
+python scripts/03d_build_openthoughts_sft.py \
+  --source data/openthoughts-agent-v1/source-train.parquet \
+  --tokenizer data/Qwen3.5-27B-tokenizer --out-dir data/openthoughts-agent-v1
+```
+
+15,209 rows → 14,372 reconstructed (837 dropped: 645 unparseable, 192 keyless) →
+14,312 after the 32,768-token gate → 14,112 train / 200 holdout, 100.2 M tokens,
+31.16 % trained. Validated: **0 contract failures, 0 user-turn leakage.**
+
+| | this | `sft-v1-cap10` |
+|---|---|---|
+| examples | 14,312 | 10,778 |
+| assistant turns / row | 7.46 mean | 12.0 mean |
+| tasks | 14,312, **one trajectory each** | 1,329 groups, ~10 each |
+| source models | 1 (`GLM-4.6-AWQ`) | 4 |
+| steps/epoch @ GBS 128 | 110 | 82 |
+
+Complementary rather than redundant: breadth of task here, depth of horizon there.
+Holdout is group-disjoint for free — upstream `task` is unique per row, asserted at
+build time rather than assumed.
+
+Three things this converter does that a naive reformat would not:
+
+1. **A literal newline inside a JSON string is repaired, not dropped.** Agents emit
+   `"analysis": "step one⏎step two"`. Invalid JSON by spec, unambiguous in meaning,
+   so it is re-dumped escaped — every assistant turn in the output parses under
+   *strict* `json.loads` (verified: 106,828/106,828).
+2. **A stale warning preamble is stripped.** When a turn is renormalized, the next
+   observation opens `Previous response had warnings: - Extra text detected before
+   JSON object` — a complaint about an error no longer in the data. 572 repaired.
+   Kept whenever the previous turn was already clean.
+3. **A failing turn drops the whole trajectory.** Truncating at the last good turn
+   was measured and rejected: median salvageable fraction 0.15, and 323 of the 837
+   fail on the *first* assistant turn.
+
+Both fixes in (1) live in the shared normalizer, so they apply to the RST builder
+too. `data/sft-v1-cap10/` predates them — all 126,630 of its assistant turns are
+byte-identical under the current code, so it is not wrong, but a rebuild would
+recover ~492 turns it dropped.
+
 ## Local quick start (no cluster)
 
 ```bash
@@ -200,7 +257,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 66 tests, ~1 s (10 of them skip without torch)
+python -m pytest tests/ -q     # 94 tests, ~1 s (10 of them skip without torch)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -214,6 +271,8 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_launcher_memory_flags.py` | that `30_run_sft_verl.sh` still passes verl's own fused-CE switch (`model.use_fused_kernels` + `impl_backend=torch`) *inside* the torchrun invocation, keeps `use_liger` for swiglu/rms_norm without relying on it for the cross-entropy, gates on the config keys existing before launching 32 processes, names the log line that proves the kernel was used, and — the OOM that no data change fixes — computes the 16 B/param static footprint and refuses a launch whose rendezvous would silently make each node its own `world_size=8` job |
 | `tests/test_launcher_correctness_gates.py` | the gates that protect *correctness*, not memory: FLA's real `chunk_gated_delta_rule` (the PyPI wheel ships no `fla/ops`, and the pure-torch fallback silently drops `cu_seqlens`, so packed documents would share one recurrent state), the `transformers>=5.11,<5.15` window checked by looking for the attribute verl calls rather than by version string, `flash_attn` being mandatory whenever `use_remove_padding=True`, and the SP note saying what SP *cannot* fix |
 | `tests/test_model_registry.py` | `--backend verl` reshapes the Megatron row before validating it — TP/PP/CP pinned to 1 and CP folded into `max_tokens_per_gpu`, announced not silent, `slime` still shaped like Megatron, `tp*pp*cp*dp == world`, an undividable GPU count rejected, and the 27B-on-8-GPUs case warned about (it passes every shape assert and then OOMs) |
+| `tests/test_assistant_normalization.py` | `normalize_assistant` — the single canonical form every dataset here shares. Two cases are regressions from real data: a **literal newline inside a JSON string** is repaired (invalid by spec, unambiguous in meaning) and `find . -exec ls {} \;` in a prose preamble no longer **balances as `{}` and masks the real response two lines down**. The boundary is also pinned: an unescaped inner quote stays a drop, because guessing where the string ends invents training content |
+| `tests/test_openthoughts_convert.py` | the upstream→ours mapping in `03d_build_openthoughts_sft.py`, where the shapes are so close that the dangerous failures are quiet: a `system` turn shifting the rendered prefix (refused, not folded in), a trailing user turn with nothing to predict, one bad turn dropping the whole trajectory rather than being skipped, and the stale `Previous response had warnings:` preamble being stripped **only** when the turn it complains about was actually renormalized |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

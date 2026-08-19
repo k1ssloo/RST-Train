@@ -50,11 +50,8 @@ _WARNING_PREAMBLE = re.compile(
 _REQUIRED_KEYS = ("analysis", "plan", "commands")
 
 
-def _balanced_json_object(text: str) -> str | None:
-    """Return the first brace-balanced JSON object in ``text``, honoring strings."""
-    start = text.find("{")
-    if start < 0:
-        return None
+def _balance_from(text: str, start: int) -> str | None:
+    """Return the brace-balanced object starting at ``text[start] == '{'``, or None."""
     depth = 0
     in_string = False
     escaped = False
@@ -79,34 +76,76 @@ def _balanced_json_object(text: str) -> str | None:
     return None
 
 
+def _balanced_json_objects(text: str) -> list[str]:
+    """Every brace-balanced object in ``text``, outermost-first, left to right.
+
+    Plural on purpose. The first ``{`` in an agent turn is very often not the
+    response: ``find . -exec ls -la {} \\;`` inside a prose preamble balances as the
+    empty object, and returning only that made a perfectly good response two lines
+    below it look like it was missing every required key.
+    """
+    out: list[str] = []
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start < 0:
+            return out
+        obj = _balance_from(text, start)
+        if obj is None:
+            # Unbalanced from here (truncated output); nothing later can balance either.
+            return out
+        out.append(obj)
+        index = start + len(obj)  # nested objects are inside this one, not candidates
+
+
+def _balanced_json_object(text: str) -> str | None:
+    """The first brace-balanced JSON object in ``text``. Kept for callers that want one."""
+    found = _balanced_json_objects(text)
+    return found[0] if found else None
+
+
 def normalize_assistant(raw: str) -> tuple[str | None, bool, str]:
-    """Return ``(canonical_json, was_rewritten, reason)`` for one agent output."""
+    """Return ``(canonical_json, was_rewritten, reason)`` for one agent output.
+
+    Two things here are deliberate and were both once wrong:
+
+    ``strict=False``
+        Agents emit literal newlines inside JSON string values (``"analysis": "step
+        one\\nstep two"`` with a real newline). That is invalid JSON by spec and
+        ``json.loads`` rejects it as an "Invalid control character", but the meaning
+        is unambiguous and re-dumping escapes it properly -- so this is a repair, and
+        the turn is reported as rewritten.
+
+    every candidate is tried
+        A candidate that parses but lacks the required keys is a *reason to keep
+        looking*, not a verdict. Returning on the first one let a ``{}`` from a shell
+        command in a prose preamble mask the real response.
+    """
     stripped = raw.strip()
     candidates: list[tuple[str, bool]] = []
     if stripped:
         candidates.append((stripped, False))
-    fenced = _FENCE_BLOCK.search(raw)
-    if fenced:
-        candidates.append((fenced.group(1), True))
-    balanced = _balanced_json_object(raw)
-    if balanced:
-        candidates.append((balanced, True))
+    candidates.extend((match.group(1), True) for match in _FENCE_BLOCK.finditer(raw))
+    candidates.extend((obj, True) for obj in _balanced_json_objects(raw))
 
+    reason = "unparseable"
     for text, rewritten in candidates:
         try:
-            obj = json.loads(text)
+            obj = json.loads(text, strict=False)
         except (json.JSONDecodeError, ValueError):
             continue
         if not isinstance(obj, dict):
             continue
         if not all(key in obj for key in _REQUIRED_KEYS):
-            return None, False, "missing_required_keys"
+            reason = "missing_required_keys"
+            continue
         if not isinstance(obj.get("commands"), list):
-            return None, False, "commands_not_list"
+            reason = "commands_not_list"
+            continue
         canonical = json.dumps(obj, indent=2, ensure_ascii=False)
         # Rewritten if we had to extract, or if canonical form differs from raw.
         return canonical, rewritten or canonical != stripped, "ok"
-    return None, False, "unparseable"
+    return None, False, reason
 
 
 def observation_text(step: dict[str, Any]) -> str | None:
