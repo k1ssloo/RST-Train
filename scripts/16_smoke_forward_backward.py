@@ -17,6 +17,14 @@ cluster time is spent. It checks things no unit test can:
      rather than assumed
   6. whether Liger's fused CE actually reduces peak memory on this model
 
+WHAT `--liger` DOES **NOT** TELL YOU: it patches Liger into a plain HF model, so it
+measures *Liger's* fused linear cross-entropy. verl's FSDP engine applies Liger with
+`fused_linear_cross_entropy=False` hardcoded ("conflicts with verl's forward
+patching"), so this column proves how big the logit term is and that a fused CE
+removes it -- it does not prove that `model.use_liger=True` removes it under verl.
+On the verl path the switch is `model.use_fused_kernels=True` plus
+`model.fused_kernel_options.impl_backend=torch`, which `30_run_sft_verl.sh` sets.
+
 Exit code is nonzero if any check fails, so it can gate a pipeline.
 """
 

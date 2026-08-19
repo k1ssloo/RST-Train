@@ -86,12 +86,48 @@ verl's FSDP engine shards parameters, not the sequence. One GPU must hold a whol
 | logits | **~29.9 GB measured** (the loss upcasts to fp32; independent of model size) |
 | working set | ~2 GB |
 
-So `model.use_liger=True` is load-bearing, not an optimization: Liger-Kernel ships
-`qwen3_5.py` / `qwen3_5_moe.py` with a fused linear cross-entropy that chunks over
-the sequence and never materializes full logits. With it, ~37 GB/GPU → comfortable
-on 80 GB. Without it you OOM. On 40 GB cards this does not fit; use optimizer CPU
-offload and/or 16 K sequences, and say so in the report because it changes what the
-run means.
+So a fused linear cross-entropy — one that chunks over the sequence and never
+materializes full logits — is load-bearing, not an optimization. With one, ~37 GB/GPU
+→ comfortable on 80 GB. Without one you OOM. On 40 GB cards this does not fit; use
+optimizer CPU offload and/or 16 K sequences, and say so in the report because it
+changes what the run means.
+
+### On the verl path, `model.use_liger=True` is NOT that fused CE
+
+Stated separately because it cost a run. Liger-Kernel does ship `qwen3_5.py` /
+`qwen3_5_moe.py` with an FLCE, and Liger's own default for that kernel is on — but
+verl's FSDP engine applies Liger with the flag forced off:
+
+```python
+# verl/workers/engine/fsdp/transformer_impl.py
+# Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with verl's forward patching)
+_apply_liger_kernel_to_instance(model=module, fused_linear_cross_entropy=False, swiglu=True)
+```
+
+So `use_liger` buys swiglu + rms_norm only, and the run says so in one line — this is
+what to grep for in a suspicious run:
+
+```
+Applying Liger kernels to model instance with model type: qwen3_5 with kwargs:
+{'fused_linear_cross_entropy': False, 'swiglu': True}
+```
+
+verl fuses the CE through its own switch instead:
+
+| flag | effect |
+|---|---|
+| `model.use_fused_kernels=True` | patch the model's `forward` at all |
+| `model.fused_kernel_options.impl_backend=torch` | `verl/models/transformers/qwen3_5.py::forward_with_torch_backend` — `FusedLinearForPPO`, chunked |
+| `…=triton` | `forward_with_triton_backend` — a triton `linear_cross_entropy`; faster, not exercised on SM80 here |
+
+Both return `log_probs`, and `verl.workers.utils.losses.sft_loss` reads
+`model_output["log_probs"]`, so the loss is the same function either way — only the
+memory differs. With `use_fused_kernels=False` the fallback
+`forward_with_normal_backend` computes `self.lm_head(hidden_states)` in full, and
+**the run then reports ~78 GB/GPU of activations beside ~2 GB of sharded parameters,
+which reads like a parallelism misconfiguration and is not one.**
+`scripts/30_run_sft_verl.sh` sets both flags and gates on those config keys existing
+in the installed verl *before* it launches 32 processes (`FUSED_KERNELS=0` opts out).
 
 ### Measured on real data, one GPU, Qwen3.5-0.8B (0.75 B params)
 
@@ -113,12 +149,19 @@ The loss upcasts logits to fp32, and **this term does not depend on model size**
 FSDP shards parameters, not logits. So on the 27.8 B model the same 29.85 GiB
 appears, with *more* activation memory beside it.
 
-That is why `model.use_liger=True` is stated as mandatory rather than recommended.
-It is not a throughput optimization; without it a 32 K sequence does not fit on an
-80 GB card even for a 0.75 B model.
+That is why a fused CE is stated as mandatory rather than recommended. It is not a
+throughput optimization; without one a 32 K sequence does not fit on an 80 GB card
+even for a 0.75 B model.
 
 Liger's loss also matches the unfused loss where both run (0.4505 vs 0.4495 at 4 K;
 0.3745 vs 0.3742 at 16 K), so the saving costs no accuracy.
+
+One caveat on reading that table: `16_smoke_forward_backward.py` patches Liger into a
+plain HF model, so the "Liger fused CE" column measures *Liger's* FLCE. verl disables
+exactly that kernel (above) and substitutes its own, so the column proves the size of
+the logit term and that a fused CE removes it — it does not prove that
+`model.use_liger=True` removes it under verl. Only `model.use_fused_kernels=True`
+does that on the verl path.
 
 `fla` is *not* required on the FSDP path: transformers' qwen3_5 declares
 `@use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")`, so there

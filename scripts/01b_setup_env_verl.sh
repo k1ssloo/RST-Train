@@ -104,9 +104,12 @@ pip install --extra-index-url "$TORCH_INDEX" \
             "transformers>=5.15.0" "tokenizers>=0.22" accelerate datasets \
             pyarrow pandas hf_transfer "huggingface_hub[hf_xet]" wandb jinja2
 
-# Liger fused cross-entropy. NOT optional on this model: vocab is 248,320, so
-# materialized logits for a 32K sequence are ~16.3 GiB bf16 (~32.6 GiB if the loss
-# upcasts). Liger ships qwen3_5.py / qwen3_5_moe.py.
+# Liger, for swiglu + rms_norm. It also ships a qwen3_5 fused cross-entropy, but that
+# is NOT what fuses the CE under verl's SFT engine -- verl applies Liger with
+# fused_linear_cross_entropy=False hardcoded and fuses the CE itself through
+# model.use_fused_kernels (see 30_run_sft_verl.sh and BACKENDS.md). A fused CE is still
+# mandatory: vocab is 248,320, so materialized logits for a 32K sequence are ~16.3 GiB
+# bf16 (~32.6 GiB once the loss upcasts).
 pip install --extra-index-url "$TORCH_INDEX" "liger-kernel>=0.6"
 
 # Guard: if anything above replaced torch, stop now instead of debugging it later.
@@ -126,8 +129,9 @@ import importlib.util as u, sys
 missing = [m for m in ("liger_kernel.transformers.model.qwen3_5",) if u.find_spec(m) is None]
 print("[verify] liger qwen3_5 kernel:", "MISSING" if missing else "present")
 if missing:
-    sys.exit("liger-kernel lacks a qwen3_5 kernel. Upgrade it; without a fused CE this "
-             "model's 248,320-row logits will not fit at 32K.")
+    sys.exit("liger-kernel lacks a qwen3_5 kernel, so verl will not get swiglu/rms_norm "
+             "for this architecture. Upgrade it. (The fused cross-entropy itself comes "
+             "from verl's model.use_fused_kernels, not from this kernel.)")
 PY
 
 # ---- 4. attention / linear-attention kernels (optional, sm-dependent) -------

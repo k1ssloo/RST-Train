@@ -194,8 +194,12 @@ worse than no run at all. If you believe one is genuinely wrong, say so and wait
   on terminal output), or recomputing the mask with another implementation
 - the data gate in `20_run_all.sh` (contract failures / user-turn leakage == 0)
 - `verl`'s `ignore_input_ids_mismatch: True` — it silences the check, not the bug
-- `model.use_liger=True`: with a 248,320-row vocab the logits alone are 16–33 GB at 32K.
-  This is what makes the run fit, not an optimization
+- `model.use_fused_kernels=True` + `model.fused_kernel_options.impl_backend=torch`: with a
+  248,320-row vocab the logits alone are 16–33 GB at 32K, so this is what makes the run
+  fit, not an optimization. **`model.use_liger=True` is not a substitute** — verl's FSDP
+  engine applies Liger with `fused_linear_cross_entropy=False` hardcoded, so use_liger
+  buys swiglu/rms_norm only. A run showing ~78 GB/GPU of activations next to ~2 GB of
+  sharded params has this problem, not a parallelism problem (BACKENDS.md)
 - the registry asserts (`max_tokens_per_gpu × CP ≥ max_seq_len`, `tp·pp·cp·dp == gpus`)
 - infrastructure-vs-model-failure separation in `06_eval.py` / `rl/generate.py`
 - the reference-checkpoint eval, when the model has one

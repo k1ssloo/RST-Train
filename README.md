@@ -199,7 +199,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 37 tests, ~1 s (10 of them skip without torch)
+python -m pytest tests/ -q     # 42 tests, ~1 s (10 of them skip without torch)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -210,6 +210,7 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_loss_mask.py` | the two ports of slime's `qwen3_5` mask (producer in `15_export_pretokenized.py`, independent auditor in `03b_validate_sft_data.py`) stay behaviourally identical, on a synthetic tokenizer and on a per-character one; plus the semantics — no prompt/header/user token is ever a target, the `<think>\n` opener is prompt, `step_loss_mask=0` turns are excluded |
 | `tests/test_harbor_outcomes.py` | the `HARNESS_INFRA` vs `AGENT_BUDGET` split in `rst_common/harbor.py`: marker precedence, all three `result.json` layouts, "unmeasured ≠ reward 0", escalate-only stdout refinement, the proxy policy |
 | `tests/test_verl_dataset.py` | `build_row` padding never becomes a training target, and an oversized row is an error rather than a silent truncation; plus `RSTPretokenizedSFTDataset.__init__` raising on a misaligned mask, an oversized table or an empty one *before* the first forward pass (those need torch) |
+| `tests/test_launcher_memory_flags.py` | that `30_run_sft_verl.sh` still passes verl's own fused-CE switch (`model.use_fused_kernels` + `impl_backend=torch`) *inside* the torchrun invocation, keeps `use_liger` for swiglu/rms_norm without relying on it for the cross-entropy, gates on the config keys existing before launching 32 processes, and names the log line that proves the kernel was used |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

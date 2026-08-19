@@ -17,8 +17,12 @@
 #   sequence, so one GPU must hold a whole 32K sequence's activations. That is
 #   affordable ONLY with a fused/chunked cross-entropy, because this model's vocab
 #   is 248,320: materialized logits for a 32K sequence are 16.3 GiB in bf16 and
-#   ~32.6 GiB if the loss upcasts to fp32 — larger than the activations. Hence
-#   Liger below; it has a qwen3_5 kernel.
+#   ~32.6 GiB if the loss upcasts to fp32 — larger than the activations.
+#
+#   On THIS path the fused CE comes from verl's own fused kernels
+#   (model.use_fused_kernels), NOT from model.use_liger — see the long comment at
+#   the fused-kernel gate below. Getting that wrong is a ~78 GB/GPU mistake that
+#   presents as a parallelism problem.
 #
 # ROUGH BUDGET, 27.8B on 32x80GB, seq 32K, fused CE:
 #   sharded params+grads+Adam  444.8 GB / 32  = 13.9 GB/GPU
@@ -26,6 +30,8 @@
 #   working set                               ~  2   GB/GPU
 #                                             ------------
 #                                             ~ 37   GB/GPU   -> fits 80GB
+#   That budget assumes the CE is fused. Unfused, add ~30 GB of logits on top and
+#   the same run reports ~78 GB/GPU of activations beside ~2 GB of sharded params.
 #   On 40GB cards this does not fit; use optimizer CPU offload and/or drop to
 #   16K sequences, and say so in the report because it changes what the run means.
 set -ex
@@ -122,6 +128,92 @@ if not (0.25 <= frac <= 0.45):
 EOF_PY
 
 
+# ---- the fused cross-entropy switch, and why it is NOT model.use_liger -------
+# model.use_liger=True does NOT give you a fused cross-entropy on this path. verl's
+# FSDP engine applies Liger with fused_linear_cross_entropy HARDCODED to False:
+#
+#   verl/workers/engine/fsdp/transformer_impl.py
+#     # Apply Liger kernel; disable fused_linear_cross_entropy (conflicts with
+#     # verl's forward patching)
+#     _apply_liger_kernel_to_instance(model=module, fused_linear_cross_entropy=False,
+#                                     swiglu=True)
+#
+# so use_liger buys swiglu + rms_norm and nothing else. The log line that tells you
+# this is happening — and it is the one to grep for in a suspicious run — is
+#
+#   Applying Liger kernels to model instance with model type: qwen3_5 with kwargs:
+#   {'fused_linear_cross_entropy': False, 'swiglu': True}
+#
+# With the CE unfused, verl's forward materializes the whole [tokens, 248320] logit
+# tensor: 16.3 GiB in bf16 at 32K, ~30 GiB once the loss upcasts to fp32. On an 80 GB
+# card that shows up as ~78 GB of "activations" sitting next to ~2 GB of sharded
+# parameters, which reads like a parallelism misconfiguration and is not one.
+#
+# The switch that actually fuses it is verl's own:
+#
+#   model.use_fused_kernels=True
+#   model.fused_kernel_options.impl_backend=torch|triton
+#
+# It replaces the model's forward with verl/models/transformers/qwen3_5.py's
+# forward_with_torch_backend (FusedLinearForPPO, chunked over the sequence) or
+# forward_with_triton_backend (a triton linear_cross_entropy). Both return log_probs
+# directly, which is exactly what verl.workers.utils.losses.sft_loss consumes — the
+# loss function is byte-identical either way, only the memory differs. Default
+# `torch`: triton is the faster kernel but has not been exercised on SM80 here.
+#
+# FUSED_KERNELS=0 disables the whole thing for a verl old enough not to have the
+# config keys (hydra aborts on an unknown override). Only do that at a sequence
+# length where unfused logits fit, and say so in the report.
+FUSED_KERNELS="${FUSED_KERNELS:-1}"
+FUSED_KERNEL_BACKEND="${FUSED_KERNEL_BACKEND:-torch}"
+FUSED_ARGS=()
+if [[ "$FUSED_KERNELS" == "1" ]]; then
+  case "$FUSED_KERNEL_BACKEND" in
+    torch|triton) ;;
+    *) echo "FUSED_KERNEL_BACKEND must be 'torch' or 'triton', got '$FUSED_KERNEL_BACKEND'" >&2
+       exit 2 ;;
+  esac
+  # Fail here rather than 32 processes deep. Two distinct failures are possible: a
+  # verl without these config keys (hydra aborts at launch), and a verl without a
+  # qwen3_5 fused forward (it would silently fall back to dense_common's, which
+  # does not know this architecture's packed-sequence arguments).
+  python - <<'EOF_PY' || exit 2
+import importlib.util as u
+import pathlib
+import sys
+
+spec = u.find_spec("verl")
+if spec is None or not spec.origin:
+    sys.exit("verl is not importable; the env is wrong, not the flags.")
+cfg = pathlib.Path(spec.origin).parent / "trainer" / "config" / "model" / "hf_model.yaml"
+if not cfg.is_file():
+    sys.exit(f"REFUSING TO TRAIN: {cfg} is missing, so the fused-kernel config keys "
+             f"cannot be checked. Set FUSED_KERNELS=0 only if unfused logits fit at "
+             f"your sequence length.")
+text = cfg.read_text(encoding="utf-8")
+missing = [key for key in ("use_fused_kernels", "impl_backend") if key not in text]
+if missing:
+    sys.exit(f"REFUSING TO TRAIN: this verl's model config has no {missing} — hydra "
+             f"would abort on the override. Upgrade verl, or set FUSED_KERNELS=0 and "
+             f"drop to a sequence length where a [tokens, 248320] fp32 logit tensor "
+             f"fits (~30 GB at 32K).")
+try:
+    found = u.find_spec("verl.models.transformers.qwen3_5") is not None
+except ImportError as exc:  # a parent package that will not import is the same problem
+    sys.exit(f"REFUSING TO TRAIN: verl.models.transformers does not import ({exc}); the "
+             f"fused-kernel forward cannot be resolved. Fix the env before the launch.")
+if not found:
+    sys.exit("REFUSING TO TRAIN: this verl has no verl/models/transformers/qwen3_5.py, "
+             "so use_fused_kernels would patch in dense_common's forward, which does "
+             "not take this architecture's cu_seqlens arguments. Upgrade verl.")
+print("[gate] verl fused kernels available (model.use_fused_kernels + qwen3_5 forward)")
+EOF_PY
+  FUSED_ARGS+=(model.use_fused_kernels=True
+               "model.fused_kernel_options.impl_backend=$FUSED_KERNEL_BACKEND")
+else
+  echo "WARNING: FUSED_KERNELS=0 — the cross-entropy will materialize full logits." >&2
+fi
+
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
 [[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"
 export WANDB_DIR="${BASE_FOLDER}/wandb"; mkdir -p "$WANDB_DIR"
@@ -147,6 +239,9 @@ fi
 # verl's sequence-parallel knob and is the closest analogue to Megatron CP if you
 # do need to shard the sequence -- it is NOT enabled here because it has not been
 # validated on the gated-delta-net layers either.
+#
+# model.use_liger=True stays: swiglu and rms_norm are still real savings. It is just
+# not what fuses the cross-entropy here -- FUSED_ARGS is.
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \
   --node_rank "${NODE_RANK:-0}" \
@@ -164,6 +259,7 @@ torchrun \
   data.truncation=error \
   model.path="$BASE_FOLDER/$MODEL_DIR_NAME" \
   model.use_liger=True \
+  "${FUSED_ARGS[@]+"${FUSED_ARGS[@]}"}" \
   model.enable_gradient_checkpointing=True \
   engine.strategy=fsdp2 \
   engine.tensor_parallel_size="$TP" \
@@ -185,8 +281,12 @@ torchrun \
 cat <<EOF
 
 Done. Notes for the report:
-  * model.use_liger=True is load-bearing here, not an optimization: without a
-    fused cross-entropy the 248,320-row logits dominate memory at 32K.
+  * The fused cross-entropy is load-bearing, not an optimization: without it the
+    248,320-row logits dominate memory at 32K. On this path it comes from
+    model.use_fused_kernels (backend: ${FUSED_KERNEL_BACKEND:-torch}), NOT from
+    model.use_liger -- verl's FSDP engine disables Liger's FLCE on purpose. Confirm
+    it in the log: "Using Torch backend for fused kernels in ..." must appear, and
+    "Skipping monkey patch ... use_fused_kernels is False" must NOT.
   * engine.strategy=fsdp2 shards parameters only. If you enabled ulysses sequence
     parallelism to fit longer sequences, SAY SO -- it has not been validated on the
     gated-delta-net layers, same open question as Megatron CP.
