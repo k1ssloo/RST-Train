@@ -100,6 +100,9 @@ scripts/
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
   07_restore_vision.py         splice trained text weights back into the ViT/MTP checkpoint
+  08_prepare_eval_ckpt.sh      verl FSDP shards (local or on the Hub) -> a checkpoint eval
+                               can serve: shard-completeness gate, merge, sidecars, vision
+                               restore, base-diff, load+generate smoke test
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)

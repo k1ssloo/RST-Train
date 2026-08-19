@@ -32,7 +32,7 @@ SCRIPT = ROOT / "scripts" / "07_restore_vision.py"
 TINY_SHARD_GB = "0.00000006"
 
 
-def build(root: Path, tensors: dict, shards: int = 2) -> None:
+def build(root: Path, tensors: dict, shards: int = 2, config: dict | None = None) -> None:
     """Write a minimal HF-style safetensors checkpoint (index + config + tokenizer)."""
     root.mkdir(parents=True, exist_ok=True)
     keys = sorted(tensors)
@@ -45,7 +45,7 @@ def build(root: Path, tensors: dict, shards: int = 2) -> None:
             weight_map[key] = name
     (root / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": {"total_size": 0}, "weight_map": weight_map}))
-    (root / "config.json").write_text('{"model_type": "fake"}')
+    (root / "config.json").write_text(json.dumps({"model_type": "fake", **(config or {})}))
     (root / "tokenizer_config.json").write_text("{}")
 
 
@@ -81,10 +81,10 @@ def trained_tensors() -> dict:
 class Case:
     """One temp directory holding `original/`, a trained checkpoint and outputs."""
 
-    def __init__(self) -> None:
+    def __init__(self, original_config: dict | None = None) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        build(self.root / "original", original_tensors(), shards=2)
+        build(self.root / "original", original_tensors(), shards=2, config=original_config)
 
     def run(self, *extra: str, trained: str = "trained", out: str = "out"):
         return subprocess.run(
@@ -166,6 +166,72 @@ def test_a_shape_mismatch_is_refused():
         done = case.run(trained="trained_shape", out="out_shape")
         assert done.returncode != 0
         assert "shape" in (done.stdout + done.stderr).lower()
+    finally:
+        case.close()
+
+
+# --------------------------------------------------------------------------
+# WHY THE mtp.* COPY IS UNCONDITIONAL, AND MUST STAY THAT WAY.
+#
+# Reviewing the 4B SFT checkpoint it looks wrong. Measured:
+#
+#   Qwen/Qwen3.5-4B (base)            mtp_num_hidden_layers: 1  + 15 mtp.* tensors
+#   its verl SFT ckpt huggingface/    mtp_num_hidden_layers: 0  +  0 mtp.* tensors
+#     (the training log's "Loading weights: .../723" is 738 - 15: verl never read them)
+#
+# So it reads as "the script copies a head the trained config says does not exist". It is
+# not, because the non-weight files -- config.json included -- are copied from
+# `--original`, NOT from `--trained`. The shipped config therefore declares 1 MTP layer
+# and 15 mtp.* tensors are written to match it. Consistent.
+#
+# Making the copy conditional on the TRAINED config, which is the obvious "fix", drops
+# those 15 tensors while still shipping the base config that asks for them -- and
+# transformers then silently RANDOM-INITIALIZES the MTP head. These tests pin both halves
+# of the invariant so that edit fails here instead of at serve time.
+# --------------------------------------------------------------------------
+
+
+def test_the_shipped_config_comes_from_the_original_not_the_trained_checkpoint():
+    case = Case(original_config={"mtp_num_hidden_layers": 1, "dtype": "bfloat16"})
+    try:
+        build(case.root / "trained", trained_tensors(), shards=2,
+              config={"mtp_num_hidden_layers": 0, "dtype": "float32"})
+        done = case.run()
+        assert done.returncode == 0, done.stdout + done.stderr
+        config = json.loads((case.root / "out/config.json").read_text())
+        assert config["mtp_num_hidden_layers"] == 1, (
+            "config.json was taken from --trained. verl's exported config drops the MTP "
+            "head and says fp32; the base's is the one the restored weight set matches."
+        )
+        assert config["dtype"] == "bfloat16", (
+            "the shipped config says fp32 while the weights were cast to the original's "
+            "bf16, so every loader would upcast the model for nothing"
+        )
+    finally:
+        case.close()
+
+
+def test_the_mtp_head_is_written_even_when_the_trained_export_dropped_it():
+    """The 4B case. mtp.* is absent from --trained and present in the shipped config, so
+    it must come from --original -- otherwise the head is randomly initialized."""
+    case = Case(original_config={"mtp_num_hidden_layers": 1})
+    try:
+        # trained_tensors() has no mtp.* at all, exactly like the merged verl checkpoint
+        build(case.root / "trained", trained_tensors(), shards=2,
+              config={"mtp_num_hidden_layers": 0})
+        done = case.run()
+        assert done.returncode == 0, done.stdout + done.stderr
+        merged = read_all(case.root / "out")
+        assert "mtp.h" in merged, (
+            "the mtp head was dropped while config.json (from --original) still declares "
+            "mtp_num_hidden_layers=1; transformers would random-initialize it and no eval "
+            "number would look wrong"
+        )
+        assert merged["mtp.h"].eq(9).all(), "the mtp head is not the original's values"
+        assert merged["model.visual.v"].eq(7).all(), "the ViT must be restored too"
+        assert merged["model.language_model.a"].eq(1).all(), "text weights must be trained"
+        manifest = json.loads((case.root / "out/restore_vision_manifest.json").read_text())
+        assert manifest["tensors_copy_always"] == 2, "ViT + mtp head"
     finally:
         case.close()
 
