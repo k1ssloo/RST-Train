@@ -29,7 +29,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
 | FSDP2 unsharded-gradient-accumulation fix (`verl_backend/fsdp2_grad_accum.py`) | ✅ **measured** on one H100: verl's path retains fp32 unsharded gradients covering every parameter, the patched path retains none, gradients differ by 0.000e+00. Projects to 93.8 GiB/GPU freed at shard 32 — ⏳ the 4×8 launch it unblocks has not rerun yet |
-| DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
+| DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end SINGLE-GPU** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result. ⚠️ the multi-rank path was **never executed** and was broken until `BUG.md` BUG-2 — `shard_model` sharded the FSDP2 root while the DPO forward calls `decoder(...)`/`lm_head(...)` directly, so every `torchrun` run died on `aten.embedding` with mixed Tensor/DTensor. Fixed and layout-tested (`tests/test_dpo_sharding.py`); still not run on >1 rank |
 
 ## Supported models
 
@@ -78,6 +78,8 @@ render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged
 ## Layout
 
 ```
+BUG.md                         defects found reviewing the 4x8 OOM: cause, evidence, fix,
+                               what is still open, and what was checked and IS correct
 PLAN.md                        SFT plan; hardware decision tables; risk register
 BACKENDS.md                    slime+Megatron vs verl+FSDP; why others were rejected
 RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates

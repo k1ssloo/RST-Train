@@ -164,13 +164,79 @@ def load_split(pairs: Path, name: str):
     return pd.read_parquet(path)
 
 
+def checkpoint_bytes(model_path: Path) -> int:
+    """On-disk size of the weight shards. Cheap proxy for the parameter count."""
+    return sum(p.stat().st_size for p in Path(model_path).iterdir()
+               if p.suffix in (".safetensors", ".bin"))
+
+
+def check_host_ram(model_path: Path, load_dtype, *, rank: int) -> str | None:
+    """Warn when N local ranks each building a CPU copy will not fit in RAM.
+
+    Returns a warning string, or None when it fits (or cannot be measured -- this must
+    never be the thing that stops a run, only the thing that explains one).
+    """
+    import torch
+
+    local_ranks = int(os.environ.get("LOCAL_WORLD_SIZE", "1") or 1)
+    on_disk = checkpoint_bytes(model_path)
+    if not on_disk:
+        return None
+    # Checkpoints ship in bf16; loading as fp32 doubles it. Ratio, not an absolute size, so
+    # this stays right for a bf16 or an already-fp32 checkpoint.
+    inflate = 2.0 if load_dtype == torch.float32 else 1.0
+    need = on_disk * inflate * local_ranks
+    try:
+        meminfo = dict(
+            (line.split(":")[0], int(line.split()[1]) * 1024)
+            for line in Path("/proc/meminfo").read_text().splitlines() if ":" in line
+        )
+        available = meminfo.get("MemAvailable") or meminfo.get("MemTotal")
+    except (OSError, ValueError, IndexError):
+        return None
+    if not available or need <= 0.9 * available:
+        return None
+    gib = 1 << 30
+    return (
+        f"{local_ranks} local rank(s) x {on_disk / gib:.0f} GiB of weights x {inflate:.0f} "
+        f"(dtype inflation) = {need / gib:.0f} GiB of HOST RAM at load time, but only "
+        f"{available / gib:.0f} GiB is available. from_pretrained builds a full CPU copy per "
+        f"rank before FSDP shards it. If a rank is OOM-killed the survivors hang in NCCL "
+        f"with no memory message at all. Options: fewer ranks per node, --param-dtype bf16 "
+        f"(read the lr note in this file first), or stage the load rank-by-rank."
+    )
+
+
 def shard_model(model, *, param_dtype, world_size: int):
-    """FSDP2: shard every decoder layer, then the root.
+    """FSDP2: shard every decoder layer, then the LM head, then the decoder.
 
     Params stay fp32 and FSDP casts to `param_dtype` for compute. That is not
     fussiness: DPO runs at lr ~5e-7, and a bf16 master weight rounds an update that
     small to exactly zero, so the run would report a falling loss while the weights
     barely moved.
+
+    WHY NOT `fully_shard(model)` AT THE ROOT
+    ----------------------------------------
+    FSDP2 registers its unshard hook on the module handed to `fully_shard`, and
+    `dpo_common.masked_logprob_sum` never calls `model(...)` -- it calls
+    `model.get_decoder()(...)` and then `model.get_output_embeddings()(...)`, because a
+    single `model(input_ids)` would materialize seq x 248,320 logits. Sharding the root
+    therefore leaves the root group's params (`embed_tokens`, the final norm, `lm_head`,
+    the ViT) as sharded DTensors that nothing ever unshards, and the first embedding
+    lookup dies:
+
+        RuntimeError: aten.embedding.default got mixed torch.Tensor and DTensor, need to
+        convert all torch.Tensor to DTensor before calling distributed operators!
+
+    It fails in gate 3's calibration forward, before a single gradient -- i.e. every
+    multi-rank DPO run, at once. It went unnoticed because `world_size == 1` returns
+    above, and the only DPO run so far was one GPU.
+
+    So the two modules that ARE called become the FSDP entry points. `lm_head` gets
+    `reshard_after_forward=False` on purpose: `masked_logprob_sum` calls it once per
+    `--logit-chunk` slice, and resharding would all-gather a 248,320 x hidden matrix per
+    chunk. Keeping it unsharded costs ~2.4 GiB in bf16 at 27B, which is the cheap side of
+    that trade. Raise `--logit-chunk` if you would rather have the memory back.
     """
     import torch
     from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
@@ -182,9 +248,31 @@ def shard_model(model, *, param_dtype, world_size: int):
     layers = getattr(decoder, "layers", None)
     if layers is None:
         raise SystemExit("cannot find decoder.layers to shard; add the right attribute here")
+    head = model.get_output_embeddings()
+    if head is None:
+        raise SystemExit("cannot find get_output_embeddings() to shard; the DPO path applies "
+                         "the LM head by hand and needs it to be an FSDP entry point")
     for layer in layers:
         fully_shard(layer, mp_policy=policy)
-    fully_shard(model, mp_policy=policy)
+    fully_shard(head, mp_policy=policy, reshard_after_forward=False)
+    fully_shard(decoder, mp_policy=policy)
+
+    # Anything outside decoder/lm_head is unreachable from masked_logprob_sum, so it is
+    # deliberately left unsharded and frozen rather than sharded and never unshard-ed. On a
+    # VLM checkpoint that is the ViT: DPO passes no pixel_values, so it would get no
+    # gradient anyway -- but requires_grad_(False) also keeps AdamW from applying weight
+    # decay to it, which it otherwise would to any param that has a zero grad rather than
+    # None. Reported, not silent: an unexpectedly large number here means the sharding
+    # missed something real.
+    sharded = {id(p) for m in (decoder, head) for p in m.parameters()}
+    outside = [(n, p) for n, p in model.named_parameters() if id(p) not in sharded]
+    if outside:
+        for _, param in outside:
+            param.requires_grad_(False)
+        total = sum(p.numel() for _, p in outside)
+        print(f"[dpo] {len(outside)} param tensor(s) / {total / 1e6:.1f}M params live outside "
+              f"decoder+lm_head (e.g. {outside[0][0]}); left unsharded and frozen -- "
+              f"masked_logprob_sum never reaches them.", flush=True)
     return model
 
 
@@ -202,7 +290,12 @@ def save_hf(model, tokenizer_src: Path, out: Path, *, rank: int, world_size: int
         state = model.state_dict()
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
-        state = {k: v.to(torch.bfloat16) for k, v in state.items()}
+        # Only floating-point tensors. A state dict can carry integer or bool buffers
+        # (position/segment ids, cached masks, quantization scales' zero points); casting
+        # those to bf16 silently corrupts them, and the checkpoint then loads and misbehaves
+        # rather than failing.
+        state = {k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
+                 for k, v in state.items()}
         model.save_pretrained(str(out), state_dict=state, safe_serialization=True)
         for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
                      "special_tokens_map.json", "chat_template.jinja", "generation_config.json"):
@@ -305,6 +398,33 @@ def main() -> int:
             "this checkpoint, or point --model-path at the one it scored."
         )
 
+    # Same gate, the other half of the identity. The fingerprint pins the WEIGHTS; these
+    # two pin which pairs were scored and how. --max-seq-len is the load-bearing one: 18
+    # skips pairs over its own limit, so a smaller value here silently trips gate 2 with a
+    # coverage message that points at the reference pass instead of at the mismatch, and a
+    # larger one makes gate 2 fail on pairs that were never meant to be scored.
+    # --logit-chunk only regroups an fp32 sum (~1e-8/token), so it is a warning.
+    ref_max_len = {int(m["max_seq_len"]) for m in ref_manifests if m.get("max_seq_len")}
+    if ref_max_len and ref_max_len != {args.max_seq_len}:
+        sys.exit(
+            f"GATE 1 FAILED (max_seq_len): the reference was scored with --max-seq-len "
+            f"{sorted(ref_max_len)} but this run passes {args.max_seq_len}. 18 and 19 must "
+            f"skip the same pairs, or the coverage gate below is measuring the difference "
+            f"between two datasets. Re-run with --max-seq-len {sorted(ref_max_len)[0]}, or "
+            f"rescore the reference at {args.max_seq_len}."
+        )
+    ref_chunks = {int(m["logit_chunk"]) for m in ref_manifests if m.get("logit_chunk")}
+    if ref_chunks and ref_chunks != {args.logit_chunk}:
+        runtime_note_logit_chunk = (
+            f"--logit-chunk {args.logit_chunk} differs from the reference's "
+            f"{sorted(ref_chunks)}. The logprob sum is regrouped, so step-0 |pi - ref| will "
+            f"be float noise (~1e-8/token) rather than exactly 0. Harmless; it just means "
+            f"gate 3 cannot report 'exact'."
+        )
+        log0(rank, "WARNING: " + runtime_note_logit_chunk)
+    else:
+        runtime_note_logit_chunk = None
+
     # Length filter BEFORE the coverage gate, and with the same --max-seq-len script
     # 18 was given: scoring a 32k pair the trainer will skip is minutes of reference
     # compute at 27 B scale. The count is logged either way, so the dataset that was
@@ -355,6 +475,8 @@ def main() -> int:
     # a working run. Under FSDP the params are fp32 and compute is bf16 via
     # MixedPrecisionPolicy, so fp32 masters cost nothing in matmul throughput.
     runtime_warnings: list[str] = []
+    if runtime_note_logit_chunk:
+        runtime_warnings.append(runtime_note_logit_chunk)
     if holdout is None or holdout.empty:
         why = ("--pairs is a single file, which is the train split and carries no "
                "group-disjoint holdout" if not args.pairs.is_dir()
@@ -374,6 +496,16 @@ def main() -> int:
             f"all while a few small ones can. A falling loss here is not evidence the "
             f"model trained. Use fp32 masters, or raise the lr past ~1e-5."
         )
+    # HOST memory, not device memory. `from_pretrained` without device_map builds the whole
+    # model on CPU in EVERY rank before FSDP takes its shard, so one node needs
+    # params x bytes x local_ranks of RAM: 27.78B in fp32 x 8 local ranks is 888 GiB, which
+    # the OOM killer answers by SIGKILLing one process and leaving the other 31 ranks to
+    # hang in NCCL until the watchdog fires ~10 minutes later, with no mention of memory
+    # anywhere. Say it here instead, before the first read.
+    host_need = check_host_ram(args.model_path, load_dtype, rank=rank)
+    if host_need:
+        runtime_warnings.append(host_need)
+        log0(rank, "WARNING: " + host_need)
     model, auto_class = load_model(args.model_path, dtype=load_dtype)
     log0(rank, f"[model] {args.model_path} via {auto_class}, params {load_dtype}")
     for line in runtime_warnings:
