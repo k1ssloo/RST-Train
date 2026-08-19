@@ -310,6 +310,73 @@ shape to try. See OPEN-1.
 
 ---
 
+## BUG-11 — the container-free eval crashed, so the finished 4B checkpoint is unmeasured
+
+*eval · high · fixed · **observed in the cluster's own log***
+
+The 4B SFT run completed all 82 steps (loss 0.3167 → 0.2132, no divergence) and its report
+still records the checkpoint as unmeasured: *"NO benchmark produced a score … Not even the
+container-free fallback ran"*. The sandbox being blocked is expected — that is why
+`06b_eval_offline.py` exists. The fallback dying too is not:
+
+```
+File ".../scripts/06b_eval_offline.py", line 243, in score_rows
+RuntimeError: Expected all tensors to be on the same device, but got target is on cuda:7,
+              different from other tensors on cuda:1 (wrapper_CUDA_nll_loss_forward)
+```
+
+`load_model` loads with `device_map="auto"`, so the head does not have to share a device
+with the last decoder block — and when the head is **tied** to the input embedding,
+accelerate keeps it near the *first* device while `hidden` comes off the *last*. Hence
+logits on `cuda:1`, targets on `cuda:7`. The chunked scoring loop is the only place in this
+repo where a tensor built from the *input ids* meets a tensor produced by the *head*, which
+is why nothing else in the run noticed. (The 27B config has `tie_word_embeddings=false`, so
+its head lands wherever accelerate puts it — the hazard is the same, only less certain.)
+
+**Fix:** `gold = targets[block].to(logits.device)`. The gold tensor is `chunk × 8` bytes, so
+it is the cheap side to move, and the `logits.argmax(-1) == gold` comparison one line below
+— which would have raised next — is carried by the same move.
+
+Regression-locked by `tests/test_offline_eval_scoring.py`. A sharded load cannot be
+reproduced on a single-GPU box, so the device-follow is asserted against the source with the
+traceback quoted; the same file checks the chunked arithmetic on CPU against an independent
+full-logits computation (position i is predicted from hidden i−1, position 0 is never a
+target however the mask is set, and `--chunk` must not change the number).
+
+Rerunning it needs the checkpoint only, not a retrain:
+
+```bash
+python scripts/06b_eval_offline.py --model-path $BASE_FOLDER/runs/4b/out-hf-full \
+    --holdout $BASE_FOLDER/runs/4b/sft-v1-cap10/rst_sft_holdout.parquet \
+    --tokenizer <tokenizer> --out $BASE_FOLDER/runs/4b/eval/offline
+```
+
+The report generator's companion complaint — *"loss curve: no loss values scraped from
+logs"* — is separate and not a trainer bug: verl's stdout went to `run_all.log`, not into
+the run directory the report scans. Point `--run-dir` at the directory holding that stdout.
+
+---
+
+## BUG-12 — a missing checkpoint path was reported as a malformed Hub repo id
+
+*eval · low · fixed · **observed in the cluster's own log***
+
+After the 27B training stage failed, `out-hf-full` was never written, and the eval stage
+printed three copies of
+
+```
+AutoModelForCausalLM: OSError: Repo id must be in the form 'repo_name' or
+'namespace/repo_name': '/llm-align/liuchonghan/rst/out-hf-full'
+```
+
+— transformers falling through to the Hub resolver, once per auto class. Read literally it
+accuses the operator of passing a malformed name, and it says nothing about the actual
+state: an absolute path that does not exist. `load_model` now checks that first and says
+so, before importing torch (which cannot make a missing directory exist and costs seconds
+plus a CUDA context).
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound
@@ -347,7 +414,16 @@ static footprint and the whole reason `34_diagnose_oom.py` exists. Keep rank 0's
 
 ### OPEN-5 · check what the cluster can actually pull before telling it to pull
 BUG-1's fix (`1c0c25d`) **is** on `origin/main`. Everything in this file after it — BUG-2
-through BUG-10 — is what has to reach the cluster next.
+through BUG-12 — is what has to reach the cluster next.
+
+The 27B attempt at 2026-08-19 18:24 (+08:00) confirms none of it has arrived. Two
+independent tells in its own `logs/run_all.log`: no `[rst-fsdp2]` line anywhere (so BUG-1 is
+live — 8/8 ranks died at `73.60 GiB` allocated asking for `640 MiB`, inside
+`liger_kernel/ops/swiglu.py::swiglu_forward` during checkpoint recompute), and
+`RST_MAX_TOKENS_PER_GPU=32768` beside `RST_ULYSSES=8`, which the BUG-3 launcher now refuses
+outright. `After FSDP … 3.19 GiB` puts the shard degree at 32, so the topology is right and
+the failure is entirely the retained gradient. `RST_OPTIMIZER_OFFLOAD=1` was set to fight it
+and cannot (BUG-1, BUG-6).
 
 Worth recording because it nearly went into this file as a finding: a `refs/remotes/origin/main`
 that has never been fetched in a given clone is not evidence about the remote. This checkout's

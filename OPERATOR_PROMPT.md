@@ -41,7 +41,7 @@ result layer or the dataset code:
 python tests/run_tests.py       # or: python -m pytest tests/ -q
 ```
 
-107 tests, ~1 s, no GPU / cluster / dataset needed (11 of them need torch and say SKIP
+132 tests, ~1 s, no GPU / cluster / dataset needed (18 of them need torch and say SKIP
 without it — run them again inside the training venv). They pin the loss mask, the
 infra-vs-budget failure split, the padding rules and the two OOM failure modes below —
 the things that break a run silently instead of loudly. A green run says nothing
