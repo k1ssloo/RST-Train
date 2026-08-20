@@ -115,6 +115,31 @@ def test_the_environment_script_pins_the_transformers_window():
     )
 
 
+def test_the_operator_prompt_states_the_same_window_the_scripts_enforce():
+    """The first file the cluster reads must not contradict the code it then runs.
+
+    It said `transformers >= 5.15.0` was a non-negotiable floor, justified by "older
+    versions do not know `qwen3_5` at all" -- which the operator's own notes disprove
+    (their system interpreter runs 5.8.0 and has `qwen3_5` in `CONFIG_MAPPING_NAMES`),
+    and which is backwards: 5.15 is the version that breaks, `01b_setup_env_verl.sh`
+    installs `>=5.11,<5.15`, and `30_run_sft_verl.sh` FATALs above it. An operator who
+    trusts the prompt over the scripts installs the one version that cannot train.
+    """
+    prompt = (ROOT / "OPERATOR_PROMPT.md").read_text(encoding="utf-8")
+    assert "transformers>=5.11,<5.15" in prompt, (
+        "the operator prompt does not state the window the setup script pins; the "
+        "prompt is read first and start from an empty folder means it is read alone"
+    )
+    for claim in (">= 5.15", ">=5.15", "> 5.15"):
+        assert claim not in prompt, (
+            f"the operator prompt still asks for transformers {claim}, the exact "
+            f"version 30_run_sft_verl.sh refuses to start on"
+        )
+    # And the pin the prompt quotes has to be the pin that is installed, character for
+    # character, so a future widening of one side shows up as a failure here.
+    assert '"transformers>=5.11,<5.15"' in SETUP_TEXT
+
+
 def test_the_environment_script_installs_verls_undeclared_runtime_deps():
     for pkg in ("pillow", "uvicorn", "fastapi"):
         assert pkg in SETUP_TEXT, (

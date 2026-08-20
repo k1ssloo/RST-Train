@@ -528,6 +528,46 @@ improvement.
 
 ---
 
+## BUG-16 — the operator prompt demanded the one transformers version that cannot train
+
+**Found in** the cluster's own `notes/DEVIATIONS.md`, uploaded to
+`khazic/rst-qwen3.5-27b-ota-sft`. **Fixed in** `OPERATOR_PROMPT.md`, pinned by
+`tests/test_launcher_correctness_gates.py::test_the_operator_prompt_states_the_same_window_the_scripts_enforce`.
+
+`OPERATOR_PROMPT.md` — the first and, for a start-from-an-empty-folder run, the *only*
+file the cluster LLM reads before touching the scripts — listed under "Hard floors,
+non-negotiable":
+
+> `transformers >= 5.15.0` (older versions do not know `qwen3_5` at all)
+
+Both halves are wrong, and the operator's notes disprove each independently. D5.1: their
+system interpreter runs transformers 5.8.0 and `"qwen3_5" in CONFIG_MAPPING_NAMES` is
+True, so the parenthetical justification is false. D18: 5.15.0 is the version that
+*breaks* — it removed `self.chunk_gated_delta_rule` from `Qwen3_5GatedDeltaNet.__init__`
+in favour of the `kernels` package's `_kernel_funcs` indirection, which verl 0.9.0 reads
+unconditionally (`qwen3_5.py:167`), so the first forward dies with an `AttributeError`
+and installing `kernels` does not restore it.
+
+So our own code had already reversed the prompt without the prompt noticing:
+`01b_setup_env_verl.sh:112` installs `"transformers>=5.11,<5.15"` and
+`30_run_sft_verl.sh:440` FATALs above the window, by probing for the attribute rather
+than parsing a version string. An operator who trusted the prompt over the scripts would
+install 5.15.0, then be refused by the launcher it told them to run — or, worse, satisfy
+the prompt with a stale environment and hit the AttributeError inside torchrun.
+
+**What changed.** The prompt now states the window with its upper bound, names 5.15 as
+the breaking version and why, points at the two scripts that enforce it, and says not to
+widen it to silence a pip resolver warning. The new test asserts the prompt contains the
+exact pin string the setup script installs and contains no `>= 5.15`-shaped claim, so the
+two cannot drift apart again silently. `PLAN.md`'s mentions of 5.15.0 are provenance
+statements about where `models/qwen3_5` lives and stay as they are.
+
+**Class of defect, not a typo.** Every other gate in this repo is enforced by code that
+runs. This one lived only in prose, in the document that overrides everything else by
+being read first, and it survived precisely because nothing compared it to the scripts.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

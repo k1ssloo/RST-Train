@@ -266,7 +266,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 181 tests, ~2 s (those needing torch/numpy say SKIP)
+python -m pytest tests/ -q     # 182 tests, ~2 s (those needing torch/numpy say SKIP)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
