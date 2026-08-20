@@ -444,6 +444,12 @@ LENGTH_NORM_ARG=(--length-normalize)
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
 [[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"
 
+# Tee, so the failure block below can READ what happened instead of only knowing that
+# something did. An NCCL watchdog timeout is ~500 lines of C++ frames whose one
+# diagnostic detail (the per-rank NumelIn) is three screens above the exit status; with
+# the output only streaming to the console there is nothing left to classify.
+# `pipefail` is already set, and tee exits 0, so RC below is still torchrun's status.
+TRAIN_LOG="$BASE_FOLDER/logs/dpo_train.log"
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \
   --node_rank "${NODE_RANK:-0}" \
@@ -461,7 +467,7 @@ torchrun \
   --param-dtype "$PARAM_DTYPE" \
   --logit-chunk "$LOGIT_CHUNK" \
   "${LENGTH_NORM_ARG[@]}" \
-  "$@"
+  "$@" 2>&1 | tee "$TRAIN_LOG"
 RC=$?
 
 if (( RC != 0 )); then
@@ -476,6 +482,9 @@ DPO failed (exit $RC). The gates in 19_train_dpo.py fail loudly on purpose:
                          (mask, tokenizer, dtype). Fix the cause; do not raise the
                          tolerance to get past it.
 EOF
+  # ... and when it is none of those, say so rather than leaving three wrong hypotheses
+  # as the last word. This prints nothing unless the trainer actually timed out in NCCL.
+  rst_explain_nccl_timeout "$TRAIN_LOG"
   exit "$RC"
 fi
 

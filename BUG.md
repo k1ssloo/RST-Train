@@ -428,6 +428,61 @@ the collapsing wait loop does not come back.
 `bash scripts/33_run_dpo.sh` is now the diagnostic rather than a rebuild: it resumes
 every already-scored row and prints the shard and the status.
 
+## BUG-14 — an NCCL watchdog timeout was answered with three hypotheses, all wrong
+*dpo · medium · fixed · **observed in the cluster's own log***
+
+The 4B DPO attempt at `2026-08-20T00:11` got all the way through the gates —
+`reference coverage: 2,673/2,673 pairs over 8 shards`, `[gates] fingerprint ok`,
+`[data] dropping 16 pairs to align with 8 ranks x 4 accum`, `2,432 pairs -> 76 steps` —
+then produced no step at all for ten minutes and died:
+
+```
+[rank1] ... [Rank 1] Watchdog caught collective operation timeout:
+  WorkNCCL(SeqNum=1, OpType=BROADCAST, NumelIn=9687, ...) ran for 600027 milliseconds
+```
+
+with six ranks reporting `SeqNum=1, OpType=BROADCAST` and a **different** `NumelIn`
+each — 9687 / 14042 / 3328 / 5678 / 8365 / 6697 — while ranks 0 and 2 were already at
+`SeqNum=2, OpType=ALLREDUCE` with 15,047,680 and 7,767,040. Then SIGABRT on all eight
+ranks, `ChildFailedError`, `=== FAILED dpo` at 00:24:24. (Its 23:57 predecessor was a
+different failure: a BUG-2 recurrence, `aten.embedding.default got mixed torch.Tensor
+and DTensor`, raised at the cluster's `19_train_dpo.py:428` — a stale checkout without
+our fix, which sits at line 560 here.)
+
+The defect is not the timeout, which is a cluster-side condition; it is that
+`33_run_dpo.sh` responded to it by printing its GATE 1 / GATE 2 / GATE 3 advice —
+fingerprint mismatch, reference coverage, calibration tolerance — **none of which can
+produce a watchdog timeout**, since all three are checked and passed before the first
+collective. Worse, the trainer's output only streamed to the console, so the one
+diagnostic detail in ~500 lines of C++ watchdog frames was not on disk to be read.
+
+Those per-rank sizes are the entire diagnosis, and they read exactly two ways:
+
+- **sizes (or sequence numbers) differ per rank** — the collective's size depends on that
+  rank's own data, so the ranks are not running the same sequence of collectives. A
+  divergence in the trainer (a per-row tensor implicitly replicated as a DTensor, an
+  uneven micro-batch count). Re-running reproduces it; only a code change fixes it.
+- **sizes identical everywhere** — the collective was well formed and one rank never
+  arrived. The host OOM killer first, because `19_train_dpo.py` builds the whole model on
+  CPU in *every* rank before FSDP shards it (params × bytes × local_ranks of RAM per
+  node) and a SIGKILL there leaves the survivors in NCCL with no mention of memory
+  anywhere; then a rank that raised its own traceback; then a short rendezvous.
+
+**What changed.** `33_run_dpo.sh` now tees the trainer to
+`$BASE_FOLDER/logs/dpo_train.log` (`pipefail` is already set and `tee` exits 0, so `RC`
+is still torchrun's status), and its failure block calls `rst_explain_nccl_timeout`
+(`scripts/lib_env.sh`) after the gate advice. That helper prints nothing unless the log
+actually contains a watchdog timeout; when it does, it lists every rank with its own
+collective and size, picks the correct one of the two readings above, surfaces any
+`[rank*]: *Error` that was raised *before* the timeout as the real first failure, and
+states the re-run cost (19 is not resumable, but the reference parquets from 18 are
+kept). Pinned by `tests/test_nccl_timeout_report.py`.
+
+**Not a defect in our sharding.** `shard_model` keeps `embed_tokens` inside the decoder's
+FSDP group, the 9B trains clean with the same script, and this same 4B run completed 76
+steps on a later manual attempt — so the BROADCAST divergence was not reproducible and is
+not attributed to this repo's code.
+
 ---
 
 # Open — not fixed, needs the cluster

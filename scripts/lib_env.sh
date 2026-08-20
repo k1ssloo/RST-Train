@@ -251,6 +251,75 @@ rst_explain_shard_failures() {  # rst_explain_shard_failures <log_prefix> <shard
   done
 }
 
+# Read an NCCL watchdog timeout and say which of its two causes this one is.
+#
+# WHY THIS EXISTS
+#   The 4B DPO attempt on 2026-08-20T00:11 died like this: six ranks reported
+#     [Rank 1] Watchdog caught collective operation timeout:
+#     WorkNCCL(SeqNum=1, OpType=BROADCAST, NumelIn=9687, ...) ran for 600027 ms
+#   with NumelIn 9687 / 14042 / 3328 / 5678 / 8365 / 6697 -- one per rank -- while ranks
+#   0 and 2 were already at SeqNum=2, OpType=ALLREDUCE with 15,047,680 and 7,767,040.
+#   Then all eight took SIGABRT, torchrun raised ChildFailedError, and 33_run_dpo.sh
+#   printed its GATE 1 / GATE 2 / GATE 3 advice -- none of which is the cause. The
+#   signature that IS the cause sits under ~500 lines of C++ watchdog frames.
+#
+#   The sizes are the diagnosis, and there are exactly two readings:
+#     * NumelIn DIFFERS per rank -> the collective's size depends on each rank's own
+#       data, so the ranks are not running the same sequence of collectives. That is a
+#       sharding or control-flow divergence in the trainer (a DTensor arg being
+#       implicitly replicated per row, an uneven micro-batch count). Re-running
+#       reproduces it; only a code change fixes it.
+#     * NumelIn is the SAME everywhere -> the collective was fine and one rank never
+#       arrived. Look for a rank that died with its own traceback, or that the host OOM
+#       killer took: 19_train_dpo.py builds the whole model on CPU in EVERY rank before
+#       FSDP shards it, so one node needs params x bytes x local_ranks of RAM, and a
+#       SIGKILL there leaves the survivors in NCCL until the watchdog fires ten minutes
+#       later with no mention of memory anywhere.
+rst_explain_nccl_timeout() {  # rst_explain_nccl_timeout <captured_trainer_log>
+  local log="${1:-}" seen sizes seqs died
+  [[ -s "$log" ]] || return 0
+  grep -q 'Watchdog caught collective operation timeout' "$log" 2>/dev/null || return 0
+
+  seen="$(sed -nE 's/.*Rank ([0-9]+)\] Watchdog caught.*SeqNum=([0-9]+), OpType=([A-Z]+), NumelIn=([0-9]+).*/\1 \2 \3 \4/p' "$log" | sort -n -u)"
+  echo "" >&2
+  echo "  NCCL WATCHDOG TIMEOUT -- so none of the three gates above is the cause." >&2
+  echo "  A watchdog timeout means a collective was posted and never completed: at least" >&2
+  echo "  one rank did not reach the SAME collective as the others. Who was waiting:" >&2
+  if [[ -z "$seen" ]]; then
+    echo "     (could not parse the WorkNCCL lines; grep the log for 'Watchdog caught')" >&2
+  else
+    while read -r rank seq op numel; do
+      echo "     rank $rank waiting on $op (SeqNum=$seq) of $numel elements" >&2
+    done <<< "$seen"
+  fi
+
+  sizes="$(awk '{print $4}' <<< "$seen" | sort -u | wc -l)"
+  seqs="$(awk '{print $2}' <<< "$seen" | sort -u | wc -l)"
+  if [[ -n "$seen" ]] && { (( sizes > 1 )) || (( seqs > 1 )); }; then
+    echo "  The sizes (or the sequence numbers) DIFFER between ranks, so the ranks are not" >&2
+    echo "  running the same sequence of collectives: the size depends on each rank's own" >&2
+    echo "  data. This is a divergence in the trainer -- a per-row tensor being implicitly" >&2
+    echo "  replicated as a DTensor, or an uneven micro-batch count -- not a memory or" >&2
+    echo "  fabric problem. Re-running reproduces it; only a code change fixes it." >&2
+  elif [[ -n "$seen" ]]; then
+    echo "  Every reporting rank is waiting on the SAME collective, so the collective was" >&2
+    echo "  well formed and one rank never arrived. In order of likelihood:" >&2
+    echo "    1. the host OOM killer took it. 19_train_dpo.py loads the full model on CPU" >&2
+    echo "       in EVERY rank before FSDP shards it (params x bytes x local_ranks of RAM)." >&2
+    echo "       Check 'dmesg -T | tail' and the check_host_ram WARNING earlier in this log." >&2
+    echo "    2. it died with its own traceback -- search this log for '[rank' + 'Error'." >&2
+    echo "    3. it was never started (a torchrun rendezvous that placed fewer ranks)." >&2
+  fi
+
+  # A rank that raised BEFORE the timeout is the real first failure; the watchdog noise
+  # is what happened to the other ranks because of it. Print it if it is there.
+  died="$(grep -m1 -E '^\[rank[0-9]+\]: *[A-Za-z_.]*(Error|Exception)' "$log" 2>/dev/null || true)"
+  [[ -n "$died" ]] && echo "  a rank raised before the timeout, which is the first failure: $died" >&2
+
+  echo "  Note: 19_train_dpo.py is NOT resumable (it restarts from POLICY), but the" >&2
+  echo "  reference parquets from 18 are kept, so a re-run pays only the training time." >&2
+}
+
 # Record how to re-enter the env we are currently inside. Called at the end of a
 # setup script, from within the activated env -- sys.prefix is then the ground truth.
 rst_write_env_stub() {  # rst_write_env_stub <env_name> <out_path>
