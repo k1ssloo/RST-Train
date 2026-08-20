@@ -239,7 +239,10 @@ def score_rows(model, rows: list[tuple[list[int], list[int]]], *, chunk: int,
             for start in range(0, positions.numel(), chunk):
                 block = positions[start : start + chunk]
                 logits = head(hidden[block - 1]).float()
-                gold = targets[block]
+                # `head` and `decoder` can sit on different devices when the model
+                # is sharded across GPUs, so the targets have to follow the logits
+                # rather than the hidden states.
+                gold = targets[block].to(logits.device)
                 row_nll += torch.nn.functional.cross_entropy(
                     logits, gold, reduction="sum").item()
                 row_correct += int((logits.argmax(-1) == gold).sum().item())

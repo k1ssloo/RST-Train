@@ -123,8 +123,36 @@ def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
     from torch.utils.checkpoint import checkpoint
 
     decoder, head = decoder_and_head(model)
-    device = next(model.parameters()).device
-    input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+    param = next(model.parameters())
+    device = getattr(param, "to_local", lambda: param)().device
+
+    def as_operand(tensor):
+        """Give the input the same tensor kind as the parameters.
+
+        This function calls `decoder` and `head` directly rather than the root
+        module, deliberately, so the LM head can be applied in slices instead of
+        materialising seq x vocab logits. Under FSDP2 that also means the root
+        module's pre-forward hook never runs, so its parameters -- the input
+        embedding among them -- are still DTensors at the call, and
+        `aten.embedding` refuses to mix a DTensor weight with a plain tensor
+        input:
+
+            RuntimeError: aten.embedding.default got mixed torch.Tensor and
+            DTensor, need to convert all torch.Tensor to DTensor before calling
+            distributed operators!
+
+        Replicating the input over the parameter's mesh makes both operands
+        DTensors without unsharding the model, which would defeat the point of
+        slicing. A single-process run has no mesh and is returned unchanged.
+        """
+        mesh = getattr(param, "device_mesh", None)
+        if mesh is None:
+            return tensor
+        from torch.distributed.tensor import Replicate, distribute_tensor
+
+        return distribute_tensor(tensor, mesh, [Replicate()] * mesh.ndim)
+
+    input_ids = as_operand(torch.tensor([ids], dtype=torch.long, device=device))
     targets = torch.tensor(ids, dtype=torch.long, device=device)
     positions = supervised_positions(mask, device)
     n = int(positions.numel())
