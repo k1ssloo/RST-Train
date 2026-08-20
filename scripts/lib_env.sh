@@ -211,6 +211,46 @@ EOF
   return 1
 }
 
+# Say WHICH background shard failed, with what status, and what its own log implies.
+#
+# WHY THIS EXISTS
+#   33_run_dpo.sh used to collapse sixteen background reference shards into one bit:
+#     for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+#     ... "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log"
+#   The 27B run on 2026-08-20 failed there, and every one of the sixteen logs it
+#   pointed at ended in "[done] ... rows -> ref_logps_shard<n>.parquet" with a
+#   determinism probe of 0. The message named no shard and no exit status, so the
+#   only evidence left was a glob of files that all look successful -- a dead end.
+#
+#   A non-zero status from a shard whose log ENDS in [done] is a real and distinct
+#   case: the scoring finished and the parquet is on disk, and the status came from
+#   whatever happened after the last flush (interpreter teardown, a CUDA/NCCL
+#   destructor, the job being signalled). It means "re-run me, it is nearly free",
+#   not "the reference pass is broken". An empty log is the opposite case: the
+#   process died before python printed anything.
+rst_explain_shard_failures() {  # rst_explain_shard_failures <log_prefix> <shard>=<code>...
+  local prefix="$1" spec shard code log
+  shift
+  for spec in "$@"; do
+    shard="${spec%%=*}"
+    code="${spec##*=}"
+    log="${prefix}${shard}.log"
+    echo "  shard $shard exited $code   ($log)" >&2
+    if [[ ! -s "$log" ]]; then
+      echo "     its log is EMPTY, so python never printed anything: a missing" >&2
+      echo "     interpreter or script, or the kernel killed it (host-RAM OOM)." >&2
+    elif grep -q '^\[done\]' "$log"; then
+      echo "     but that log ENDS IN [done]: the scoring finished and its parquet is" >&2
+      echo "     on disk, so the failure came AFTER the work (interpreter teardown, a" >&2
+      echo "     CUDA/NCCL destructor, or a signal). Re-running resumes those rows for" >&2
+      echo "     the cost of a directory listing -- do not rebuild the reference pass." >&2
+    else
+      echo "     its log does not reach [done]; last lines:" >&2
+      tail -n 5 "$log" | sed 's/^/     | /' >&2
+    fi
+  done
+}
+
 # Record how to re-enter the env we are currently inside. Called at the end of a
 # setup script, from within the activated env -- sys.prefix is then the ground truth.
 rst_write_env_stub() {  # rst_write_env_stub <env_name> <out_path>

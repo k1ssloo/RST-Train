@@ -41,8 +41,8 @@ result layer or the dataset code:
 python tests/run_tests.py       # or: python -m pytest tests/ -q
 ```
 
-132 tests, ~1 s, no GPU / cluster / dataset needed (18 of them need torch and say SKIP
-without it — run them again inside the training venv). They pin the loss mask, the
+168 tests, ~2 s, no GPU / cluster / dataset needed (some need torch or numpy and say
+SKIP without them — run them again inside the training venv). They pin the loss mask, the
 infra-vs-budget failure split, the padding rules and the two OOM failure modes below —
 the things that break a run silently instead of loudly. A green run says nothing
 about anything needing real weights, a container runtime, or more than one node.

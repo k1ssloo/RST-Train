@@ -303,6 +303,7 @@ mkdir -p "$REF_DIR"
 TOTAL_SHARDS=$(( NNODES * NGPUS ))
 SHARD_BASE=$(( ${NODE_RANK:-0} * NGPUS ))
 pids=()
+shard_ids=()
 for (( i = 0; i < NGPUS; i++ )); do
   shard=$(( SHARD_BASE + i ))
   CUDA_VISIBLE_DEVICES="$i" python scripts/18_dpo_ref_logprobs.py \
@@ -312,11 +313,21 @@ for (( i = 0; i < NGPUS; i++ )); do
     --shard "$shard" --num-shards "$TOTAL_SHARDS" \
     > "$BASE_FOLDER/logs/dpo_ref_shard$shard.log" 2>&1 &
   pids+=("$!")
+  shard_ids+=("$shard")
 done
-rc=0
-for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
-if (( rc != 0 )); then
-  echo "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log" >&2
+# Keep the shard id beside the pid and the exit STATUS beside both. `wait "$pid" ||
+# rc=1` threw away which of the sixteen failed and how, which on 2026-08-20 left the
+# operator with a glob of logs that all ended in [done] and no way to tell which
+# process had returned non-zero.
+failed=()
+for i in "${!pids[@]}"; do
+  code=0
+  wait "${pids[$i]}" || code=$?
+  (( code == 0 )) || failed+=("${shard_ids[$i]}=$code")
+done
+if (( ${#failed[@]} > 0 )); then
+  echo "${#failed[@]} of ${#pids[@]} reference shards on node ${NODE_RANK:-0} failed:" >&2
+  rst_explain_shard_failures "$BASE_FOLDER/logs/dpo_ref_shard" "${failed[@]}"
   echo "18 is resumable -- fix the cause and re-run this script, already-scored rows are kept" >&2
   exit 1
 fi

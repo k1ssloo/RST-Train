@@ -377,6 +377,59 @@ plus a CUDA context).
 
 ---
 
+## BUG-13 — a failed DPO reference shard was reported without saying which one, or how
+
+*dpo · medium · fixed · **observed in the cluster's own log***
+
+The 27B `dpo` stage failed 25 s in with
+
+```
+a reference shard failed; see /llm-align/liuchonghan/rst/logs/dpo_ref_shard*.log
+```
+
+and every one of the sixteen logs that message points at ends in a complete
+
+```
+[done] 153 rows -> .../ref_logps_shard<n>.parquet
+determinism probe: max |delta| = 0 nats
+```
+
+so the evidence the operator is sent to says the work succeeded. The cause is the wait
+loop in `scripts/33_run_dpo.sh`:
+
+```bash
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+```
+
+`rc` is one bit. It keeps neither the shard id nor the exit status, and the pid it did
+have is gone by the time anything is printed — so the failing process cannot be
+identified even in principle, and a status of `137` (signalled / OOM-killed) is
+indistinguishable from `1` (python raised).
+
+That distinction is the whole diagnosis here. A non-zero status from a shard whose log
+ends in `[done]` means the scoring finished, the parquet is on disk, and the status came
+from *after* the last flush — interpreter teardown, a CUDA/NCCL destructor, or a signal.
+That reads "re-run me, it costs a directory listing", because `18_dpo_ref_logprobs.py`
+is idempotent and keeps every scored row. An empty log is the opposite: python never
+printed, so it died before it started. The old message could not tell the operator which
+of those had happened.
+
+The launcher now keeps `shard_ids` beside `pids` and captures each status with
+`wait "${pids[$i]}" || code=$?`, then hands the `<shard>=<code>` list to
+`rst_explain_shard_failures` (`scripts/lib_env.sh`), which names every failed shard with
+its status and reads that shard's own log to say which of the three cases it is —
+including the log tail when the log stops short of `[done]`.
+
+Pinned by `tests/test_dpo_shard_failure_report.py`, including a source assertion that
+the collapsing wait loop does not come back.
+
+**Still open on the cluster side:** *why* those shards returned non-zero after printing
+`[done]` is not known — the old message destroyed the evidence. Re-running
+`bash scripts/33_run_dpo.sh` is now the diagnostic rather than a rebuild: it resumes
+every already-scored row and prints the shard and the status.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound
