@@ -483,6 +483,49 @@ FSDP group, the 9B trains clean with the same script, and this same 4B run compl
 steps on a later manual attempt — so the BROADCAST divergence was not reproducible and is
 not attributed to this repo's code.
 
+## BUG-15 — a DPO run that changed nothing reported an improvement and no warnings
+*dpo · medium · fixed · **observed in both finished runs***
+
+The two DPO runs that reached the end wrote this into
+`dpo/dpo_training_summary.json` and shipped it to the Hub:
+
+| | holdout accuracy | holdout `reward_margin` | `clip_active_fraction` | `warnings` |
+|---|---|---|---|---|
+| 4B | 0.5 → **0.5938** | 6e-05 | 0.0 | `[]` |
+| 9B | 0.5 → **0.5391** | 1e-05 | 0.0 | `[]` |
+
+The accuracy is the number anyone will quote. It is also a **sign test**: `rank_score`
+credits a pair whenever the margin clears `TIE_EPS = 1e-6`. The margin it is testing the
+sign of is `beta × (logp_π − logp_ref)`, and the reference logprobs were scored in bf16
+— good to roughly 1e-3 nats/token, the same figure `how_to_read_this` already quotes for
+the step-0 residual. At `beta 0.1` that puts the arithmetic floor of the whole quantity
+at 1e-4, and both runs came in **below** it. The 9B's `holdout_ties` going 64 → 1 is the
+same fact from the other side: every exact tie was broken, by 1e-05 nats.
+
+The gap is precise, and it was in our own comment. `TIE_EPS`'s note says a trained
+margin is 1e-2..1, "six orders of magnitude away, so this band cannot swallow real
+signal" — true of `TIE_EPS`, but nothing ever looked at the three decades in between,
+where a margin counts as a preference while sitting far below anything that comment
+would call trained. Both runs landed exactly there, and the only existing warning covers
+the *opposite* regime (`clip_active_fraction > 0.9`, i.e. the clip and not `--lr` setting
+the step size), so at `clip 0.0` nothing fired at all.
+
+**What changed.** `dpo_common.noise_floor_warning()` compares the final holdout margin
+against `beta × REF_LOGP_NOISE_NATS` and, when it falls below, appends a warning to
+`runtime_warnings` — so it is both printed and archived in the summary's `warnings`,
+which is the field an empty list let these two runs through. It quotes the accuracy and
+the margin together, the tie collapse, the last training step's margin, and says what to
+do: treat the run as a plumbing success and a training no-op, and raise `--beta`/`--lr`
+or give it more steps or pairs. The floor scales with beta because the reward does; a
+genuinely trained margin, a real negative margin, and a run with no holdout eval all stay
+silent. Pinned by `tests/test_dpo_noise_floor.py` against the two observed summaries.
+
+**Not a numerical bug.** The gates are all exact (`step0_loss` = log 2 to the bit,
+`calibration_passed`, `dtype_match`). The pipeline is correct; at `lr 5e-7`, `beta 0.1`,
+one epoch over 2,432 pairs, length-normalized, it simply does not move the model. That is
+a training-regime decision for the operator to make — the defect was reporting it as an
+improvement.
+
 ---
 
 # Open — not fixed, needs the cluster

@@ -103,6 +103,7 @@ from dpo_common import (  # noqa: E402
     dpo_loss,
     load_model,
     masked_logprob_sum,
+    noise_floor_warning,
     read_ref_logps,
 )
 
@@ -876,6 +877,15 @@ def main() -> int:
                 f"pass --length-normalize (per-token objective, norms drop by ~1e3) or raise "
                 f"--max-grad-norm above the median. Either way, report which one you used."
             )
+        # The opposite regime, and the one the 4B and 9B runs landed in: nothing clipped,
+        # so nothing above fired, and the summary reported a holdout accuracy off a margin
+        # of 1e-05 nats with `warnings: []`. See dpo_common.noise_floor_warning.
+        at_noise = noise_floor_warning(
+            beta=args.beta, baseline_eval=baseline_eval, final_eval=final_eval,
+            last_step=last or None,
+        )
+        if at_noise:
+            runtime_warnings.append(at_noise)
         summary = {
             "what_this_is": "DPO on logged RST trajectories. NOT on-policy RL: it "
                             "reweights behaviour present in the data, which came from "
