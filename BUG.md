@@ -568,6 +568,50 @@ being read first, and it survived precisely because nothing compared it to the s
 
 ---
 
+## BUG-17 — the report could not find the loss curve of any verl run
+
+**Found in** `khazic/rst-qwen3.5-4b-ota-sft/reports/REPORT.md` (4B OTA-SFT, 110 steps,
+finished). **Fixed in** `scripts/14_make_report.py` + `scripts/20_run_all.sh`, pinned by
+`tests/test_report_loss_curve.py`.
+
+Every verl REPORT.md so far, including the one for the only OTA run that finished, carried
+
+> 🟡 WARN | training | loss curve | no loss values scraped from logs; the curve could not
+> be checked. Point `--run-dir` at the directory holding the trainer stdout.
+
+while 110 perfectly scrapeable steps sat in `$BASE_FOLDER/logs/run.log`. So the one check
+that would notice a diverging or NaN loss has never run, on any run, and the report asked
+a human to supply a path the launcher itself had chosen. Three causes, all ours:
+
+1. `20_run_all.sh` passed `--run-dir "$BASE_FOLDER/$RUN_NAME"` — the trainer's **output**
+   directory. Under verl/FSDP that holds `global_step_*/` and `latest_checkpointed_iteration.txt`
+   and nothing else; `parse_training_log`'s `*.log` / `logs/*.log` / `**/run.log` globs
+   correctly found zero files. This was inherited from the slime/Megatron path, where the
+   trainer did write its stdout under the run dir.
+2. The learning-rate pattern matched only `learning_rate`. verl prints `train/lr:2.24e-06`,
+   so `lr` was missing from every scraped step even where the loss was found.
+3. `run.log` is a single appended log for **all** stages. Scraping it whole would have
+   concatenated the SFT curve with the DPO trainer's, whose loss is log 2 to the bit by
+   construction — 0.144 followed by 0.693147, which the "loss decreased" check reads as a
+   run that blew up at the end. Fixing (1) without fixing this would have replaced a
+   missing check with a false one.
+
+**What changed.** `14_make_report.py` takes `--train-log PATH` (repeatable) and
+`--train-stage NAME`; `stage_section()` slices the requested `=== STAGE <name>` block out
+of a `20_run_all.sh` log and returns a log without those markers whole, so slime stdout
+still scrapes. `20_run_all.sh` grew `collect_train_logs`, which passes whichever of
+`$RST_RUN_LOG`, `$BASE_FOLDER/run_all.log`, `$BASE_FOLDER/logs/run.log` exist — the
+operator chooses where the stdout goes (`| tee …`), so the path is discovered rather than
+assumed, and a candidate that does not exist is simply not passed. The SFT report asks for
+the `train` section and the GRPO report for `rl`. Verified against the real 4B log: 110
+steps, loss 0.3019 → 0.1442, `lr` 1e-06 → 3e-07, and DPO's 0.693147 outside the curve.
+
+**Why it stayed invisible.** The WARN was honest and specific, and it named a remedy — so
+it read like a note about someone's incomplete invocation rather than a defect in the
+invocation the launcher writes itself.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

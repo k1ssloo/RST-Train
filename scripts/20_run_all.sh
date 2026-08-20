@@ -35,6 +35,23 @@ mkdir -p "$STAGE_DIR" "$BASE_FOLDER/logs"
 SKIP_STAGES="${SKIP_STAGES:-}"
 FAILED_STAGE=""
 
+# Where this script's own stdout ended up. The operator picks that (`| tee ...`), so the
+# path is not ours to know -- but 14_make_report.py needs it to scrape the loss curve, and
+# the run dir it was being pointed at holds only global_step_*/ under verl/FSDP, which is
+# why every verl report so far said "no loss values scraped from logs". We look for the two
+# names in use (this file's usage line, and the cluster's logs/run.log) and take RST_RUN_LOG
+# for anything else. A path that does not exist is simply not passed.
+collect_train_logs() {
+  TRAIN_LOG_ARGS=()
+  local candidate
+  for candidate in "${RST_RUN_LOG:-}" "$BASE_FOLDER/run_all.log" "$BASE_FOLDER/logs/run.log"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      TRAIN_LOG_ARGS+=(--train-log "$candidate")
+    fi
+  done
+  return 0
+}
+
 stage() {  # stage <name> <command...>
   local name="$1"; shift
   if [[ " $SKIP_STAGES " == *" $name "* ]]; then echo "=== SKIP $name (SKIP_STAGES)"; return 0; fi
@@ -482,9 +499,11 @@ cat > "$BASE_FOLDER/run_config.json" <<EOF_CFG
 }
 EOF_CFG
 
+collect_train_logs
 python scripts/14_make_report.py \
   --model-key "$MODEL_KEY" \
   --run-dir "$BASE_FOLDER/$RUN_NAME" \
+  "${TRAIN_LOG_ARGS[@]}" --train-stage train \
   --run-config "$BASE_FOLDER/run_config.json" \
   --data-manifest "$DATA_DIR/manifest.json" \
   --eval "mine=$BASE_FOLDER/eval/mine/results.json" \
@@ -590,9 +609,11 @@ if [[ "$RUN_RL" == "1" ]]; then
         --n-concurrent "${EVAL_CONCURRENCY:-8}" --out "$BASE_FOLDER/eval/rl"
     }
     stage rl_eval rl_export_eval
+    collect_train_logs
     python scripts/14_make_report.py \
       --model-key "$MODEL_KEY" \
       --run-dir "$BASE_FOLDER/${MODEL_KEY}-rst-grpo-v1" \
+      "${TRAIN_LOG_ARGS[@]}" --train-stage rl \
       --run-config "$BASE_FOLDER/run_config.json" \
       --data-manifest "$DATA_DIR/manifest.json" \
       --eval "mine=$BASE_FOLDER/eval/rl/results.json" \
