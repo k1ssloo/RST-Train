@@ -168,6 +168,18 @@ def estimate_micro_batches(
     budget = max_token_len_per_gpu * ulysses_sp
 
     ordered = sorted(sample_lengths)
+    # Bin packing cannot split one sample, so a sequence longer than the whole group budget
+    # can never be placed -- verl fails inside rearrange_micro_batches, mid-step, after the
+    # weights are loaded. The micro-batch arithmetic below would happily return a number for
+    # such a config (ceil(total/budget) does not care that one item does not fit), so
+    # checking it here is what keeps this function from certifying an impossible launch.
+    if ordered[-1] > budget:
+        raise ValueError(
+            f"the longest sample is {ordered[-1]:,} tokens but a sequence-parallel group's "
+            f"budget is only {budget:,} ({max_token_len_per_gpu:,}/GPU x sp {ulysses_sp}). No "
+            f"packing can place it. Raise max_token_len_per_gpu, raise ulysses_sp, or "
+            f"re-export the data with a smaller --max-seq-len so the drop is counted."
+        )
     mean_len = sum(ordered) / len(ordered)
     typical = math.ceil(samples_per_dp * mean_len / budget)
     worst = math.ceil(sum(ordered[-samples_per_dp:]) / budget)
@@ -302,13 +314,19 @@ def _cli() -> int:
 
     lengths = [int(n) for n in pd.read_parquet(args.lengths, columns=["input_ids"])
                ["input_ids"].map(len)]
-    est = estimate_micro_batches(
-        sample_lengths=lengths,
-        train_batch_size=args.train_batch_size,
-        world_size=args.world_size,
-        ulysses_sp=args.ulysses_sp,
-        max_token_len_per_gpu=args.max_token_len_per_gpu,
-    )
+    try:
+        est = estimate_micro_batches(
+            sample_lengths=lengths,
+            train_batch_size=args.train_batch_size,
+            world_size=args.world_size,
+            ulysses_sp=args.ulysses_sp,
+            max_token_len_per_gpu=args.max_token_len_per_gpu,
+        )
+    except ValueError as exc:
+        # This runs as a launcher gate, where a traceback reads as "the gate is broken"
+        # rather than "the configuration is". Name the configuration.
+        print(f"FATAL: this configuration cannot be placed at all -- {exc}")
+        return 2
     shard = args.shard_degree or args.world_size
     unsharded = unsharded_grad_gib(args.params_b)
     sharded = sharded_grad_gib(args.params_b, shard)

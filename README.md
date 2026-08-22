@@ -29,7 +29,8 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL rollout code (`rl/generate.py`) | ⚠️ written against real slime APIs, **never executed** |
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
 | FSDP2 unsharded-gradient-accumulation fix (`verl_backend/fsdp2_grad_accum.py`) | ✅ **measured** on one H100: verl's path retains fp32 unsharded gradients covering every parameter, the patched path retains none, gradients differ by 0.000e+00. Projects to 93.8 GiB/GPU freed at shard 32 — ⏳ the 4×8 launch it unblocks has not rerun yet |
-| DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result |
+| Container-free offline eval (`06b_eval_offline.py`) | ⚠️ **crashed on the cluster** — `device_map="auto"` + a tied head put logits and targets on different cards, so the 4B run that finished all 82 steps has *no* eval at all (`BUG.md` BUG-11). Fixed, and the chunked scoring arithmetic is now checked against a full-logits computation (`tests/test_offline_eval_scoring.py`); ⏳ not yet rerun on the checkpoint |
+| DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end SINGLE-GPU** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result. ⚠️ the multi-rank path was **never executed** and was broken until `BUG.md` BUG-2 — `shard_model` sharded the FSDP2 root while the DPO forward calls `decoder(...)`/`lm_head(...)` directly, so every `torchrun` run died on `aten.embedding` with mixed Tensor/DTensor. Fixed and layout-tested (`tests/test_dpo_sharding.py`); still not run on >1 rank |
 
 ## Supported models
 
@@ -78,6 +79,8 @@ render, so the published datasets and `--loss-mask-type qwen3_5` apply unchanged
 ## Layout
 
 ```
+BUG.md                         defects found reviewing the 4x8 OOM: cause, evidence, fix,
+                               what is still open, and what was checked and IS correct
 PLAN.md                        SFT plan; hardware decision tables; risk register
 BACKENDS.md                    slime+Megatron vs verl+FSDP; why others were rejected
 RL_PLAN.md                     agentic GRPO: architecture, prerequisites, gates
@@ -97,6 +100,9 @@ scripts/
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
   07_restore_vision.py         splice trained text weights back into the ViT/MTP checkpoint
+  08_prepare_eval_ckpt.sh      verl FSDP shards (local or on the Hub) -> a checkpoint eval
+                               can serve: shard-completeness gate, merge, sidecars, vision
+                               restore, base-diff, load+generate smoke test
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
@@ -260,7 +266,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 107 tests, ~1 s (11 of them skip without torch)
+python -m pytest tests/ -q     # 189 tests, ~2 s (those needing torch/numpy say SKIP)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -277,6 +283,12 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_assistant_normalization.py` | `normalize_assistant` — the single canonical form every dataset here shares. Two cases are regressions from real data: a **literal newline inside a JSON string** is repaired (invalid by spec, unambiguous in meaning) and `find . -exec ls {} \;` in a prose preamble no longer **balances as `{}` and masks the real response two lines down**. The boundary is also pinned: an unescaped inner quote stays a drop, because guessing where the string ends invents training content |
 | `tests/test_openthoughts_convert.py` | the upstream→ours mapping in `03d_build_openthoughts_sft.py`, where the shapes are so close that the dangerous failures are quiet: a `system` turn shifting the rendered prefix (refused, not folded in), a trailing user turn with nothing to predict, one bad turn dropping the whole trajectory rather than being skipped, and the stale `Previous response had warnings:` preamble being stripped **only** when the turn it complains about was actually renormalized |
 | `tests/test_fsdp2_grad_accum.py` | the second, distinct 27B OOM: verl skipping FSDP gradient sync on non-final micro-batches makes FSDP2 retain a full **unsharded** fp32 gradient (`params × 4 B` = 103.5 GiB/GPU at 27B) until the final backward. Pins the micro-batch estimator that decides whether a config reaches that path at all — including that raising `ULYSSES_SP` **cannot** change the count, because `prepare_micro_batches` scales the token budget by `sp_size` too — that the worst case is taken over dp ranks (`same_micro_num_in_dp=True`), that the retained tensor does not shrink with the shard degree, and that the patch is still applied from the module verl loads in every rank rather than from a launcher a cluster-side wrapper can bypass. The allocation and numerics claims are *measured* instead, by `scripts/35_probe_fsdp2_grad_accum.py` |
+| `tests/test_dpo_sharding.py` | `BUG.md` BUG-2: the multi-rank DPO path sharded the FSDP2 *root* while the forward calls `decoder(...)`/`lm_head(...)` directly, so every rank died on `aten.embedding` with mixed Tensor/DTensor before its first gradient. Asserts the sharding *layout* (which submodules are wrapped, what stays unsharded and frozen), so it runs without CUDA |
+| `tests/test_offline_eval_scoring.py` | the container-free fallback in `06b_eval_offline.py` — the eval that has to work when the sandbox is blocked, and which crashed on the finished 4B run: `device_map="auto"` plus Qwen3.5's **tied** output head puts `head(hidden)` and `targets` on different cards, so `cross_entropy` raised and the one checkpoint that trained to completion was recorded as unmeasured. Pins the `.to(logits.device)` fix at the source level (a single-GPU box cannot reproduce a sharded load) and checks the chunked scoring arithmetic on CPU against an independent full-logits computation: position i is predicted from hidden i−1, position 0 is never a target however the mask is set, and `--chunk` moves memory without moving the number |
+| `tests/test_dpo_shard_failure_report.py` | `BUG.md` BUG-13: the DPO launcher used to reduce sixteen background reference shards to one bit (`wait "$pid" \|\| rc=1`), so the 27B failure named no shard and no exit status while all sixteen logs it pointed at ended in `[done]`. Runs the real `rst_explain_shard_failures` from `scripts/lib_env.sh` against hand-written logs and pins the three cases apart: a `[done]` log with a non-zero status (the work is on disk, re-running is nearly free), an empty or absent log (python never printed), and a log that stops short (show the tail). Plus a source assertion that the collapsing wait loop stays gone |
+| `tests/test_dpo_noise_floor.py` | `BUG.md` BUG-15: both finished DPO runs reported `holdout_reward_accuracy 0.5 -> 0.5938` (4B) and `0.5 -> 0.5391` (9B) with `warnings: []`, off final margins of 6e-05 and 1e-05 nats — an accuracy that is a sign test on a margin below the bf16 noise of the reference logprobs it is differenced against. Pins `dpo_common.noise_floor_warning` to those two summaries: it fires on both, scales with beta because the reward does, and stays silent for a genuinely trained margin, a real negative margin, and a run with no holdout eval. Plus a source assertion that the warning is appended to `runtime_warnings` before the summary is built, so it is archived and not just printed |
+| `tests/test_nccl_timeout_report.py` | `BUG.md` BUG-14: when the 4B DPO trainer hung ten minutes in an NCCL watchdog timeout, the launcher answered with GATE 1 / GATE 2 / GATE 3 — three hypotheses that are all checked *before* the first collective — and the trainer's output was never on disk to read. Runs the real `rst_explain_nccl_timeout` against the observed log text and pins the two readings apart: per-rank `NumelIn` that differs (the ranks are running different collectives, a code divergence) versus identical everywhere (one rank never arrived — host OOM killer first). Also that a `[rank*]: *Error` raised before the timeout is surfaced as the first failure, that a log with no timeout stays silent, and that the launcher tees and classifies |
+| `tests/test_report_loss_curve.py` | `BUG.md` BUG-17: every verl report so far WARNed "no loss values scraped from logs" while 110 usable steps sat in `$BASE_FOLDER/logs/run.log` — `--run-dir` pointed at the trainer's *output* directory, which under verl/FSDP holds only `global_step_*/`. Scrapes the real verl line format (`step:41 - train/loss:… - train/lr:…`, progress-bar prefix and all, including the short `lr` spelling the long pattern never matched) and pins the stage slice: one appended `run.log` holds SFT, GRPO and DPO, and DPO's loss is log 2 by construction, so scraping the file whole turns two healthy runs into a curve that ends at 0.693. Plus source assertions that the launcher passes its own log and names the stage for each report |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

@@ -98,30 +98,70 @@ def read_json(path: Path | None) -> dict | None:
         return None
 
 
-def parse_training_log(run_dir: Path) -> dict:
-    """Best-effort scrape of slime/Megatron stdout for loss / grad-norm / lr.
+STAGE_MARKER = re.compile(r"^=== (?:STAGE|SKIP|DONE|FAILED) (\S+)", re.M)
+
+
+def stage_section(text: str, stage: str) -> str:
+    """The slice of a `20_run_all.sh` log belonging to one stage, or all of it.
+
+    `20_run_all.sh` writes every stage's stdout to one appended `logs/run.log`, so a
+    scrape of the whole file mixes trainers: the SFT curve, then GRPO, then DPO, whose
+    loss sits at log 2 by construction. That is how a "loss increased" finding gets
+    manufactured out of two healthy runs. A log with no `=== STAGE` markers is not one
+    of ours and is returned whole.
+    """
+    starts = [m for m in STAGE_MARKER.finditer(text) if m.group(0).startswith("=== STAGE")]
+    if not starts:
+        return text
+    parts: list[str] = []
+    for match in starts:
+        if match.group(1) != stage:
+            continue
+        following = STAGE_MARKER.search(text, match.end())
+        parts.append(text[match.end():following.start() if following else len(text)])
+    return "\n".join(parts)
+
+
+def parse_training_log(run_dir: Path | None, extra_logs: list[Path] | None = None,
+                       stage: str = "train") -> dict:
+    """Best-effort scrape of the trainer's stdout for loss / grad-norm / lr.
 
     Log format is not a contract, so everything here is optional and the report
     says so rather than pretending a missing field is a zero.
+
+    `run_dir` is the trainer's *output* directory, which under verl/FSDP holds only
+    `global_step_*/` -- no logs at all. That is why this takes explicit files too: the
+    launcher knows its log is `$BASE_FOLDER/logs/run.log` and passes it, instead of the
+    report telling a human to "point --run-dir at the directory holding the trainer
+    stdout" for a path the launcher itself chose.
     """
     out: dict = {"log_files": [], "steps": [], "warnings": []}
-    if not run_dir.is_dir():
+    candidates: list[Path] = []
+    if run_dir is not None and run_dir.is_dir():
+        candidates = sorted(
+            [*run_dir.glob("*.log"), *run_dir.glob("logs/*.log"), *run_dir.glob("**/run.log")],
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        )[-4:]
+    for explicit in extra_logs or []:
+        if explicit.is_file() and explicit not in candidates:
+            candidates.append(explicit)
+    if not candidates:
         return out
-    candidates = sorted(
-        [*run_dir.glob("*.log"), *run_dir.glob("logs/*.log"), *run_dir.glob("**/run.log")],
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-    )[-4:]
     pat_loss = re.compile(r"\b(?:lm[ _-]?loss|loss)\s*[:=]\s*([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)")
     pat_step = re.compile(r"\b(?:iteration|step)\s*[:=]?\s*(\d+)")
     pat_gnorm = re.compile(r"\bgrad[ _-]?norm\s*[:=]\s*([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)")
-    pat_lr = re.compile(r"\blearning[ _-]?rate\s*[:=]\s*([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)")
+    # `lr` as well as `learning_rate`: verl prints `train/lr:2.2e-06` and nothing else,
+    # so the long spelling alone scraped a learning rate off none of these runs.
+    pat_lr = re.compile(
+        r"\b(?:learning[ _-]?rate|lr)\s*[:=]\s*([0-9]*\.?[0-9]+(?:[eE][-+]?\d+)?)"
+    )
     for path in candidates:
         out["log_files"].append(str(path))
         try:
             text = path.read_text(errors="replace")
         except OSError:
             continue
-        for line in text.splitlines():
+        for line in stage_section(text, stage).splitlines():
             low = line.lower()
             if "nan" in low and ("loss" in low or "grad" in low):
                 out["warnings"].append(line.strip()[:200])
@@ -781,6 +821,15 @@ def main() -> int:
     p.add_argument("--model-key", default=None,
                    help="key in configs/models.json; decides whether paper numbers apply")
     p.add_argument("--run-dir", type=Path, default=None, help="training run dir (for logs)")
+    p.add_argument("--train-log", type=Path, action="append", default=[], metavar="PATH",
+                   help="repeatable. The trainer's stdout, when it is not inside "
+                        "--run-dir -- which it is not under verl/FSDP, where the run dir "
+                        "holds only global_step_*/. 20_run_all.sh passes its own "
+                        "logs/run.log.")
+    p.add_argument("--train-stage", default="train", metavar="NAME",
+                   help="which `=== STAGE <name>` section of a 20_run_all.sh log holds "
+                        "the trainer being reported on (train, rl, dpo). One appended log "
+                        "holds all of them, and DPO's loss is log 2 by construction.")
     p.add_argument("--run-config", type=Path, default=None, help="run_config.json from 20_run_all.sh")
     p.add_argument("--data-manifest", type=Path, default=None)
     p.add_argument("--eval", action="append", default=[], metavar="LABEL=PATH",
@@ -796,7 +845,7 @@ def main() -> int:
 
     config = read_json(args.run_config)
     manifest = read_json(args.data_manifest)
-    training = parse_training_log(args.run_dir) if args.run_dir else {"steps": [], "log_files": [], "warnings": []}
+    training = parse_training_log(args.run_dir, args.train_log, stage=args.train_stage)
 
     evals: dict[str, dict | None] = {}
     for item in args.eval:

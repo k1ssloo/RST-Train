@@ -173,6 +173,23 @@ AUTO_CLASSES = ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoMode
 
 def load_model(model_path: str, dtype_name: str) -> tuple[Any, str]:
     """Load whatever kind of model this checkpoint is, and say which class worked."""
+    # A local path that does not exist comes back from transformers as
+    #   OSError: Repo id must be in the form 'repo_name' or 'namespace/repo_name'
+    # because it falls through to the Hub resolver -- three times, once per auto
+    # class. That is what the 27B run printed after its training stage failed, and
+    # it reads like a bad argument rather than "the checkpoint was never written".
+    # Say which it is before handing the string to transformers.
+    looks_local = model_path.startswith((".", "/", "~")) or os.sep in model_path
+    if looks_local and not Path(model_path).expanduser().exists():
+        raise SystemExit(
+            f"no checkpoint at {model_path} -- the path does not exist. Nothing was "
+            f"loaded and nothing is wrong with this script's arguments: the export "
+            f"stage that should have written it did not run, or wrote elsewhere. "
+            f"(A bare name with no slash would have been treated as a Hub repo id.)"
+        )
+
+    # Imported after the path check on purpose: importing torch costs seconds and a
+    # CUDA context, and it cannot make a missing directory exist.
     import torch
     import transformers
 
@@ -239,9 +256,13 @@ def score_rows(model, rows: list[tuple[list[int], list[int]]], *, chunk: int,
             for start in range(0, positions.numel(), chunk):
                 block = positions[start : start + chunk]
                 logits = head(hidden[block - 1]).float()
-                # `head` and `decoder` can sit on different devices when the model
-                # is sharded across GPUs, so the targets have to follow the logits
-                # rather than the hidden states.
+                # `device_map="auto"` shards the model, and Qwen3.5 TIES the output head
+                # to the input embedding -- which accelerate places on the FIRST device,
+                # while `hidden` comes off the LAST decoder block on the last device. So
+                # `logits` and `targets` legitimately live on different cards, and
+                # cross_entropy raises rather than moving either one:
+                #   "target is on cuda:7, different from other tensors on cuda:1".
+                # Follow the logits; `gold` is chunk*8 bytes, the cheap tensor to move.
                 gold = targets[block].to(logits.device)
                 row_nll += torch.nn.functional.cross_entropy(
                     logits, gold, reduction="sum").item()

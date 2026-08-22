@@ -41,8 +41,8 @@ result layer or the dataset code:
 python tests/run_tests.py       # or: python -m pytest tests/ -q
 ```
 
-107 tests, ~1 s, no GPU / cluster / dataset needed (11 of them need torch and say SKIP
-without it — run them again inside the training venv). They pin the loss mask, the
+189 tests, ~2 s, no GPU / cluster / dataset needed (some need torch or numpy and say
+SKIP without them — run them again inside the training venv). They pin the loss mask, the
 infra-vs-budget failure split, the padding rules and the two OOM failure modes below —
 the things that break a run silently instead of loudly. A green run says nothing
 about anything needing real weights, a container runtime, or more than one node.
@@ -206,8 +206,15 @@ worse than no run at all. If you believe one is genuinely wrong, say so and wait
 - the reference-checkpoint eval, when the model has one
 - the DPO tolerances in `19_train_dpo.py` (see the three gates below)
 
-Hard floors, non-negotiable: `transformers >= 5.15.0` (older versions do not know
-`qwen3_5` at all); no FP8 anywhere (A100 has no FP8 tensor cores); `--qwen-gdn-backend
+Hard floors, non-negotiable: `transformers>=5.11,<5.15` — a **window, with an upper
+bound**, and 5.15 is the version that breaks. `qwen3_5` landed in 5.11, and 5.15.0
+removed `self.chunk_gated_delta_rule` from `Qwen3_5GatedDeltaNet.__init__` in favour of
+the `kernels` package's `_kernel_funcs` indirection, which verl 0.9.0 reads
+unconditionally (`qwen3_5.py:167`) — so on 5.15 the first forward dies with an
+`AttributeError` and installing `kernels` does not restore it. `01b_setup_env_verl.sh`
+pins the window and `30_run_sft_verl.sh` refuses to start outside it, by looking for the
+attribute rather than by parsing a version string. Do not widen it to silence a pip
+resolver warning. Also: no FP8 anywhere (A100 has no FP8 tensor cores); `--qwen-gdn-backend
 fla`, never FlashQLA (SM90+ only).
 
 ## When something fails

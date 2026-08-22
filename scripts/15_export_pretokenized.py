@@ -117,7 +117,8 @@ def main() -> int:
     ids_col: list[list[int]] = []
     mask_col: list[list[int]] = []
     keep_idx: list[int] = []
-    dropped = {"contract": 0, "too_long": 0, "no_trained_tokens": 0, "error": 0}
+    dropped = {"contract": 0, "too_long": 0, "no_trained_tokens": 0,
+               "supervised_first_token": 0, "error": 0}
     trained_total = 0
     token_total = 0
 
@@ -140,6 +141,18 @@ def main() -> int:
             # Nothing to learn from; would contribute a zero gradient and, with
             # per-token loss normalization, silently skew the average.
             dropped["no_trained_tokens"] += 1
+            continue
+        if mask[0] != 0:
+            # Downstream packing depends on this. verl's `sft_loss` aligns the mask to the
+            # log-probs with a cyclic `torch.roll(..., -1)` over the whole packed
+            # micro-batch, so a supervised token 0 leaks supervision onto the PREVIOUS
+            # document's last hidden state. Every row built from the Qwen3.5 template opens
+            # on `<|im_start|>` and cannot hit this; if it ever does, the mask is wrong in a
+            # way no loss curve would show, so drop the row rather than ship it.
+            dropped["supervised_first_token"] += 1
+            if args.strict:
+                sys.exit(f"row {i}: loss_mask[0] == 1, but the first token of a conversation "
+                         f"is never a training target. The mask is misaligned.")
             continue
         ids_col.append(ids)
         mask_col.append(mask)

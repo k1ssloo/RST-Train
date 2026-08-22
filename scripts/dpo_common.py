@@ -266,6 +266,82 @@ def dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected, *,
     return loss, metrics
 
 
+# A logprob difference against the reference cannot be trusted below this, because the
+# reference logprobs are scored in bf16 (see `--ref-logps`, written by
+# 18_dpo_ref_logprobs.py): ~1e-3 nats/token, the same figure the summary's
+# `how_to_read_this` already quotes for the step-0 residual when dtypes differ. It is a
+# property of the arithmetic, not of the learning rate, so it does not shrink with a
+# longer run.
+REF_LOGP_NOISE_NATS = 1e-3
+
+
+def noise_floor_warning(
+    *, beta: float, baseline_eval: dict | None, final_eval: dict | None,
+    last_step: dict | None = None,
+) -> str | None:
+    """Warn when the reported holdout accuracy is the sign of arithmetic noise.
+
+    There is already a warning for the regime where the gradient clip, not the learning
+    rate, sets the step size. This is the opposite regime, and it is the one the 4B and
+    9B runs actually landed in: nothing clipped, `warnings` came back empty, and the
+    summary reported `holdout_reward_accuracy 0.5 -> 0.5938` (4B) and `0.5 -> 0.5391`
+    (9B) off final margins of 6e-05 and 1e-05 nats.
+
+    That accuracy is a *sign* test on the margin. The reward is beta times a difference
+    of logprobs, so once |margin| drops under ``beta * REF_LOGP_NOISE_NATS`` the sign
+    being counted is rounding error, and the accuracy moves off 0.5 without any pair
+    acquiring a preference. `holdout_ties` collapsing from 64 to 1 on the 9B is the same
+    fact from the other side: every exact tie was broken, by 1e-05 nats.
+
+    The gap this closes is precise. `19_train_dpo.py` scores a pair as a preference above
+    ``TIE_EPS = 1e-6`` and its own comment there expects a trained margin of 1e-2..1 --
+    "six orders of magnitude away, so this band cannot swallow real signal". Both true,
+    and nothing looked at the three decades in between, where a margin is counted as a
+    preference by `rank_score` while sitting far below anything the author would have
+    called trained. Both finished runs landed there.
+
+    Silence here is the defect. The accuracy is the number that gets quoted, and the
+    magnitude needed to discount it sits in a different field of the same file.
+    """
+    if not final_eval or "holdout_reward_margin" not in final_eval:
+        return None
+    margin = abs(float(final_eval["holdout_reward_margin"]))
+    floor = beta * REF_LOGP_NOISE_NATS
+    if margin >= floor:
+        return None
+
+    accuracy = final_eval.get("holdout_reward_accuracy")
+    before = (baseline_eval or {}).get("holdout_reward_accuracy")
+    moved = ""
+    if accuracy is not None:
+        moved = f"holdout_reward_accuracy reads {accuracy}"
+        if before is not None:
+            moved += f" (up from {before})"
+        moved += ", but "
+    ties = ""
+    if final_eval.get("holdout_ties") is not None \
+            and (baseline_eval or {}).get("holdout_ties") is not None:
+        ties = (f" Ties went {baseline_eval['holdout_ties']} -> {final_eval['holdout_ties']}: "
+                f"the exact ties were broken, by that margin.")
+    train = ""
+    if last_step and last_step.get("reward_margin") is not None:
+        train = f" The last training step agrees: reward_margin {last_step['reward_margin']}."
+
+    return (
+        f"THE MEASURED PREFERENCE IS AT THE NOISE FLOOR. {moved}the final holdout "
+        f"reward_margin is {final_eval['holdout_reward_margin']}, below beta x "
+        f"{REF_LOGP_NOISE_NATS:.0e} = {floor:.0e} -- the bf16 noise of the reference logprobs "
+        f"this margin is measured against, and three decades below the 1e-2..1 that "
+        f"19_train_dpo.py's own TIE_EPS comment calls trained. The accuracy is a sign "
+        f"test, so at this magnitude it is counting rounding error and cannot be "
+        f"reported as a result."
+        f"{ties}{train} The checkpoint is expected to be near-indistinguishable from the "
+        f"model it started from; treat this run as a plumbing success and a training "
+        f"no-op. To get a real effect, raise --beta or --lr, or give it more steps or "
+        f"more pairs -- and re-check this line, which is what says whether it worked."
+    )
+
+
 def read_ref_logps(path: str | Path) -> tuple[dict[str, dict[str, float]], list[dict]]:
     """Load reference logprobs from a file or a directory of shard files.
 

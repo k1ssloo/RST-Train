@@ -25,6 +25,14 @@ verl launchers inherit a divisibility rule they do not obey (a 27B row of
 tp4/pp2/cp2 forces the GPU count to be a multiple of 16) and a token budget that is
 half the sequence length. See BACKENDS.md.
 
+`--ulysses-sp N` then UNDOES that fold by N, because Ulysses sequence parallelism is
+verl's CP: an Ulysses group of N ranks jointly holds one sequence, so the per-GPU
+budget is max_seq_len/N and not max_seq_len. Leaving it at 1 while launching with
+`engine.ulysses_sequence_parallel_size=N` is the silent-waste case — verl scales the
+micro-batch budget by N too (`workers/engine/utils.py::prepare_micro_batches`), so
+each GPU still holds a whole sequence's activations and pays N-way SP communication
+for nothing. See the ULYSSES_SP block in scripts/30_run_sft_verl.sh.
+
 Exits non-zero with an explanation when a config is impossible, so a launcher
 fails at the config step rather than 40 minutes into a run.
 """
@@ -45,7 +53,7 @@ def load() -> dict:
 
 
 def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len: int,
-            phase: str = "sft", backend: str = "megatron") -> dict:
+            phase: str = "sft", backend: str = "megatron", ulysses_sp: int = 1) -> dict:
     reg = load()
     models, defaults = reg["models"], reg.get("defaults", {})
     if key not in models:
@@ -109,6 +117,37 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
             print(f"# note: {shape_note}", file=sys.stderr)
         mtpg, tp, pp, cp = mtpg * cp, 1, 1, 1
 
+        # Ulysses SP is verl's context parallelism, so it divides the per-GPU budget the
+        # same way CP does above. Doing this here rather than in the launcher is what
+        # keeps the "longest sequence must be placeable" assert below honest: the thing
+        # that has to hold a whole sequence is the Ulysses GROUP, not one GPU.
+        #
+        # Skipping it is not a small mis-sizing, it is the whole point of SP thrown away.
+        # verl computes `max_token_len = max_token_len_per_gpu * sp_size`, so leaving mtpg
+        # at max_seq_len means each GPU still holds max_seq_len tokens of activations at
+        # SP=8 exactly as it does at SP=1 -- with 8x the pre-slice embedding tensor on the
+        # VLM path (verl pads but does not slice input_ids when the config has a
+        # vision_config; the slice happens after embed_tokens) and 48 GDN layers' worth of
+        # cross-rank recurrent-state traffic on top.
+        if ulysses_sp > 1:
+            if gpus % ulysses_sp:
+                sys.exit(f"--ulysses-sp {ulysses_sp} does not divide {gpus} GPUs, so "
+                         f"dp_size = gpus // sp is not integral and verl cannot build the "
+                         f"(dp, sp) device mesh. Pick an sp that divides the world size.")
+            per_gpu = -(-mtpg // ulysses_sp)  # ceil, so per_gpu * sp >= the folded budget
+            sp_note = (f"ULYSSES_SP={ulysses_sp}: an Ulysses group of {ulysses_sp} ranks jointly "
+                       f"holds one sequence, so max_tokens_per_gpu becomes "
+                       f"ceil({mtpg}/{ulysses_sp})={per_gpu} and the group budget stays "
+                       f"{per_gpu * ulysses_sp} >= max_seq_len. Per-GPU activation memory is "
+                       f"~1/{ulysses_sp} of the SP=1 figure; that reduction IS what SP buys, "
+                       f"and it only happens because the budget was divided here.")
+            print(f"# note: {sp_note}", file=sys.stderr)
+            shape_note = f"{shape_note} {sp_note}".strip()
+            mtpg = per_gpu
+    elif ulysses_sp > 1:
+        sys.exit(f"--ulysses-sp {ulysses_sp} is only meaningful for --backend verl; the Megatron "
+                 f"path shards the sequence with cp, which this row already sets (cp={cp}).")
+
     # If the model is small enough to need fewer GPUs than the cluster has, we still
     # use them all via data parallelism -- dp absorbs the remainder.
     denom = tp * pp * cp
@@ -122,12 +161,21 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
     if tp > gpus_per_node:
         problems.append(f"tp={tp} exceeds gpus_per_node={gpus_per_node}: a TP group would "
                         f"cross a node boundary, which is very slow (and impossible without NVLink)")
-    if mtpg * cp < max_seq_len:
-        problems.append(f"max_tokens_per_gpu*cp = {mtpg}*{cp} = {mtpg*cp} < max_seq_len={max_seq_len}: "
-                        f"the longest sequence cannot be placed. Raise cp or max_tokens_per_gpu"
-                        + ("" if backend != "verl" else " (cp is unavailable on this backend, so "
-                                                        "raise max_tokens_per_gpu -- and check the "
-                                                        "activation budget before you do)") + ".")
+    # Whatever shards the SEQUENCE: cp on Megatron, ulysses_sp on verl. Exactly one of the
+    # two can exceed 1 (the branch above rejects the other combination), so the product is
+    # the right thing to multiply the per-GPU budget by -- the unit that must hold a whole
+    # sequence is the sequence-parallel group, not one rank.
+    seq_shard = cp * ulysses_sp
+    if mtpg * seq_shard < max_seq_len:
+        knob = "cp" if backend != "verl" else "ULYSSES_SP"
+        problems.append(f"max_tokens_per_gpu*{knob} = {mtpg}*{seq_shard} = {mtpg * seq_shard} < "
+                        f"max_seq_len={max_seq_len}: the longest sequence cannot be placed on any "
+                        f"sequence-parallel group, and bin packing cannot split one sample. Raise "
+                        f"{knob} or max_tokens_per_gpu"
+                        + ("" if backend != "verl" else " (verl has no cp; ULYSSES_SP is its "
+                                                        "analogue, and raising max_tokens_per_gpu "
+                                                        "instead costs linear activation memory)")
+                        + ".")
     if m.get("moe") and ep > cp * dp:
         problems.append(f"ep={ep} > cp*dp={cp*dp}: expert parallelism must fit inside the "
                         f"non-TP/PP dimensions")
@@ -151,6 +199,10 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "IS_MOE": int(bool(m.get("moe"))),
         "MEM_CLASS_USED": mem_class,
         "TP": tp, "PP": pp, "CP": cp, "DP": dp, "EP": ep,
+        # Echoed back, deliberately NOT named ULYSSES_SP: every launcher eval()s this
+        # output, and exporting the input name would let the default (1) overwrite an
+        # operator's ULYSSES_SP=8 between here and the line that reads it.
+        "ULYSSES_SP_USED": ulysses_sp,
         "MAX_TOKENS_PER_GPU": mtpg,
         "MAX_SEQ_LEN": max_seq_len,
         "TOTAL_GPUS": gpus,
@@ -181,6 +233,16 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
     # work. But it must be said, because the arithmetic above cannot see memory --
     # qwen3.5-27b on 8 GPUs passes every assert here and then OOMs (444.8 GB of
     # params+grads+Adam over 8 cards is 55.6 GB/GPU before a single activation).
+    # Same shape of statement as tp > gpus_per_node, but a warning rather than a rejection:
+    # an Ulysses group that spans nodes is slow, not impossible -- its all-to-all and (on
+    # this architecture) the gated-delta-net recurrent-state exchange then cross the slowest
+    # link in the cluster on every layer.
+    if ulysses_sp > gpus_per_node:
+        unvalidated = (unvalidated + f" ULYSSES_SP={ulysses_sp} exceeds gpus_per_node="
+                                     f"{gpus_per_node}, so each Ulysses group spans nodes and "
+                                     f"its per-layer all-to-all plus GDN state exchange runs "
+                                     f"over the inter-node fabric. Measure tokens/s before "
+                                     f"committing to it.").strip()
     min_gpus = m.get("min_gpus")
     if min_gpus and gpus < min_gpus:
         unvalidated = (unvalidated + f" {gpus} GPUs is below this model's min_gpus={min_gpus}; "
@@ -205,6 +267,11 @@ def main() -> int:
     # straight through; slime IS the Megatron shape.
     ap.add_argument("--backend", default="megatron", choices=["megatron", "slime", "verl"],
                     help="verl pins PP=CP=1 and folds CP into max_tokens_per_gpu")
+    ap.add_argument("--ulysses-sp", type=int, default=1,
+                    help="verl only: Ulysses sequence-parallel size. Divides "
+                         "max_tokens_per_gpu, because an Ulysses group -- not one GPU -- is "
+                         "what holds a whole sequence. Pass the SAME value the launcher "
+                         "gives engine.ulysses_sequence_parallel_size")
     ap.add_argument("--shell", action="store_true", help="emit eval-able shell assignments")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--list", action="store_true")
@@ -224,9 +291,12 @@ def main() -> int:
 
     if not args.key:
         sys.exit("--key required (or --list)")
+    if args.ulysses_sp < 1:
+        sys.exit(f"--ulysses-sp must be >= 1, got {args.ulysses_sp}")
     cfg = resolve(args.key, args.mem_class, args.gpus, args.gpus_per_node, args.max_seq_len,
                   phase=args.phase,
-                  backend="megatron" if args.backend == "slime" else args.backend)
+                  backend="megatron" if args.backend == "slime" else args.backend,
+                  ulysses_sp=args.ulysses_sp)
 
     if args.json:
         print(json.dumps(cfg, indent=2))

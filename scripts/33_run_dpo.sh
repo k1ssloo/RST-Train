@@ -303,6 +303,7 @@ mkdir -p "$REF_DIR"
 TOTAL_SHARDS=$(( NNODES * NGPUS ))
 SHARD_BASE=$(( ${NODE_RANK:-0} * NGPUS ))
 pids=()
+shard_ids=()
 for (( i = 0; i < NGPUS; i++ )); do
   shard=$(( SHARD_BASE + i ))
   CUDA_VISIBLE_DEVICES="$i" python scripts/18_dpo_ref_logprobs.py \
@@ -312,11 +313,21 @@ for (( i = 0; i < NGPUS; i++ )); do
     --shard "$shard" --num-shards "$TOTAL_SHARDS" \
     > "$BASE_FOLDER/logs/dpo_ref_shard$shard.log" 2>&1 &
   pids+=("$!")
+  shard_ids+=("$shard")
 done
-rc=0
-for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
-if (( rc != 0 )); then
-  echo "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log" >&2
+# Keep the shard id beside the pid and the exit STATUS beside both. `wait "$pid" ||
+# rc=1` threw away which of the sixteen failed and how, which on 2026-08-20 left the
+# operator with a glob of logs that all ended in [done] and no way to tell which
+# process had returned non-zero.
+failed=()
+for i in "${!pids[@]}"; do
+  code=0
+  wait "${pids[$i]}" || code=$?
+  (( code == 0 )) || failed+=("${shard_ids[$i]}=$code")
+done
+if (( ${#failed[@]} > 0 )); then
+  echo "${#failed[@]} of ${#pids[@]} reference shards on node ${NODE_RANK:-0} failed:" >&2
+  rst_explain_shard_failures "$BASE_FOLDER/logs/dpo_ref_shard" "${failed[@]}"
   echo "18 is resumable -- fix the cause and re-run this script, already-scored rows are kept" >&2
   exit 1
 fi
@@ -433,6 +444,12 @@ LENGTH_NORM_ARG=(--length-normalize)
 export WANDB_MODE="${WANDB_KEY:+online}"; export WANDB_MODE="${WANDB_MODE:-offline}"
 [[ -n "${WANDB_KEY:-}" ]] && export WANDB_API_KEY="$WANDB_KEY"
 
+# Tee, so the failure block below can READ what happened instead of only knowing that
+# something did. An NCCL watchdog timeout is ~500 lines of C++ frames whose one
+# diagnostic detail (the per-rank NumelIn) is three screens above the exit status; with
+# the output only streaming to the console there is nothing left to classify.
+# `pipefail` is already set, and tee exits 0, so RC below is still torchrun's status.
+TRAIN_LOG="$BASE_FOLDER/logs/dpo_train.log"
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \
   --node_rank "${NODE_RANK:-0}" \
@@ -450,7 +467,7 @@ torchrun \
   --param-dtype "$PARAM_DTYPE" \
   --logit-chunk "$LOGIT_CHUNK" \
   "${LENGTH_NORM_ARG[@]}" \
-  "$@"
+  "$@" 2>&1 | tee "$TRAIN_LOG"
 RC=$?
 
 if (( RC != 0 )); then
@@ -465,6 +482,9 @@ DPO failed (exit $RC). The gates in 19_train_dpo.py fail loudly on purpose:
                          (mask, tokenizer, dtype). Fix the cause; do not raise the
                          tolerance to get past it.
 EOF
+  # ... and when it is none of those, say so rather than leaving three wrong hypotheses
+  # as the last word. This prints nothing unless the trainer actually timed out in NCCL.
+  rst_explain_nccl_timeout "$TRAIN_LOG"
   exit "$RC"
 fi
 

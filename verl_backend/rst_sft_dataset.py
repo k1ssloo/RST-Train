@@ -178,6 +178,30 @@ class RSTPretokenizedSFTDataset(Dataset):
             )
         if len(self.frame) == 0:
             raise ValueError("the dataset is empty after filtering; nothing to train on")
+
+        # The invariant that makes `pad_mode=no_padding` safe, and that nothing else checks.
+        # verl aligns the mask to the log-probs with a CYCLIC roll over the whole PACKED
+        # micro-batch (`workers/utils/losses.py::sft_loss`:
+        # `loss_mask_flatten = torch.roll(loss_mask_flatten, shifts=-1, dims=0)`), so sample
+        # A's last position inherits sample B's FIRST mask value, and the batch's last
+        # position inherits the batch's first. Both are harmless only because a conversation
+        # opens on `<|im_start|>`, which is never a training target -- i.e. correctness here
+        # rests on loss_mask[0] == 0 for every row. It holds for anything 15_export_
+        # pretokenized.py produced; a hand-built or differently-templated parquet could
+        # break it, and the symptom would be a few tokens of cross-document supervision
+        # invisible in the loss curve. Assert it rather than inherit it.
+        leading = self.frame["loss_mask"].map(lambda m: int(m[0]) if len(m) else 0)
+        bad_leading = int((leading != 0).sum())
+        if bad_leading:
+            raise ValueError(
+                f"{bad_leading} of {len(self.frame)} rows have loss_mask[0] == 1. With "
+                f"pad_mode=no_padding verl rolls the mask cyclically across the packed "
+                f"micro-batch, so a supervised first token means the PREVIOUS document's "
+                f"final hidden state is trained to predict this document's first token, and "
+                f"the last row in the batch is trained on the first row's. Re-export with "
+                f"scripts/15_export_pretokenized.py, which never marks the opening "
+                f"<|im_start|> as a target."
+            )
         over = int((id_lengths > self.max_length).sum())
         if over and self.truncation == "error":
             raise ValueError(

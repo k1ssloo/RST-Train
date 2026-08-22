@@ -26,6 +26,17 @@
 # The four imports every python stage in this repo needs. Deliberately checked with
 # find_spec rather than a real import: locating them costs milliseconds, importing
 # torch costs seconds and would run on every stage.
+# Remember whether the caller pinned the list, so the backend marker below is only
+# added to the default and never overrides an explicit override. Written as an if
+# rather than `[[ ... ]] && x=1`, whose non-zero status would abort a `set -e`
+# caller at source time, and guarded so sourcing this file twice keeps the first
+# verdict instead of mistaking our own default for the caller's.
+if [[ -z "${RST_ENV_REQUIRE_PINNED:-}" ]]; then
+  RST_ENV_REQUIRE_PINNED=0
+  if [[ -n "${RST_ENV_REQUIRE:-}" ]]; then
+    RST_ENV_REQUIRE_PINNED=1
+  fi
+fi
 RST_ENV_REQUIRE="${RST_ENV_REQUIRE:-torch transformers pandas pyarrow}"
 
 rst_has_modules() {  # rst_has_modules <module...>  -> 0 if every one is importable
@@ -92,6 +103,21 @@ rst_bootstrap_python() {
 rst_enter_env() {  # rst_enter_env [env_name]
   local want="${1:-${ENV_NAME:-rstverl}}"
   local stub="${BASE_FOLDER:-}/env-$want.sh"
+
+  # The four shared imports cannot tell the env this repo built apart from a stock
+  # ML image whose system interpreter already ships them. Where they cannot, step 0
+  # answers "already in it" for the WRONG interpreter, nothing enters the env, and
+  # the run proceeds on whatever transformers that image happens to carry -- which
+  # may sit below the >= 5.15.0 floor, and has no verl at all. The backend's own
+  # package is the discriminator no stock image satisfies by accident, so require it
+  # too whenever the caller did not pin the list.
+  if [[ "${RST_ENV_REQUIRE_PINNED:-0}" == 0 ]] &&
+     { [[ "${BACKEND:-}" == "verl" ]] || [[ "$want" == "rstverl" ]]; }; then
+    case " $RST_ENV_REQUIRE " in
+      *" verl "*) ;;
+      *) RST_ENV_REQUIRE="$RST_ENV_REQUIRE verl" ;;
+    esac
+  fi
 
   # 0. Already in it? Covers the normal case (20_run_all.sh activated, then invoked
   #    30_run_sft_verl.sh as a child) and the operator who activated it by hand, and
@@ -183,6 +209,115 @@ rst_enter_env() {  # rst_enter_env [env_name]
     a mismatched one fails later at cuda init looking unrelated.
 EOF
   return 1
+}
+
+# Say WHICH background shard failed, with what status, and what its own log implies.
+#
+# WHY THIS EXISTS
+#   33_run_dpo.sh used to collapse sixteen background reference shards into one bit:
+#     for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+#     ... "a reference shard failed; see $BASE_FOLDER/logs/dpo_ref_shard*.log"
+#   The 27B run on 2026-08-20 failed there, and every one of the sixteen logs it
+#   pointed at ended in "[done] ... rows -> ref_logps_shard<n>.parquet" with a
+#   determinism probe of 0. The message named no shard and no exit status, so the
+#   only evidence left was a glob of files that all look successful -- a dead end.
+#
+#   A non-zero status from a shard whose log ENDS in [done] is a real and distinct
+#   case: the scoring finished and the parquet is on disk, and the status came from
+#   whatever happened after the last flush (interpreter teardown, a CUDA/NCCL
+#   destructor, the job being signalled). It means "re-run me, it is nearly free",
+#   not "the reference pass is broken". An empty log is the opposite case: the
+#   process died before python printed anything.
+rst_explain_shard_failures() {  # rst_explain_shard_failures <log_prefix> <shard>=<code>...
+  local prefix="$1" spec shard code log
+  shift
+  for spec in "$@"; do
+    shard="${spec%%=*}"
+    code="${spec##*=}"
+    log="${prefix}${shard}.log"
+    echo "  shard $shard exited $code   ($log)" >&2
+    if [[ ! -s "$log" ]]; then
+      echo "     its log is EMPTY, so python never printed anything: a missing" >&2
+      echo "     interpreter or script, or the kernel killed it (host-RAM OOM)." >&2
+    elif grep -q '^\[done\]' "$log"; then
+      echo "     but that log ENDS IN [done]: the scoring finished and its parquet is" >&2
+      echo "     on disk, so the failure came AFTER the work (interpreter teardown, a" >&2
+      echo "     CUDA/NCCL destructor, or a signal). Re-running resumes those rows for" >&2
+      echo "     the cost of a directory listing -- do not rebuild the reference pass." >&2
+    else
+      echo "     its log does not reach [done]; last lines:" >&2
+      tail -n 5 "$log" | sed 's/^/     | /' >&2
+    fi
+  done
+}
+
+# Read an NCCL watchdog timeout and say which of its two causes this one is.
+#
+# WHY THIS EXISTS
+#   The 4B DPO attempt on 2026-08-20T00:11 died like this: six ranks reported
+#     [Rank 1] Watchdog caught collective operation timeout:
+#     WorkNCCL(SeqNum=1, OpType=BROADCAST, NumelIn=9687, ...) ran for 600027 ms
+#   with NumelIn 9687 / 14042 / 3328 / 5678 / 8365 / 6697 -- one per rank -- while ranks
+#   0 and 2 were already at SeqNum=2, OpType=ALLREDUCE with 15,047,680 and 7,767,040.
+#   Then all eight took SIGABRT, torchrun raised ChildFailedError, and 33_run_dpo.sh
+#   printed its GATE 1 / GATE 2 / GATE 3 advice -- none of which is the cause. The
+#   signature that IS the cause sits under ~500 lines of C++ watchdog frames.
+#
+#   The sizes are the diagnosis, and there are exactly two readings:
+#     * NumelIn DIFFERS per rank -> the collective's size depends on each rank's own
+#       data, so the ranks are not running the same sequence of collectives. That is a
+#       sharding or control-flow divergence in the trainer (a DTensor arg being
+#       implicitly replicated per row, an uneven micro-batch count). Re-running
+#       reproduces it; only a code change fixes it.
+#     * NumelIn is the SAME everywhere -> the collective was fine and one rank never
+#       arrived. Look for a rank that died with its own traceback, or that the host OOM
+#       killer took: 19_train_dpo.py builds the whole model on CPU in EVERY rank before
+#       FSDP shards it, so one node needs params x bytes x local_ranks of RAM, and a
+#       SIGKILL there leaves the survivors in NCCL until the watchdog fires ten minutes
+#       later with no mention of memory anywhere.
+rst_explain_nccl_timeout() {  # rst_explain_nccl_timeout <captured_trainer_log>
+  local log="${1:-}" seen sizes seqs died
+  [[ -s "$log" ]] || return 0
+  grep -q 'Watchdog caught collective operation timeout' "$log" 2>/dev/null || return 0
+
+  seen="$(sed -nE 's/.*Rank ([0-9]+)\] Watchdog caught.*SeqNum=([0-9]+), OpType=([A-Z]+), NumelIn=([0-9]+).*/\1 \2 \3 \4/p' "$log" | sort -n -u)"
+  echo "" >&2
+  echo "  NCCL WATCHDOG TIMEOUT -- so none of the three gates above is the cause." >&2
+  echo "  A watchdog timeout means a collective was posted and never completed: at least" >&2
+  echo "  one rank did not reach the SAME collective as the others. Who was waiting:" >&2
+  if [[ -z "$seen" ]]; then
+    echo "     (could not parse the WorkNCCL lines; grep the log for 'Watchdog caught')" >&2
+  else
+    while read -r rank seq op numel; do
+      echo "     rank $rank waiting on $op (SeqNum=$seq) of $numel elements" >&2
+    done <<< "$seen"
+  fi
+
+  sizes="$(awk '{print $4}' <<< "$seen" | sort -u | wc -l)"
+  seqs="$(awk '{print $2}' <<< "$seen" | sort -u | wc -l)"
+  if [[ -n "$seen" ]] && { (( sizes > 1 )) || (( seqs > 1 )); }; then
+    echo "  The sizes (or the sequence numbers) DIFFER between ranks, so the ranks are not" >&2
+    echo "  running the same sequence of collectives: the size depends on each rank's own" >&2
+    echo "  data. This is a divergence in the trainer -- a per-row tensor being implicitly" >&2
+    echo "  replicated as a DTensor, or an uneven micro-batch count -- not a memory or" >&2
+    echo "  fabric problem. Re-running reproduces it; only a code change fixes it." >&2
+  elif [[ -n "$seen" ]]; then
+    echo "  Every reporting rank is waiting on the SAME collective, so the collective was" >&2
+    echo "  well formed and one rank never arrived. In order of likelihood:" >&2
+    echo "    1. the host OOM killer took it. 19_train_dpo.py loads the full model on CPU" >&2
+    echo "       in EVERY rank before FSDP shards it (params x bytes x local_ranks of RAM)." >&2
+    echo "       Check 'dmesg -T | tail' and the check_host_ram WARNING earlier in this log." >&2
+    echo "    2. it died with its own traceback -- search this log for '[rank' + 'Error'." >&2
+    echo "    3. it was never started (a torchrun rendezvous that placed fewer ranks)." >&2
+  fi
+
+  # A rank that raised BEFORE the timeout is the real first failure; the watchdog noise
+  # is what happened to the other ranks because of it. Print it if it is there.
+  died="$(grep -m1 -E '^\[rank[0-9]+\]: *[A-Za-z_.]*(Error|Exception)' "$log" 2>/dev/null || true)"
+  [[ -n "$died" ]] && echo "  a rank raised before the timeout, which is the first failure: $died" >&2
+
+  echo "  Note: 19_train_dpo.py is NOT resumable (it restarts from POLICY), but the" >&2
+  echo "  reference parquets from 18 are kept, so a re-run pays only the training time." >&2
 }
 
 # Record how to re-enter the env we are currently inside. Called at the end of a

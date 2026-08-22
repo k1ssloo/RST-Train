@@ -204,6 +204,37 @@ def test_the_diagnosis_script_knows_this_failure_mode():
     )
 
 
+def test_a_sequence_longer_than_the_group_budget_is_refused_not_counted():
+    """`ceil(total_tokens / budget)` happily returns a number for a config where one
+    SAMPLE does not fit, because bin packing cannot split a sample. verl discovers that
+    inside `rearrange_micro_batches`, mid-step, after 32 ranks have read the weights. The
+    estimator is used as a launcher gate, so it has to be the thing that says no."""
+    # 4096/GPU at sp=1 is the mistake this catches: it looks like a memory-saving budget
+    # and is 8x too small for the longest cap10 row. The fix is sp=8, which is exactly
+    # what SP is for -- the same 4096/GPU then adds up to a placeable 32768 per group.
+    too_small = {**CLUSTER, "ulysses_sp": 1, "max_token_len_per_gpu": 4096}
+    try:
+        mod.estimate_micro_batches(sample_lengths=lengths() + [32329], **too_small)
+    except ValueError as exc:
+        assert "longest sample" in str(exc) and "32,329" in str(exc), str(exc)
+    else:
+        raise AssertionError("a budget below the longest sequence was certified as placeable")
+
+    ok = {**CLUSTER, "ulysses_sp": 8, "max_token_len_per_gpu": 4096}
+    est = mod.estimate_micro_batches(sample_lengths=lengths() + [32329], **ok)
+    assert est["budget_per_dp_group"] == 32768
+    assert est["longest_sample"] == 32329
+
+
+def test_the_gate_reports_an_unplaceable_config_instead_of_a_traceback():
+    # It runs as `python verl_backend/fsdp2_grad_accum.py ... || exit 2` in the launcher,
+    # where a traceback reads as "the gate is broken", not "the config is".
+    src = (BACKEND / "fsdp2_grad_accum.py").read_text(encoding="utf-8")
+    assert "except ValueError as exc:" in src and "cannot be placed at all" in src, (
+        "_cli lets estimate_micro_batches' ValueError escape as a traceback"
+    )
+
+
 def test_an_empty_or_inconsistent_configuration_is_refused_not_guessed():
     for kwargs in (
         {"sample_lengths": [], **CLUSTER},
