@@ -46,7 +46,7 @@ it done — say so and stop. 8 GPUs at 27B is not a smaller run, it is a differe
 New dataset, published and public, no HF token needed:
 
 ```bash
-hf download khazic/TMax-Agent-SFT-terminus --repo-type dataset --local-dir $BASE_FOLDER/tmax-hf
+hf download NiuNiu0110/TMax-Agent-SFT-terminus --repo-type dataset --local-dir $BASE_FOLDER/tmax-hf
 mkdir -p $BASE_FOLDER/tmax
 cp $BASE_FOLDER/tmax-hf/data/pretokenized/train.parquet $BASE_FOLDER/tmax/pretokenized_train.parquet
 cp $BASE_FOLDER/tmax-hf/data/messages/train.parquet     $BASE_FOLDER/tmax/rst_sft_train.parquet
@@ -98,9 +98,13 @@ The **RST DPO stage is unaffected** and still runs on its own 2,673 pairs where
 
 ## Naming — keep these exact
 
+**Datasets live under `NiuNiu0110`, models under `khazic`.** Two different accounts; do not
+push weights to the dataset account or vice versa.
+
 | | |
 |---|---|
 | run dir / `RUN_NAME` | `qwen3.5-{4b,9b,27b}-tmax-sft`, `qwen3.5-27b-ota-sft` |
+| input dataset (read-only) | `NiuNiu0110/TMax-Agent-SFT-terminus` |
 | HF model repo | `khazic/rst-qwen3.5-{4b,9b,27b}-tmax-sft` |
 | the OTA rerun pushes to | `khazic/rst-qwen3.5-27b-ota-sft` (overwrite it; it holds no weights) |
 
