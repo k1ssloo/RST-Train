@@ -156,19 +156,39 @@ in `<tool_response>` — a byte-exact flattening of the native tool-calling rend
 
 ---
 
-## Job 4 — termigen: NOT this pass
+## Job 4 — two RL pools: NOT this pass
 
-[`NiuNiu0110/Termigen-RL-Taskset`](https://huggingface.co/datasets/NiuNiu0110/Termigen-RL-Taskset)
-(private) — 3,541 GRPO tasks. **`allenai/open-instruct-termigen` has zero assistant
+Both are task pools, not SFT data. Neither has anything to supervise on. Do not try to
+train on them in this pass; they are ready for the later GRPO stage.
+
+**[`NiuNiu0110/Termigen-RL-Taskset`](https://huggingface.co/datasets/NiuNiu0110/Termigen-RL-Taskset)**
+(private) — 3,541 terminal tasks. `allenai/open-instruct-termigen` has **zero assistant
 turns**; all 3,556 rows are `(system, user)` plus a `ground_truth` and an `env_config`.
-It is an RLVR task pool, so there is nothing to SFT and no pairs to build. Do not try.
+Caveats in its card: **no measured pass rates** (`tier: "unknown"`), so an unknown
+fraction is zero-gradient at full sandbox cost — tier it with a cheap sampling pass
+first; and **one Docker image per task**, 3,541 distinct tags, so pre-pulling is a real
+job. 15 tasks were excluded for shipping their own verifier inside the Docker build
+context (10 byte-identical copies).
 
-It is ready for the *later* GRPO pass, with two caveats already recorded in its card:
-it has **no measured pass rates** (`tier: "unknown"`), so an unknown fraction of it is
-all-fail or all-pass and therefore zero-gradient at full sandbox cost — tier it with a
-cheap sampling pass first. And it is **one Docker image per task**, 3,541 distinct tags,
-so pre-pulling is a real job. 15 tasks were already excluded for shipping their own
-verifier inside the Docker build context (10 byte-identical copies).
+**[`NiuNiu0110/SWE-Gym-RL-Taskset`](https://huggingface.co/datasets/NiuNiu0110/SWE-Gym-RL-Taskset)**
+(private) — 2,438 SWE-bench instances. `SWE-Gym/SWE-Gym` is SWE-bench format
+(`instance_id`, `problem_statement`, `patch`, `test_patch`, `FAIL_TO_PASS`) with no
+`messages` column at all. Unlike termigen this one **is** fully tiered, from 6,055
+measured rollouts covering all 2,438 instances:
+
+| tier | pass rate | instances | |
+|---|---|---|---|
+| `hard` | 0–10 % | **2,144 (88.0 %)** | all-fail — zero gradient, pure cost |
+| `sweet` | 10–90 % | **187 (7.7 %)** | the only usable band |
+| `easy` | ≥ 90 % | 107 (4.4 %) | near-saturated |
+
+**Build it with `--tier sweet`.** A run over the whole pool spends ~nine tenths of its
+budget on groups that cannot teach it anything. The rates are `gpt-4o-2024-08-06`'s, so
+treat them as an ordering, not as absolutes — a stronger policy moves instances out of
+`hard`. Two more things: it ships **no Dockerfile** (SWE-bench environments are built by
+the `swebench` harness from `repo` + `base_commit` + `version`), so it needs a SWE-bench
+adapter that **does not exist in this repo yet**; and the gold `patch` is excluded from
+the artifact on purpose — do not add it back to make scoring easier.
 
 ---
 
