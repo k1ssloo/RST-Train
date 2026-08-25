@@ -633,6 +633,25 @@ total. The resumed step therefore landed part-way **up** the new curve: 7.8× ab
 floor the checkpoint had been annealed to. The 42 extra steps moved the loss
 0.1954 → 0.1965, i.e. nothing, which is what a second half-anneal at 8× the final lr buys.
 
+**Confirmed from inside the checkpoints**, not just from wandb. Each
+`global_step_*/extra_state_world_size_8_rank_0.pt` carries the scheduler's own
+`lr_scheduler` state (`base_lrs`, `last_epoch`, `_last_lr`), readable without torch. Every
+step from the second launch onward sits on a 126-step cosine (3 × 42, `min_lr_ratio=0.1`,
+`lr_warmup_steps_ratio=0.03`) to every printed digit, while step 42 sits on the floor of
+the 42-step one:
+
+| step | `_last_lr` in the checkpoint | the 126-step cosine at that step |
+|---|---|---|
+| 42 | **3.0000e-07** | 2.3838e-06 |
+| 60 | 1.8048e-06 | 1.8048e-06 |
+| 80 | 1.1294e-06 | 1.1294e-06 |
+| 100 | 5.8689e-07 | 5.8689e-07 |
+| 120 | 3.1582e-07 | 3.1582e-07 |
+
+So the discontinuity is exactly one curve being swapped for another across the resume
+boundary: the optimizer state came from a run annealed to 3.00e-07 and was handed a
+schedule that says 2.35e-06 at the very next step.
+
 Neither run warned. verl does not compare the schedule it is about to apply with the one
 the checkpoint came from, and our launcher recorded nothing to compare against. The only
 trace was the `train/lr` column of a log nobody diffs, and the report has no lr check.
