@@ -565,6 +565,20 @@ VERL_ARGS=(
   "$@"
 )
 
+# ---- resuming from a leftover checkpoint? -----------------------------------
+# verl's resume_mode defaults to "auto", so a checkpoint left in the output
+# directory is continued from rather than restarted. That is the right default
+# for a job that died, and a silent trap for a rerun: launching again with a
+# larger trainer.total_epochs adds epochs on top of whatever is already there
+# instead of training that many from scratch, and nothing in the log says so.
+# Name the checkpoint that is about to be picked up, so a first logged step
+# other than 1 is expected rather than discovered afterwards.
+_resume_marker="$BASE_FOLDER/$RUN_NAME/latest_checkpointed_iteration.txt"
+if [[ -f "$_resume_marker" ]]; then
+  echo "[resume] $BASE_FOLDER/$RUN_NAME holds global_step_$(cat "$_resume_marker")"
+  echo "[resume] verl resume_mode=auto continues from it; delete that directory to train from scratch"
+fi
+
 # ---- do these overrides exist in THIS verl? ---------------------------------
 # hydra rejects an unknown override with "Could not override 'x.y'" -- and it does so
 # in every rank after torchrun has already started them and each has read the model
