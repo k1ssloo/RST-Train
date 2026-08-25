@@ -106,13 +106,37 @@ def main() -> int:
     args = ap.parse_args()
 
     import pandas as pd
+    import pyarrow.parquet as pq
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
     if not tokenizer.is_fast:
         sys.exit("a fast tokenizer is required (offset mapping)")
-    frame = pd.read_parquet(args.parquet)
+    # `messages` is a nested column, and pandas refuses to convert one that
+    # arrives as several Arrow chunks ("Nested data conversions not implemented
+    # for chunked array outputs"); forcing it into a single chunk instead
+    # overflows the 2 GiB ceiling of 32-bit Arrow offsets. Either way a corpus
+    # whose flattened messages exceed 2 GiB cannot be read whole. Streaming it
+    # in RecordBatches, which are single-chunk by construction, avoids both.
+    # This fixes the read side only: the exporter still accumulates every row's
+    # ids and mask in memory and writes them in one frame, so the output stays
+    # bounded by host memory and by the 2^31 elements of its own list child.
+    # The rest of the file keeps working on `frame`, which now holds only the
+    # small per-row metadata columns.
+    parquet_file = pq.ParquetFile(args.parquet)
+    present = set(parquet_file.schema_arrow.names)
+    meta_names = [
+        name
+        for name in ("trajectory_id", "task_group_id", "model_name")
+        if name in present
+    ]
+    frame = parquet_file.read(columns=meta_names).to_pandas()
     print(f"[in] {args.parquet}  rows={len(frame)}")
+
+    def _iter_messages():
+        for batch in parquet_file.iter_batches(batch_size=256, columns=["messages"]):
+            for record in batch.to_pylist():
+                yield record["messages"]
 
     ids_col: list[list[int]] = []
     mask_col: list[list[int]] = []
@@ -122,8 +146,8 @@ def main() -> int:
     trained_total = 0
     token_total = 0
 
-    for i, row in enumerate(frame.itertuples()):
-        messages = [dict(m) for m in row.messages]
+    for i, row_messages in enumerate(_iter_messages()):
+        messages = [dict(m) for m in row_messages]
         try:
             ids, mask = qwen3_5_mask(tokenizer, messages)
         except ValueError as exc:
