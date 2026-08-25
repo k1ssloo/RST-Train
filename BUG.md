@@ -612,6 +612,62 @@ invocation the launcher writes itself.
 
 ---
 
+## BUG-18 — a relaunch resumed the checkpoint and restarted the lr schedule 7.8× above its floor
+
+**Found in** `khazic/rst-qwen3.5-4b-tmax-sft` (two wandb runs, both exitcode 0).
+**Fixed in** `scripts/resume_guard.py` + `scripts/30_run_sft_verl.sh` +
+`scripts/14_make_report.py`, pinned by `tests/test_resume_schedule_gate.py`. **Measured**
+from the run's own `wandb` files.
+
+The tmax SFT model was produced by two launches of the same `RUN_NAME`:
+
+| wandb run | `total_epochs` | steps | loss | `train/lr` |
+|---|---|---|---|---|
+| `bic28b9c` | 1 | 1 → 42 | 0.2624 → **0.19885** | 3.0e-06 → **3.000e-07** (the `min_lr_ratio` floor) |
+| `l6op97sl` | 3 | 43 → 84 | 0.19539 → **0.19650** | **2.3546e-06** → 1.005e-06 |
+
+`trainer.resume_mode` defaults to `auto`, so the second launch found `global_step_42` in
+`trainer.default_local_dir` and continued the step counter — while `total_training_steps`
+was re-derived from the *new* epoch count (42 → 126) and the cosine rebuilt over that
+total. The resumed step therefore landed part-way **up** the new curve: 7.8× above the
+floor the checkpoint had been annealed to. The 42 extra steps moved the loss
+0.1954 → 0.1965, i.e. nothing, which is what a second half-anneal at 8× the final lr buys.
+
+Neither run warned. verl does not compare the schedule it is about to apply with the one
+the checkpoint came from, and our launcher recorded nothing to compare against. The only
+trace was the `train/lr` column of a log nobody diffs, and the report has no lr check.
+
+**What changed.**
+
+* `scripts/resume_guard.py` — importable, so the logic is unit-tested rather than trusted.
+  `schedule_fingerprint()` extracts the curve-defining overrides (`trainer.total_epochs`,
+  `optim.lr`, `lr_scheduler_type`, `min_lr_ratio`, `lr_warmup_steps_ratio`, `weight_decay`,
+  `betas`, `data.train_batch_size`, `data.train_files`, `model.path`) plus the world size,
+  and writes them as `rst_launch.json` beside the checkpoints. On a launch that would
+  resume, a differing fingerprint is exit 2 naming each changed knob, why it reshapes the
+  curve, and the four ways forward (new `RUN_NAME`, restore the knobs,
+  `trainer.resume_mode=disable`, or `ALLOW_SCHEDULE_CHANGE_ON_RESUME=1`). Absent keys are
+  differences too — dropping `min_lr_ratio=0.1` does not leave the floor where it was.
+  `latest_checkpoint_step()` walks `global_step_*/` and ignores
+  `latest_checkpointed_iteration.txt`, because `resume_mode: auto` does and because the
+  27B run left a stale one saying 82 with no such directory.
+* `30_run_sft_verl.sh` runs the guard on node rank 0 with `"${VERL_ARGS[@]}"` — the array
+  actually passed to the trainer — immediately before `torchrun`.
+* `14_make_report.py::find_lr_restart()` catches it after the fact from the log alone: find
+  the lr peak (warmup rises legitimately), then flag any rise above 1.5× after it. A cosine
+  is non-increasing from its peak. This only fires when both launches are in the scraped
+  log, which is what the BUG-17 fix passes.
+
+An honest resume — same schedule, restarted after a node failure — is still allowed, and a
+resume that pre-dates the gate is allowed with a note that the earlier curve is unverified;
+refusing there would strand exactly the runs the gate exists for.
+
+**Why it stayed invisible.** Both launches succeeded, the loss went down overall, and the
+final loss (0.1965) is a fine-looking number. "More epochs" is the most ordinary knob to
+change, and the reward for changing it was two half-trained anneals reported as one run.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

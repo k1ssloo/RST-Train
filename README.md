@@ -118,6 +118,7 @@ scripts/
   19_train_dpo.py              DPO with a step-0 = log 2 calibration gate (FSDP2)
   dpo_common.py                the one logprob implementation both 18 and 19 use
   33_run_dpo.sh                the three DPO stages, resumable, container-free
+  resume_guard.py              refuses a resume whose lr schedule changed under it
   34_diagnose_oom.py           why an OOM does not move when you cut the token budget
   35_probe_fsdp2_grad_accum.py measures the unsharded-gradient claim on one GPU
 verl_backend/                  verl dataset + Harbor AgentLoop bridge
@@ -266,7 +267,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 189 tests, ~2 s (those needing torch/numpy say SKIP)
+python -m pytest tests/ -q     # 252 tests, ~1 s (those needing torch/numpy say SKIP)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -289,6 +290,7 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_dpo_noise_floor.py` | `BUG.md` BUG-15: both finished DPO runs reported `holdout_reward_accuracy 0.5 -> 0.5938` (4B) and `0.5 -> 0.5391` (9B) with `warnings: []`, off final margins of 6e-05 and 1e-05 nats — an accuracy that is a sign test on a margin below the bf16 noise of the reference logprobs it is differenced against. Pins `dpo_common.noise_floor_warning` to those two summaries: it fires on both, scales with beta because the reward does, and stays silent for a genuinely trained margin, a real negative margin, and a run with no holdout eval. Plus a source assertion that the warning is appended to `runtime_warnings` before the summary is built, so it is archived and not just printed |
 | `tests/test_nccl_timeout_report.py` | `BUG.md` BUG-14: when the 4B DPO trainer hung ten minutes in an NCCL watchdog timeout, the launcher answered with GATE 1 / GATE 2 / GATE 3 — three hypotheses that are all checked *before* the first collective — and the trainer's output was never on disk to read. Runs the real `rst_explain_nccl_timeout` against the observed log text and pins the two readings apart: per-rank `NumelIn` that differs (the ranks are running different collectives, a code divergence) versus identical everywhere (one rank never arrived — host OOM killer first). Also that a `[rank*]: *Error` raised before the timeout is surfaced as the first failure, that a log with no timeout stays silent, and that the launcher tees and classifies |
 | `tests/test_report_loss_curve.py` | `BUG.md` BUG-17: every verl report so far WARNed "no loss values scraped from logs" while 110 usable steps sat in `$BASE_FOLDER/logs/run.log` — `--run-dir` pointed at the trainer's *output* directory, which under verl/FSDP holds only `global_step_*/`. Scrapes the real verl line format (`step:41 - train/loss:… - train/lr:…`, progress-bar prefix and all, including the short `lr` spelling the long pattern never matched) and pins the stage slice: one appended `run.log` holds SFT, GRPO and DPO, and DPO's loss is log 2 by construction, so scraping the file whole turns two healthy runs into a curve that ends at 0.693. Plus source assertions that the launcher passes its own log and names the stage for each report |
+| `tests/test_resume_schedule_gate.py` | `BUG.md` BUG-18: the 4B tmax model came out of two launches of one `RUN_NAME` — the first ended at step 42 with `train/lr` 3.0e-07, its `min_lr_ratio` floor; the second, relaunched with `total_epochs=3`, was resumed by `trainer.resume_mode=auto` and started step 43 at 2.35e-06, because `total_training_steps` is re-derived every launch and the cosine rebuilt over the new total. Both exited 0, nothing warned, and the 42 extra steps moved the loss 0.1954 → 0.1965. Pins `scripts/resume_guard.py` against that exact pair: the epoch change on a resume is exit 2 naming the knob and the measured lr jump, an honest same-schedule resume and a pre-gate resume are allowed, the escape hatch *records* the new schedule instead of ignoring it, every curve-shaping knob (including one that disappears) is compared while `save_freq` and the wandb project are not, and the step comes from `global_step_*/` rather than the stale `latest_checkpointed_iteration.txt`. Plus the report-side `find_lr_restart`, which catches the same thing from the log alone without flagging warmup |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

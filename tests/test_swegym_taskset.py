@@ -34,7 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _util import ROOT, load_script  # noqa: E402
+from _util import ROOT, load_script, need  # noqa: E402
 
 builder = load_script("10c_build_swegym_taskset")
 
@@ -50,10 +50,12 @@ def test_a_multi_element_repeated_field_is_coerced_without_truthiness():
     element, and failed on `PASS_TO_PASS`, which usually is not -- so the naive version
     worked on the first rows and died partway through the pool.
     """
-    need = __import__("importlib").import_module("numpy")
-    assert builder.as_list(need.array(["a", "b", "c"])) == ["a", "b", "c"]
-    assert builder.as_list(need.array(["only"])) == ["only"]
-    assert builder.as_list(need.array([], dtype=object)) == []
+    # `need()` and not a bare import: without numpy this has to say "skipped" out loud,
+    # or an environment gap is reported as a code failure.
+    np = need("numpy")
+    assert builder.as_list(np.array(["a", "b", "c"])) == ["a", "b", "c"]
+    assert builder.as_list(np.array(["only"])) == ["only"]
+    assert builder.as_list(np.array([], dtype=object)) == []
 
 
 def test_none_and_empty_become_the_empty_list():

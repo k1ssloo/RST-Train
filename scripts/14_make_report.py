@@ -268,6 +268,39 @@ def check_config(findings: Findings, config: dict | None) -> None:
                          f"sequence cannot be placed")
 
 
+def find_lr_restart(steps: list[dict], *, factor: float = 1.5) -> dict | None:
+    """The first material rise in the learning rate *after* it began to decay.
+
+    Warmup rises, so the peak is found first and only what follows it is checked. A
+    cosine (or linear, or constant) schedule is non-increasing from its peak onward; a
+    rise there means the schedule was rebuilt part-way through the run. That is what
+    verl's `resume_mode: auto` does when the same RUN_NAME is relaunched with a
+    different `total_epochs` -- `total_training_steps` is re-derived and the curve
+    restarted at the resumed step. Measured: step 42 at 3.0e-07 (the min_lr floor),
+    step 43 at 2.35e-06.
+
+    `factor` is 1.5 so bf16 logging jitter and a mid-curve plateau stay quiet; the
+    observed jump was 7.8x. Only detectable when both launches are in the scraped log,
+    which is why the launcher passes the appended `run.log` rather than one run's stdout.
+    """
+    curve = [
+        s for s in steps
+        if isinstance(s.get("lr"), float) and math.isfinite(s["lr"]) and s["lr"] > 0
+    ]
+    if len(curve) < 3:
+        return None
+    peak = max(range(len(curve)), key=lambda i: curve[i]["lr"])
+    for prev, cur in zip(curve[peak:], curve[peak + 1:]):
+        if cur["lr"] > prev["lr"] * factor:
+            return {
+                "prev_step": prev.get("step"), "prev_lr": prev["lr"],
+                "step": cur.get("step"), "lr": cur["lr"],
+                "factor": cur["lr"] / prev["lr"],
+                "peak_step": curve[peak].get("step"), "peak_lr": curve[peak]["lr"],
+            }
+    return None
+
+
 def check_training(findings: Findings, training: dict, manifest: dict | None, config: dict | None) -> None:
     steps = training.get("steps") or []
     if training.get("steps_unnumbered"):
@@ -307,6 +340,21 @@ def check_training(findings: Findings, training: dict, manifest: dict | None, co
                          f"peak grad_norm={peak:.1f} (>100); suspect a bad batch or LR")
         else:
             findings.add(OK, "training", "grad norm", f"peak {peak:.2f}")
+
+    restart = find_lr_restart(steps)
+    if restart:
+        findings.add(WARN, "training", "lr schedule",
+                     f"learning rate rose {restart['factor']:.1f}x after the schedule had "
+                     f"started decaying: step {restart['prev_step']} lr {restart['prev_lr']:.3e} "
+                     f"-> step {restart['step']} lr {restart['lr']:.3e} (peak "
+                     f"{restart['peak_lr']:.3e} at step {restart['peak_step']}). A cosine does "
+                     f"not do that. verl's resume_mode=auto rebuilds the schedule over a "
+                     f"re-derived total_training_steps, so relaunching the same RUN_NAME with "
+                     f"different epochs resumes part-way back up the curve: the steps after "
+                     f"this point are a second half-anneal, not a continuation. The launcher "
+                     f"gate that refuses this is scripts/resume_guard.py.")
+    elif any(isinstance(s.get("lr"), float) for s in steps):
+        findings.add(OK, "training", "lr schedule", "monotone after the warmup peak")
 
     # expected step count from data size and batch size
     if manifest and config:

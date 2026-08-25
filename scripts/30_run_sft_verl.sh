@@ -617,6 +617,23 @@ print(f"[gate] {len(overrides)} hydra overrides all exist in this verl"
       + (f" ({len(passthrough)} flag(s) passed through unchecked)" if passthrough else ""))
 EOF_PY
 
+# ---- resume schedule gate ---------------------------------------------------
+# trainer.resume_mode defaults to auto, so a global_step_* already sitting in
+# trainer.default_local_dir is loaded and step counting continues -- while
+# total_training_steps is re-derived from total_epochs and the cosine rebuilt over the
+# new total. Relaunching this RUN_NAME with different epochs therefore resumes part-way
+# back UP the curve (measured on the 4B tmax run: step 42 ended at lr 3.0e-07, the
+# min_lr floor, and step 43 of the relaunch started at 2.35e-06). verl warns about none
+# of it. scripts/resume_guard.py diffs the schedule knobs against the ones recorded
+# beside the checkpoints and refuses a resume that is not one.
+# Node rank 0 only: the record is a single file and every node runs this script.
+if [[ "${NODE_RANK:-0}" == "0" ]]; then
+  python "$REPO_DIR/scripts/resume_guard.py" \
+    --run-dir "$BASE_FOLDER/$RUN_NAME" \
+    --world-size "$(( NNODES * NGPUS ))" \
+    -- "${VERL_ARGS[@]}" || exit 2
+fi
+
 torchrun \
   --nnodes "$NNODES" --nproc_per_node "$NGPUS" \
   --node_rank "${NODE_RANK:-0}" \
