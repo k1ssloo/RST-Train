@@ -57,9 +57,9 @@ support CPU CFS scheduler or the cgroup is not mounted
 
 **已用零权限方式绕过**：harbor 的 environment 构造参数 `cpu_enforcement_policy` 支持 `ignore`，`00b_setup_sandbox.sh` 现在会自动检测「rootless 且 `cpu` 未委派」并追加 `--environment-kwarg cpu_enforcement_policy=ignore`，同时**大声打印后果**。
 
-### 1.4 端到端验证通过
+### 1.4 端到端验证通过（两次，逐步加码）
 
-用 harbor 的 `oracle` agent（直接跑任务自带的参考解，不需要模型）跑真实 tb2 任务：
+**第一次：不带模型，验证容器 + verifier。** 用 harbor 的 `oracle` agent（直接跑任务自带的参考解）跑真实 tb2 任务：
 
 ```
 harbor run --path /tmp/tbtasks/terminal-bench/password-recovery \
@@ -68,6 +68,30 @@ harbor run --path /tmp/tbtasks/terminal-bench/password-recovery \
 ```
 
 镜像拉取、网络创建、容器启动、参考解执行、verifier 判分，**全链路通**。
+
+**第二次：带真实模型，验证完整 agentic 链路。** sglang 服务本机 merge 出来的 4B TMax checkpoint，harbor + terminus-2 驱动它跑 tb2 任务：
+
+```
+[serve] ready
+The server is fired up and ready to roll!
+[tb2] run 1/1: 1 tasks, concurrency 1
+```
+
+trial.log 里能看到 terminus-2 在真的干活：模型输出被解析成 JSON action、trajectory 不断 dump、subagent 在做 summarization。也就是说 **sglang 服务 → harbor → terminus-2 → 容器 → verifier 这条完整链路是通的**。
+
+拿到**带分数的** tb2 结果还差一步，原因在 §3.1（GPU 被占，只能给 16k context，导致 agent 疯狂 summarize 而超时），那是资源问题，不是代码或权限问题。
+
+### 1.5 为了让 sglang 起来，另外修了三处
+
+这三个是叠在一起的，修掉一个才能看到下一个：
+
+1. **`ninja` 不在 PATH 上**。sglang 启动时会 shell out 调 `ninja` 编译 JIT kernel，而 `ninja` 装在 venv 自己的 `bin/` 里，没有人 activate venv 所以子进程找不到。**最坑的是它死的位置**：在打印完 `Mamba Cache is allocated` 和 `max_total_num_tokens=424903` **之后**才死，所以日志最后一行看起来像启动成功了。已修：给 serve 子进程的 PATH 前置当前解释器的 `bin/`。
+
+2. **`--mem-fraction-static` 写死 0.85**。它是相对「sglang 可用的显存」而不是整卡算的，所以在共享卡上 0.85 反而是对的；**往下调是错的**——调到 0.30 会被拒：`Loaded weights leave no GPU memory for the KV cache ... minimum viable = 1 - available/pre = 0.3366`。已改成可配置，默认仍是 0.85。
+
+3. **`--max-running-requests` 没设，而报错信息不提它**。每个在途请求要预留自己的 gated-delta-net state（4B 实测 49 MiB/请求），sglang 按 CUDA graph 的 max batch（256）来定这个池子的大小 = **还没分 KV cache 就先吃掉约 12.6 GB**。报错是 `Not enough GPU memory for hybrid (mamba/linear-attention) state cache`，给了四条建议，第一条正是调这个、第二条是调 mem-fraction——很容易被引到错的那个旋钮上。已加成可配置，默认 0 = 不改 sglang 自己的行为。
+
+另外验证到：**光 merge 出来的 checkpoint 不能直接 serve**。verl 只写 text tensor，而 config 声明的是 `Qwen3_5ForConditionalGeneration` 且带 `vision_config`，sglang 会因为缺 `preprocessor_config.json` 而失败。要用 `scripts/07_restore_vision.py` 补齐（实测：426 个 tensor 来自训练、312 个 vision/mtp 来自原始 checkpoint、0 个意外回退、0 个 shape 不匹配）。
 
 ---
 
@@ -111,16 +135,30 @@ grep -w cpu /sys/fs/cgroup/user.slice/user-1004.slice/cgroup.controllers
 
 ## 三、其它不是权限问题、但会影响评测的事
 
-### 3.1 GPU 被别的进程占了 53.9 GB
+### 3.1 GPU 被另一个用户占了 53.9 GB —— 这是目前**唯一**卡住「带分数的 agentic 结果」的东西
 
 ```
 $ nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
-2605236, 53912 MiB      ← 不是本次任务的进程
+53912 MiB   ← /home/lzh/miniconda3/envs/diffsynth/bin/python
+              /home/lzh/DiffSynth-Studio/scripts/eval/.../eval_context.py
 ```
 
-整卡 81.5 GB，被这个进程占掉 66%。剩下的空间**不够同时**跑 sglang 服务和离线评测：4B 权重 8 GB 之外还要留 KV cache，27B 就更不可能（27B bf16 权重本身就 56 GB）。
+**属于用户 `lzh`，不是我们的进程，我没有动它。** 整卡 81.5 GB 被占掉 66%，只剩约 27.6 GB。
 
-要跑 **9B / 27B 的 agentic 评测**，需要先确认那个进程能不能停，或者换一台卡更空的机器。4B 可以在现有空间里跑。这不是权限问题，是资源占用问题，需要你确认。
+后果是一条因果链，值得写清楚：
+
+1. 27.6 GB 里放下 4B 权重（8.8 GB）后，只能给到 **`--context-length 16384`**，而仓库默认是 65536。
+2. terminus-2 在 16k 上下文里，可用余量只有约 7,500 token（日志：`Proactively summarizing. Free tokens: approximately 7492`）。
+3. 于是它**不停地做 proactive summarization**——单个任务实测跑出 **76 个** summarization 产物，每一轮都要额外调用模型。
+4. 结果单个任务远远超过默认的 900 s `--task-timeout`，被判为失败，而**失败原因和模型能力无关**。
+
+所以：**目前拿不到可信的 tb2 pass rate，不是因为链路不通（链路已验证通，见 §1.4），而是因为显存不够导致上下文被砍到 1/4。**
+
+需要你确认的事（不是权限问题，是资源协调）：
+
+- `lzh` 那个 job 能不能停 / 什么时候结束？只要拿回整卡，4B 就能用 65536 上下文正常跑。
+- **9B / 27B 的 agentic 评测在现状下完全不可能**：27B 光 bf16 权重就 56 GB，比整张卡剩下的空间还多。这两个尺寸需要一张空卡（或多卡）。
+- 本机只有 1 张 H100（`nvidia-smi` 只有 index 0），没有别的卡可以挪。
 
 ### 3.2 tb-hard（100 个任务）拿不到
 
