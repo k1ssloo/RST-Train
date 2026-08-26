@@ -117,6 +117,47 @@ sys.exit(1)
 EOF_PY
 }
 
+# Find a Docker daemon THIS USER owns, without needing DOCKER_HOST preset.
+#
+# WHY THIS EXISTS
+#   The section below deliberately refuses the shared host socket at
+#   /var/run/docker.sock -- building untrusted task Dockerfiles on the machine's root
+#   daemon is the thing being avoided, and on a box where you are not in the `docker`
+#   group you cannot reach it anyway. But it then required the operator to already know
+#   about some other socket, so a rootless daemon the user *already owns* was reported
+#   as "no container runtime" and the whole eval fell back to the offline path.
+#
+#   That happened here. A rootless dockerd was running as this user the entire time,
+#   on a socket under ~/.cache/, and nothing looked for it. Docker's own convention is
+#   $XDG_RUNTIME_DIR/docker.sock, but a rootless daemon started with an explicit
+#   --host lands wherever the caller chose, so the process table is the only reliable
+#   place to learn the path.
+#
+#   A rootless daemon owned by this user is the BEST local option, better than podman:
+#   full buildkit (so heredoc Dockerfiles build -- podman < 4.4 cannot parse them, and
+#   ~31 % of task images use them), image export into a real store, and no privilege of
+#   any kind. It is checked before podman for exactly that reason.
+#
+# Prints a DOCKER_HOST value and returns 0, or returns 1.
+discover_owned_docker() {
+  command -v docker >/dev/null 2>&1 || return 1
+  local candidate
+  for candidate in \
+      ${DOCKER_HOST:+"${DOCKER_HOST#unix://}"} \
+      "$XDG_RUNTIME_DIR/docker.sock" \
+      $(ps -o args= -u "$(id -u)" 2>/dev/null \
+        | grep -oE -- '--host[= ]unix://[^ ]+' | sed 's/.*unix:\/\///' | sort -u)
+  do
+    # The shared host daemon is the one case to refuse: it is root's, not ours.
+    [[ "$candidate" == "/var/run/docker.sock" ]] && continue
+    [[ -S "$candidate" && -w "$candidate" ]] || continue
+    DOCKER_HOST="unix://$candidate" docker version >/dev/null 2>&1 || continue
+    printf 'unix://%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
 RST_CONTAINER_RUNTIME=""
 RST_DOCKER_HOST=""
 RST_BUILD_CMD=""
@@ -151,19 +192,27 @@ if [[ -n "$RST_HARBOR_ENV" && "$RST_HARBOR_ENV" != docker ]]; then
 fi
 
 # ---------------------------------------------------------------- 1. real docker
-if [[ -z "$RST_SANDBOX_LOCATION" ]] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  # Only accept a NON-default socket: building untrusted Dockerfiles on the shared
-  # host daemon is what we are avoiding. If DOCKER_HOST is unset or points at the
-  # host socket, fall through.
-  if [[ -n "${DOCKER_HOST:-}" && "$DOCKER_HOST" != "unix:///var/run/docker.sock" ]]; then
+# Any Docker daemon this user owns, whether DOCKER_HOST was set or not. The shared
+# host socket is still refused; see discover_owned_docker above for why this looks in
+# the process table and why it is preferred over podman.
+if [[ -z "$RST_SANDBOX_LOCATION" ]]; then
+  if owned_docker="$(discover_owned_docker)"; then
     RST_CONTAINER_RUNTIME=docker
-    RST_DOCKER_HOST="$DOCKER_HOST"
+    RST_DOCKER_HOST="$owned_docker"
     RST_BUILD_CMD=docker
     RST_HARBOR_ENV=docker
     RST_SANDBOX_LOCATION=local
-    log "using docker at $DOCKER_HOST"
-  else
-    log "docker reachable but only via the shared host socket; looking for something else"
+    log "using docker at $RST_DOCKER_HOST"
+    if DOCKER_HOST="$RST_DOCKER_HOST" docker info --format '{{.SecurityOptions}}' 2>/dev/null \
+         | grep -q rootless; then
+      log "  rootless daemon owned by $(id -un): no privilege needed, and buildkit is"
+      log "  available so heredoc Dockerfiles build (podman < 4.4 cannot parse those)"
+    fi
+  elif command -v docker >/dev/null 2>&1 && [[ -S /var/run/docker.sock ]]; then
+    log "the only docker socket is the shared host one at /var/run/docker.sock;"
+    log "  refusing it (root's daemon, untrusted task Dockerfiles) and looking further."
+    log "  A rootless daemon of your own is the fix and needs no privilege:"
+    log "    dockerd-rootless-setuptool.sh install   # then use \$XDG_RUNTIME_DIR/docker.sock"
   fi
 fi
 
@@ -306,6 +355,50 @@ if [[ -z "$RST_SANDBOX_LOCATION" ]]; then
 EOF
   [[ "$MODE" == check ]] && exit 1
   return 1 2>/dev/null || exit 1
+fi
+
+# ------------------------------------- cgroup cpu delegation, and what it costs us
+# A task declares its budget in task.toml (`cpus = 1`, `memory = "2G"`). Harbor turns
+# `cpus` into NanoCPUs, and a rootless daemon can only set that if the kernel has
+# delegated the cgroup v2 `cpu` controller to this user's slice. systemd delegates
+# `memory pids` by default and NOT `cpu`, so on an otherwise perfectly working rootless
+# setup every container dies at creation with:
+#
+#   Error response from daemon: NanoCPUs can not be set, as your kernel does not
+#   support CPU CFS scheduler or the cgroup is not mounted
+#
+# which reads like a kernel problem and is actually a one-line systemd drop-in. Since
+# that drop-in needs root, the fallback is to tell harbor not to enforce the CPU limit.
+#
+# THIS CHANGES WHAT THE NUMBERS MEAN, so it is logged as loudly as it is applied: the
+# task gets however many cores the box has instead of the 1 it asked for. That can only
+# help the agent, which is exactly why it must appear in the report rather than being
+# quietly convenient. `memory` is left enforced -- it is delegated, and it is the limit
+# that actually changes whether a task can be solved.
+if [[ "$RST_HARBOR_ENV" == docker && "$RST_SANDBOX_LOCATION" == local ]]; then
+  cpu_delegated=1
+  if DOCKER_HOST="$RST_DOCKER_HOST" docker info --format '{{.SecurityOptions}}' 2>/dev/null \
+       | grep -q rootless; then
+    own_cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
+    grep -qw cpu "$own_cg" 2>/dev/null || cpu_delegated=0
+  fi
+  if [[ "$cpu_delegated" == 0 ]]; then
+    case "$RST_HARBOR_ENV_KWARGS" in
+      *cpu_enforcement_policy=*) ;;      # operator already decided
+      *) RST_HARBOR_ENV_KWARGS="${RST_HARBOR_ENV_KWARGS:+$RST_HARBOR_ENV_KWARGS }cpu_enforcement_policy=ignore" ;;
+    esac
+    export RST_CPU_LIMIT_UNENFORCED=1
+    log "WARNING: cgroup v2 'cpu' is not delegated to $(id -un), so a rootless daemon"
+    log "  cannot apply each task's declared cpus= limit. Passing"
+    log "  cpu_enforcement_policy=ignore so containers start at all."
+    log "  CONSEQUENCE: tasks run with the whole box's CPU instead of their declared"
+    log "  budget. Say so in the report -- it can only help the agent."
+    log "  For exact parity ask an admin for (root, one file, then re-login):"
+    log "    /etc/systemd/system/user@.service.d/delegate.conf"
+    log "      [Service]"
+    log "      Delegate=cpu cpuset io memory pids"
+    log "    systemctl daemon-reload && systemctl restart user@$(id -u).service"
+  fi
 fi
 
 export RST_CONTAINER_RUNTIME RST_DOCKER_HOST RST_BUILD_CMD
