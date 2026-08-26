@@ -79,7 +79,24 @@ The server is fired up and ready to roll!
 
 trial.log 里能看到 terminus-2 在真的干活：模型输出被解析成 JSON action、trajectory 不断 dump、subagent 在做 summarization。也就是说 **sglang 服务 → harbor → terminus-2 → 容器 → verifier 这条完整链路是通的**。
 
-拿到**带分数的** tb2 结果还差一步，原因在 §3.1（GPU 被占，只能给 16k context，导致 agent 疯狂 summarize 而超时），那是资源问题，不是代码或权限问题。
+**跑完一个任务后的实际判分结果**（`data/eval/probe2/results.json`）：
+
+```json
+"status": "scored",
+"trials_total": 1,  "trials_scorable": 1,
+"infra_failures": 0,          "infra_reasons": {},
+"agent_budget_failures": 1,   "agent_budget_reasons": {"timed out": 1},
+"pass_rate_mean": 0.0
+```
+
+这份结果的每一项都是**正确分类**的，这比分数本身更重要：
+
+- **`infra_failures: 0`** —— 容器链路干净，没有任何基础设施故障。
+- `trials_scorable: 1` —— 这一次进了分母。之前那次 `infra_failed=4` 是因为我漏传 `--docker-host`，harbor 去找 root 的 `/var/run/docker.sock` 然后被拒；补上就没有了。
+- 唯一的失败被归为 `agent_budget_reasons: {"timed out": 1}`，按仓库的 taxonomy 记作**分母内的 reward 0**（wall clock 是 agent 自己烧掉的，算模型失败，不算环境失败）——这是正确的处理。
+- `protocol.agent_model_info.forwarded: true` —— `model_info` 那个修复真的生效了。
+
+所以**评测流水线现在是可用且判分正确的**。这一题没做出来（0/1，超时）是真实结果，但它带着 §3.1 那个 16k 上下文的枷锁：84 轮 summarization 把 3000 s 预算烧光了。想要可信的 pass rate，需要把 GPU 拿回来。
 
 ### 1.5 为了让 sglang 起来，另外修了三处
 
