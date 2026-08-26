@@ -171,6 +171,59 @@ def harbor_run_flags(harbor_bin: str) -> frozenset[str]:
     return frozenset(re.findall(r"--[a-z0-9][a-z0-9-]+", (proc.stdout or "") + (proc.stderr or "")))
 
 
+def agent_kwargs_argv(args) -> tuple[list[str], dict]:
+    """`--agent-kwarg model_info=...`, without which harbor 0.21.0 runs zero tasks.
+
+    Terminus-2 calls the model through LiteLLM, which looks up context window and
+    per-token price in its own model map. `hosted_vllm/<served-name>` is not in that
+    map -- the name is whatever `--served-model-name` we chose -- so the lookup misses
+    and harbor refuses to start:
+
+        ValueError: hosted_vllm models require model_info
+
+    Measured against harbor 0.21.0: every task fails this way, before the agent
+    issues a single command. It is a harness-infrastructure failure, so the taxonomy
+    correctly keeps it out of the pass-rate denominator -- which means the run
+    "succeeds" with a denominator of zero unless this is passed. That is exactly the
+    shape of failure this script exists to make impossible to misread.
+
+    The four keys are the minimum LiteLLM needs:
+
+      max_input_tokens   derived from the server's own --context-length minus the
+                         output reserve, NOT hardcoded. If it exceeded what sglang
+                         was launched with, LiteLLM would happily send a prompt the
+                         server then rejects, and the task would fail for a reason
+                         that looks nothing like "the context is too small".
+      max_output_tokens  the cap Terminus-2 requests per turn.
+      *_cost_per_token   zero. Local weights have no price, but LiteLLM still
+                         computes spend and needs the keys to exist.
+    """
+    reserve = max(1, args.max_output_tokens)
+    model_info = {
+        "max_input_tokens": max(1, args.context_length - reserve),
+        "max_output_tokens": reserve,
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+    }
+    record: dict = {"model_info": model_info, "forwarded": False, "control": ""}
+    if "--agent-kwarg" not in harbor_run_flags(args.harbor_bin):
+        record["control"] = (
+            "NOT FORWARDED: this harbor build has no --agent-kwarg, so model_info "
+            "could not be supplied. If it is a build that requires model_info for "
+            "hosted_vllm (0.21.0 does), every task will fail in the harness before "
+            "the agent starts and the pass rate will be computed over an empty "
+            "denominator. Check the per-task errors before believing any number here."
+        )
+        return [], record
+    record["forwarded"] = True
+    record["control"] = (
+        f"forwarded as --agent-kwarg model_info=... with max_input_tokens="
+        f"{model_info['max_input_tokens']} (context_length {args.context_length} minus "
+        f"{reserve} reserved for output)"
+    )
+    return ["--agent-kwarg", "model_info=" + json.dumps(model_info, separators=(",", ":"))], record
+
+
 def sampling_argv(args) -> tuple[list[str], dict]:
     """`harbor run` sampling flags plus the record that goes into results.json."""
     wanted = {"temperature": args.temperature, "top_p": args.top_p}
@@ -218,6 +271,7 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
         "--max-retries", "0", "--jobs-dir", str(jobs_dir), "--job-name", job_name, "--quiet",
     ]
     argv += args.sampling_argv
+    argv += args.agent_kwargs_argv
     for kwarg in harbor_env_kwargs(args):
         argv += ["--environment-kwarg", kwarg]
     env = harbor_process_env(args)
@@ -351,6 +405,8 @@ async def main_async(args) -> int:
     served_name = args.served_name
     args.sampling_argv, args.sampling_record = sampling_argv(args)
     print(f"[protocol] sampling: {args.sampling_record['control']}", flush=True)
+    args.agent_kwargs_argv, args.agent_kwargs_record = agent_kwargs_argv(args)
+    print(f"[protocol] model_info: {args.agent_kwargs_record['control']}", flush=True)
     server = None
     if args.model_path:
         args.endpoint = f"http://127.0.0.1:{args.port}/v1"
@@ -425,6 +481,9 @@ async def main_async(args) -> int:
         # What made the runs (in)dependent. Recorded even when it is "we could not
         # set this", because that is the case a reader most needs to know about.
         "sampling": args.sampling_record,
+        # Without this, harbor 0.21.0 fails every task before the agent starts.
+        # Recorded so a zero-denominator run is diagnosable from results.json alone.
+        "agent_model_info": args.agent_kwargs_record,
         "failure_taxonomy": {
             HARNESS_INFRA: list(HARNESS_INFRA_MARKERS),
             AGENT_BUDGET: list(AGENT_BUDGET_MARKERS),
@@ -464,6 +523,10 @@ def main() -> int:
     p.add_argument("--tp", type=int, default=4)
     p.add_argument("--port", type=int, default=30000)
     p.add_argument("--context-length", type=int, default=65536)
+    p.add_argument("--max-output-tokens", type=int, default=4096,
+                   help="per-turn generation cap handed to LiteLLM as "
+                        "model_info.max_output_tokens; also reserved out of "
+                        "--context-length when computing max_input_tokens")
     p.add_argument("--serve-timeout", type=int, default=1800)
     p.add_argument("--benchmarks", default="tb-hard,tb2")
     p.add_argument("--tb-hard-tasks", default=os.environ.get("TB_HARD_TASKS", ""))

@@ -53,6 +53,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -106,27 +107,112 @@ def strip_think(text: str) -> tuple[str, str]:
     return text, "none"
 
 
+# One `<tool_call>` block in the Qwen3.5 native tool-calling dialect, as TMax and any
+# tool-calling corpus emit it:
+#     <tool_call>\n<function=bash>\n<parameter=command>\nls -la\n</parameter>\n</function>\n</tool_call>
+_TOOL_CALL = re.compile(
+    r"<tool_call>\s*<function=(?P<name>[^>]+)>(?P<body>.*?)</function>\s*</tool_call>",
+    re.DOTALL,
+)
+_TOOL_PARAM = re.compile(r"<parameter=(?P<key>[^>]+)>(?P<value>.*?)</parameter>", re.DOTALL)
+
+# How TMax's harness is told the episode is over. There is no structured
+# `task_complete` field in the tool-calling dialect -- the agent says so by running
+# this, so that is what "the model thinks it is done" means there.
+_COMPLETE_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+
+def _tool_call_action(text: str) -> dict | None:
+    """Parse the native tool-calling dialect into the same action dict shape.
+
+    Returns None when there is no tool call, so `action_of` can fall through.
+
+    This exists because the probe was silently inapplicable to half the corpora this
+    repo now trains on. Measured on the 4B TMax checkpoint before the fix: 80 of 80
+    probed turns were counted `reference_unparseable` and every action rate came back
+    `None` -- the teacher-forced loss was real, the action probe measured nothing, and
+    only the skip counter said so.
+
+    `commands` is emitted rather than the raw call so `keystrokes_of` and
+    `compare_actions` stay dialect-agnostic and one comparison covers both formats.
+    """
+    calls = list(_TOOL_CALL.finditer(text))
+    if not calls:
+        return None
+    commands: list[dict] = []
+    for call in calls:
+        params = {m.group("key"): m.group("value").strip()
+                  for m in _TOOL_PARAM.finditer(call.group("body"))}
+        # `command` is the bash tool's parameter; fall back to the sole value so a
+        # differently-named single-parameter tool is not silently dropped.
+        value = params.get("command")
+        if value is None and len(params) == 1:
+            value = next(iter(params.values()))
+        if value is None:
+            continue
+        commands.append({"keystrokes": value, "tool": call.group("name")})
+    if not commands:
+        return None
+    return {
+        "commands": commands,
+        "task_complete": any(_COMPLETE_SENTINEL in c["keystrokes"] for c in commands),
+        "_dialect": "tool_call",
+    }
+
+
 def action_of(text: str) -> dict | None:
-    """Parse one assistant output into the RST action dict, or None."""
+    """Parse one assistant output into an action dict, or None.
+
+    Two dialects, tried in order: the RST/OpenThoughts/Nemotron JSON contract, then
+    the native tool-calling form. Both reduce to `commands[].keystrokes`, which is
+    the only part `compare_actions` looks at.
+    """
     builder = _load_sibling("03_build_sft_data")
     canonical, _rewritten, _reason = builder.normalize_assistant(text)
-    if canonical is None:
-        return None
-    try:
-        obj = json.loads(canonical)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return obj if isinstance(obj, dict) else None
+    if canonical is not None:
+        try:
+            obj = json.loads(canonical)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+        if isinstance(obj, dict):
+            obj["_dialect"] = "json"
+            return obj
+    return _tool_call_action(text)
 
 
 def keystrokes_of(action: dict | None) -> list[str]:
+    """The executable text of each command, without the trailing Enter.
+
+    The trailing newline is stripped because it is a "press Enter" marker, not part of
+    the command: the JSON dialect writes `"ls -la\\n"` and the tool-calling dialect
+    writes `ls -la` for the identical action. Comparing them raw would score every
+    cross-dialect pair as a mismatch. It changes nothing within a dialect, where both
+    sides carry the same convention.
+    """
     if not action:
         return []
     out: list[str] = []
     for command in action.get("commands") or []:
         if isinstance(command, dict):
-            out.append(str(command.get("keystrokes", "")))
+            out.append(str(command.get("keystrokes", "")).rstrip("\n"))
     return out
+
+
+def task_complete_of(action: dict | None) -> bool:
+    """Whether the turn claims the task is finished.
+
+    Reads `task_complete`, which is what the data actually uses. The previous code
+    read `is_task_complete` -- a key present in no dataset here -- so both sides of
+    the comparison were `None`, the agreement was trivially true for every parsed
+    pair, and `task_complete_agreement_rate` reported 1.0 no matter what the model
+    said. `is_task_complete` is still accepted in case some producer emits it.
+    """
+    if not action:
+        return False
+    for key in ("task_complete", "is_task_complete"):
+        if key in action:
+            return bool(action[key])
+    return False
 
 
 def compare_actions(reference: dict, predicted: dict | None) -> dict[str, bool]:
@@ -143,8 +229,8 @@ def compare_actions(reference: dict, predicted: dict | None) -> dict[str, bool]:
         "first_keystrokes_exact": bool(pred_keys) and bool(ref_keys)
         and pred_keys[0] == ref_keys[0],
         "command_count_match": len(pred_keys) == len(ref_keys),
-        "task_complete_agreement": bool(predicted is not None)
-        and bool(reference.get("is_task_complete")) == bool(predicted.get("is_task_complete")),
+        "task_complete_agreement": predicted is not None
+        and task_complete_of(reference) == task_complete_of(predicted),
     }
 
 
