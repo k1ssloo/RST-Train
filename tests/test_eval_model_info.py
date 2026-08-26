@@ -152,6 +152,56 @@ def test_max_output_tokens_is_settable_from_the_cli():
     assert '"--max-output-tokens"' in source
 
 
+# ------------------------------------------------------------------ serving the model
+#
+# Three things that each stopped sglang from ever answering a request. All were found by
+# running it on a GPU shared with another user's job, which is the normal case on a
+# shared box and the one the hardcoded defaults did not survive.
+
+
+def test_ninja_is_reachable_by_the_sglang_subprocess():
+    """The failure that looks like a healthy start.
+
+    sglang JIT-compiles some kernels by shelling out to `ninja`, which pip puts in the
+    interpreter's own bin/ -- not on PATH, because nothing activates a venv. It dies
+    with `FileNotFoundError: 'ninja'` AFTER logging the KV cache size and
+    max_total_num_tokens, so the log's last useful line reads like success.
+    """
+    source = (ROOT / "scripts" / "06_eval.py").read_text(encoding="utf-8")
+    assert "serve_env" in source and "Path(sys.executable).parent" in source
+    assert "env=serve_env" in source, "the PATH fix was built but not passed to the child"
+
+
+def test_the_memory_fraction_is_not_hardcoded():
+    """0.85 assumes the card is ours.
+
+    mem_fraction_static is measured against the memory available to sglang, so on a card
+    where another process already holds most of the HBM the default is what you want --
+    but it has to be movable, because the failure otherwise is a CUDA OOM that reads
+    like a model problem rather than a co-tenancy problem.
+    """
+    source = (ROOT / "scripts" / "06_eval.py").read_text(encoding="utf-8")
+    assert '"--mem-fraction-static", str(args.mem_fraction_static),' in source
+    assert '"--mem-fraction-static", type=float, default=0.85' in source
+
+
+def test_the_in_flight_request_cap_is_available_and_optional():
+    """Why this one matters more than the memory fraction.
+
+    Each in-flight request reserves its own gated-delta-net state -- 49 MiB/request at
+    4B -- and sglang sizes that pool from the CUDA graph's max batch (256), i.e. ~12.6
+    GiB gone before any KV cache. The resulting error names --mem-fraction-static and
+    never mentions the request count, so it sends you at the wrong knob.
+
+    Default 0 must leave sglang's own behaviour untouched: this is a co-tenancy escape
+    hatch, not a new default.
+    """
+    source = (ROOT / "scripts" / "06_eval.py").read_text(encoding="utf-8")
+    assert 'if args.max_running_requests:' in source
+    assert '"--max-running-requests", str(args.max_running_requests)' in source
+    assert '"--max-running-requests", type=int, default=0' in source
+
+
 if __name__ == "__main__":
     from run_tests import run_module
 

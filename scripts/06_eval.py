@@ -416,10 +416,23 @@ async def main_async(args) -> int:
             sys.executable, "-m", "sglang.launch_server",
             "--model-path", str(args.model_path), "--served-model-name", served_name,
             "--tp", str(args.tp), "--port", str(args.port), "--host", "127.0.0.1",
-            "--mem-fraction-static", "0.85", "--context-length", str(args.context_length),
+            # 0.85 assumes the card is ours. It is not always: another process holding
+            # most of the HBM makes sglang fail at startup with a CUDA OOM that reads
+            # like a model problem. Configurable so a shared GPU is a flag, not a fork.
+            "--mem-fraction-static", str(args.mem_fraction_static),
+            "--context-length", str(args.context_length),
             "--disable-radix-cache",              # hybrid KV-cache layouts + prefix caching are unreliable
             "--mamba-scheduler-strategy", "extra_buffer",   # required for the gated-delta-net layers
         ]
+        # Each in-flight request reserves its own gated-delta-net state -- measured at
+        # 49 MiB/request for 4B -- and sglang otherwise sizes that pool from the CUDA
+        # graph's max batch (256), i.e. ~12.6 GiB reserved before any KV cache. On a
+        # card shared with another job that is the difference between starting and
+        # "Not enough GPU memory for hybrid (mamba/linear-attention) state cache",
+        # which names mem-fraction-static and never mentions the request count.
+        # Capping it near --n-concurrent costs nothing: nothing else is in flight.
+        if args.max_running_requests:
+            cmd += ["--max-running-requests", str(args.max_running_requests)]
         # Some checkpoints ship a template whose *generation* prompt does not match
         # what training produced (Qwen3.5-0.8B defaults thinking off, so its prompt
         # already closes the think block while the trained target opens with
@@ -427,8 +440,18 @@ async def main_async(args) -> int:
         if args.chat_template:
             cmd += ["--chat-template", str(args.chat_template)]
         print("[serve] " + " ".join(cmd), flush=True)
+        # sglang JIT-compiles some kernels at startup by shelling out to `ninja`, which
+        # pip installs into the interpreter's OWN bin/ -- not necessarily onto PATH,
+        # because nothing here activates a venv. Without this the server dies partway
+        # through warmup with `FileNotFoundError: [Errno 2] ... 'ninja'`, after it has
+        # already reported the KV cache size, so the log looks like a healthy start.
+        serve_env = dict(os.environ)
+        interpreter_bin = str(Path(sys.executable).parent)
+        if interpreter_bin not in serve_env.get("PATH", "").split(os.pathsep):
+            serve_env["PATH"] = interpreter_bin + os.pathsep + serve_env.get("PATH", "")
         with log.open("wb") as fh:
-            server = await asyncio.create_subprocess_exec(*cmd, stdout=fh, stderr=asyncio.subprocess.STDOUT)
+            server = await asyncio.create_subprocess_exec(
+                *cmd, stdout=fh, stderr=asyncio.subprocess.STDOUT, env=serve_env)
         # readiness = a real chat completion, not /health
         ok = False
         for _ in range(args.serve_timeout // 10):
@@ -523,6 +546,16 @@ def main() -> int:
     p.add_argument("--tp", type=int, default=4)
     p.add_argument("--port", type=int, default=30000)
     p.add_argument("--context-length", type=int, default=65536)
+    p.add_argument("--max-running-requests", type=int, default=0,
+                   help="cap sglang's in-flight requests. 0 leaves sglang's default, "
+                        "which sizes the hybrid-attention state pool from the CUDA "
+                        "graph batch (256) and can reserve ~12 GiB before any KV cache. "
+                        "Set it near --n-concurrent on a shared GPU.")
+    p.add_argument("--mem-fraction-static", type=float, default=0.85,
+                   help="fraction of TOTAL GPU memory sglang may reserve. Lower it when "
+                        "another process already holds part of the card; check with "
+                        "nvidia-smi first, because this is a fraction of total and not "
+                        "of free memory.")
     p.add_argument("--max-output-tokens", type=int, default=4096,
                    help="per-turn generation cap handed to LiteLLM as "
                         "model_info.max_output_tokens; also reserved out of "
