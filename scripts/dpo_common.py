@@ -109,21 +109,20 @@ def supervised_positions(mask, device):
     return torch.nonzero(flags, as_tuple=False).flatten()
 
 
-def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
-                       grad: bool = False):
-    """Sum log p(token | prefix) over supervised positions only.
+def _score_impl(model, ids: list[int], mask: list[int], *, chunk: int, grad: bool):
+    """Body of masked_logprob_sum; see it for what this computes.
 
-    Returns ``(logp_sum, n_supervised)`` where ``logp_sum`` is a 0-dim tensor. With
-    ``grad=True`` each chunk is wrapped in activation checkpointing, so the peak
-    logit footprint stays at one chunk instead of the whole sequence: without that,
-    holding every chunk's logits for backward costs exactly as much as never having
-    chunked at all, which is the trap this function exists to avoid.
+    Always entered with every parameter a plain tensor, either because the run is
+    single-process or because the caller routed this through the root module's
+    FSDP forward hook.
     """
     import torch
     from torch.utils.checkpoint import checkpoint
 
     decoder, head = decoder_and_head(model)
-    device = next(model.parameters()).device
+    param = next(model.parameters())
+    device = getattr(param, "to_local", lambda: param)().device
+
     input_ids = torch.tensor([ids], dtype=torch.long, device=device)
     targets = torch.tensor(ids, dtype=torch.long, device=device)
     positions = supervised_positions(mask, device)
@@ -159,6 +158,61 @@ def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
             total = total + part.double()
         logp = -total
     return logp, n
+
+
+_SCORER_ATTR = "_rst_fsdp_score"
+
+
+def _scorer(model):
+    """Return a callable that scores one row with every parameter unsharded.
+
+    FSDP2 all-gathers a module's parameters only around that module's own
+    forward. This path calls the decoder and the head separately, so the head can
+    be applied in slices instead of materialising seq x vocab logits, which means
+    the root module's hook never fires: the parameters the root owns (the input
+    embedding, the final norm, the head) stay DTensors while every decoder
+    layer's own hook has already all-gathered its parameters into plain tensors.
+    One operation seeing both kinds is a hard error, and it is not fixable from
+    the input side. Passing a plain input fails in the embedding:
+
+        RuntimeError: aten.embedding.default got mixed torch.Tensor and DTensor
+
+    and promoting the input to a DTensor only moves the same failure one module
+    down, into the first layer's norm, because that layer's weights are plain:
+
+        RuntimeError: aten.mul.Tensor got mixed torch.Tensor and DTensor
+
+    `register_fsdp_forward_method` is the supported way to give a method other
+    than forward the root's unshard, reshard and backward hooks, so the whole
+    scoring pass runs with every operand plain. Registering the pass as a whole,
+    rather than the decoder and the head separately, also all-gathers the root
+    group once per row instead of once per logit chunk.
+    """
+    import types
+
+    existing = getattr(model, _SCORER_ATTR, None)
+    if existing is not None:
+        return existing
+
+    from torch.distributed.fsdp import FSDPModule, register_fsdp_forward_method
+
+    setattr(model, _SCORER_ATTR, types.MethodType(_score_impl, model))
+    if isinstance(model, FSDPModule):
+        register_fsdp_forward_method(model, _SCORER_ATTR)
+    return getattr(model, _SCORER_ATTR)
+
+
+def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
+                       grad: bool = False):
+    """Sum log p(token | prefix) over supervised positions only.
+
+    Returns ``(logp_sum, n_supervised)`` where ``logp_sum`` is a 0-dim tensor. With
+    ``grad=True`` each chunk is wrapped in activation checkpointing, so the peak
+    logit footprint stays at one chunk instead of the whole sequence: without that,
+    holding every chunk's logits for backward costs exactly as much as never having
+    chunked at all, which is the trap this function exists to avoid.
+    """
+    return _scorer(model)(ids, mask, chunk=chunk, grad=grad)
 
 
 def as_f64(value):
