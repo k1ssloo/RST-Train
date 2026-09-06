@@ -91,16 +91,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
-import random
 import statistics
 import sys
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from sft_common import dedup_records, group_disjoint_split, token_stats  # noqa: E402
+from siblings import load_script  # noqa: E402
 
 SOURCE_DATASET = "nvidia/Nemotron-Terminal-Corpus"
 SOURCE_LICENSE = "cc-by-4.0"
@@ -118,23 +121,6 @@ FORBIDDEN_IN_SOURCE = ("<|im_start|>", "<|im_end|>", "<|endoftext|>")
 _TOKENIZER: Any = None
 _BUILDER: Any = None
 _EXPORTER: Any = None
-
-
-def load_script(stem: str) -> Any:
-    """Load `scripts/<stem>.py` by path.
-
-    By path because `scripts/` is not a package and the filenames start with a digit.
-    Shared rather than reimplemented: `normalize_assistant` is the definition of this
-    repo's canonical assistant form, and a second copy of it would mean two canonical
-    forms in one training mixture.
-    """
-    path = Path(__file__).resolve().parent / f"{stem}.py"
-    spec = importlib.util.spec_from_file_location(f"_nemo_{stem}", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        sys.exit(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def split_think(content: str) -> tuple[str | None, str, str]:
@@ -464,26 +450,11 @@ def main() -> int:
         sys.exit("nothing survived the gates")
 
     # ---- global dedup --------------------------------------------------------
-    # Keyed WITH the task, as everywhere else in this repo: two different tasks that
-    # need the same commands are two instruction->action mappings, not a duplicate.
-    # It bites here because upstream runs several episodes per task.
-    seen_content: set[str] = set()
-    seen_command: set[tuple[str, str]] = set()
-    owners: dict[str, set[str]] = defaultdict(set)
-    kept: list[dict[str, Any]] = []
-    for row in sorted(meta, key=lambda r: (r["subset"], r["trajectory_id"])):
-        owners[row["command_signature"]].add(row["task_group_id"])
-        if row["content_hash"] in seen_content:
-            stats["dedup_exact"] += 1
-            continue
-        key = (row["task_group_id"], row["command_signature"])
-        if key in seen_command:
-            stats["dedup_command_signature"] += 1
-            continue
-        seen_content.add(row["content_hash"])
-        seen_command.add(key)
-        kept.append(row)
-    cross_task = sum(1 for tasks in owners.values() if len(tasks) > 1)
+    # The (task, command_signature) key bites here because upstream runs several
+    # episodes per task. Visited in (subset, trajectory_id) order so the survivor of
+    # a duplicate set is the same across rebuilds.
+    kept, cross_task = dedup_records(
+        meta, stats, key=lambda r: (r["subset"], r["trajectory_id"]))
     print(f"[dedup] kept={len(kept):,} exact={stats['dedup_exact']:,} "
           f"cmd={stats['dedup_command_signature']:,} "
           f"(signatures shared across tasks, not dropped: {cross_task:,})", flush=True)
@@ -492,19 +463,10 @@ def main() -> int:
     # Upstream runs several episodes per task, so a row-wise split would put siblings
     # of a held-out task in train and the holdout loss would be reading a task the
     # model had already been shown.
-    by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in kept:
-        by_task[row["task_group_id"]].append(row)
-    task_ids = sorted(by_task)
-    rng = random.Random(args.seed)
-    rng.shuffle(task_ids)
-    holdout_tasks: set[str] = set()
-    holdout_rows = 0
-    for task_id in task_ids:
-        if holdout_rows >= args.holdout:
-            break
-        holdout_tasks.add(task_id)
-        holdout_rows += len(by_task[task_id])
+    _train, held, holdout_tasks, _target = group_disjoint_split(
+        kept, holdout=args.holdout, seed=args.seed)
+    holdout_rows = len(held)
+    by_task = {row["task_group_id"] for row in kept}
     want: dict[tuple[str, int], str] = {
         (row["shard"], row["index"]): ("holdout" if row["task_group_id"] in holdout_tasks
                                       else "train")
@@ -583,16 +545,7 @@ def main() -> int:
                    "reasoning either.",
             "think_tokens_in_source": sum(think),
         },
-        "token_stats": {
-            "mean": statistics.mean(lengths),
-            "p50": statistics.median(lengths),
-            "p90": statistics.quantiles(lengths, n=10)[8] if len(lengths) > 10 else max(lengths),
-            "p99": statistics.quantiles(lengths, n=100)[98] if len(lengths) > 100 else max(lengths),
-            "max": max(lengths),
-            "total_tokens": sum(lengths),
-            "trained_tokens": sum(trained),
-            "trained_fraction": round(sum(trained) / max(1, sum(lengths)), 4),
-        },
+        "token_stats": token_stats(lengths, trained),
         "turns": {"mean": statistics.mean(turns), "max": max(turns)},
         "drop_counters": dict(sorted(stats.items())),
         "per_subset_counters": {k: dict(sorted(v.items())) for k, v in sorted(per_subset.items())},

@@ -86,16 +86,15 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Same bands and the same reasoning as scripts/10_build_rl_taskset.py -- literally the
+# same object, so the two pools cannot drift apart.
+from taskpool_common import TIERS, tier_of  # noqa: E402
+
 SOURCE_POOL = "SWE-Gym/SWE-Gym"
 SOURCE_ROLLOUTS = "SWE-Gym/OpenHands-Sampled-Trajectories"
 SOURCE_LICENSE = "mit"
-
-# Same bands and the same reasoning as scripts/10_build_rl_taskset.py.
-TIERS = (
-    ("sweet", 0.10, 0.90),   # primary GRPO pool: reliable within-group variance
-    ("hard", 0.00, 0.10),    # exploration: only worth it once the policy improves
-    ("easy", 0.90, 1.01),    # near-saturated: keep a trickle to avoid regression
-)
 
 REQUIRED_POOL_COLUMNS = {
     "instance_id", "problem_statement", "patch", "test_patch",
@@ -113,13 +112,6 @@ def as_list(value: object) -> list[str]:
     if value is None:
         return []
     return [str(item) for item in value]
-
-
-def tier_of(pass_rate: float) -> str:
-    for name, low, high in TIERS:
-        if low <= pass_rate < high:
-            return name
-    raise AssertionError(f"pass rate {pass_rate} fell outside every tier")
 
 
 def load_rollout_outcomes(patterns: list[str]) -> tuple[dict[str, list[int]], Counter]:

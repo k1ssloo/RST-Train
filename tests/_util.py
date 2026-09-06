@@ -5,8 +5,9 @@ Two things every test here needs:
 `load_script("15_export_pretokenized")`
     `scripts/` is not a package and its modules start with a digit, so
     `import scripts.15_export_pretokenized` is a syntax error. This loads the file
-    by path instead. The repo root is put on `sys.path` first, because the scripts
-    themselves do `from rst_common... import` after inserting it.
+    by path instead, through `scripts/siblings.py` -- the same loader the scripts
+    use on each other. The repo root is put on `sys.path` first, because the
+    scripts themselves do `from rst_common... import` after inserting it.
 
 `need("torch")`
     A skip that works under pytest *and* under `python tests/run_tests.py`. The
@@ -17,7 +18,7 @@ Two things every test here needs:
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -50,26 +51,23 @@ def need(module_name: str) -> ModuleType:
         return skip(f"{module_name} is not installed in this environment")
 
 
-_cache: dict[str, ModuleType] = {}
-
-
 def load_script(stem: str) -> ModuleType:
-    """Import `scripts/<stem>.py` under a legal module name."""
-    if stem in _cache:
-        return _cache[stem]
-    path = ROOT / "scripts" / f"{stem}.py"
-    if not path.is_file():
-        raise AssertionError(f"missing script: {path}")
+    """Import `scripts/<stem>.py` under a legal module name.
+
+    Delegates to `scripts/siblings.py`, the one loader the scripts themselves use,
+    so a test and the script it exercises see the same module object.
+    """
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    name = "rst_script_" + stem.replace("-", "_")
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    _cache[stem] = module
-    return module
+    scripts_dir = str(ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from siblings import load_script as _load  # noqa: PLC0415 - path set up just above
+
+    try:
+        return _load(stem)
+    except ImportError as exc:
+        raise AssertionError(str(exc)) from exc
 
 
 def load_repo_module(dotted: str) -> ModuleType:

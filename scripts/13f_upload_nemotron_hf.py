@@ -21,10 +21,12 @@ re-reads it and refuses to publish if the card has drifted.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hf_publish import check_card, publish  # noqa: E402
 
 REPO = "Nemotron-Terminal-SFT-terminus"
 
@@ -262,46 +264,31 @@ rollouts were generated and no verifier was re-run.
 ```
 """
 
-CLAIMS: list[tuple[str, tuple[str, ...], object]] = [
-    ("source rows", ("source_rows",), 366154),
-    ("built", ("built",), 360057),
-    ("after dedup", ("after_dedup",), 360057),
-    ("train examples", ("train_examples",), 359656),
-    ("holdout examples", ("holdout_examples",), 401),
-    ("holdout tasks", ("holdout_tasks",), 297),
-    ("tasks covered", ("groups_covered",), 272098),
-    ("total tokens", ("token_stats", "total_tokens"), 3880294261),
-    ("trained tokens", ("token_stats", "trained_tokens"), 1691164897),
-    ("p50 tokens", ("token_stats", "p50"), 9816),
-    ("max tokens", ("token_stats", "max"), 32768),
-    ("spliced retry turns", ("spliced_retry_turns",), 328372),
-    ("truncated null tails", ("drop_counters", "truncated_null_tail"), 17570),
-    ("warning preamble repairs", ("repaired_warning_preamble",), 152),
-    ("too-long drops", ("drop_counters", "drop_too_long"), 5794),
-    ("unparseable drops", ("drop_counters", "drop_unparseable"), 195),
-    ("bad think shape drops", ("drop_counters", "drop_bad_think_shape"), 90),
-    ("control-token drops", ("drop_counters", "drop_control_token"), 3),
-    ("think tokens retained", ("reasoning", "think_tokens_in_source"), 1759784993),
-    ("adapters rows", ("rows_per_subset", "dataset_adapters"), 220626),
-    ("easy rows", ("rows_per_subset", "skill_based_easy"), 44747),
-    ("medium rows", ("rows_per_subset", "skill_based_medium"), 89003),
-    ("mixed rows", ("rows_per_subset", "skill_based_mixed"), 5681),
+CLAIMS: list[tuple[str, str, tuple[str, ...], object]] = [
+    ("source rows", "manifest.json", ("source_rows",), 366154),
+    ("built", "manifest.json", ("built",), 360057),
+    ("after dedup", "manifest.json", ("after_dedup",), 360057),
+    ("train examples", "manifest.json", ("train_examples",), 359656),
+    ("holdout examples", "manifest.json", ("holdout_examples",), 401),
+    ("holdout tasks", "manifest.json", ("holdout_tasks",), 297),
+    ("tasks covered", "manifest.json", ("groups_covered",), 272098),
+    ("total tokens", "manifest.json", ("token_stats", "total_tokens"), 3880294261),
+    ("trained tokens", "manifest.json", ("token_stats", "trained_tokens"), 1691164897),
+    ("p50 tokens", "manifest.json", ("token_stats", "p50"), 9816),
+    ("max tokens", "manifest.json", ("token_stats", "max"), 32768),
+    ("spliced retry turns", "manifest.json", ("spliced_retry_turns",), 328372),
+    ("truncated null tails", "manifest.json", ("drop_counters", "truncated_null_tail"), 17570),
+    ("warning preamble repairs", "manifest.json", ("repaired_warning_preamble",), 152),
+    ("too-long drops", "manifest.json", ("drop_counters", "drop_too_long"), 5794),
+    ("unparseable drops", "manifest.json", ("drop_counters", "drop_unparseable"), 195),
+    ("bad think shape drops", "manifest.json", ("drop_counters", "drop_bad_think_shape"), 90),
+    ("control-token drops", "manifest.json", ("drop_counters", "drop_control_token"), 3),
+    ("think tokens retained", "manifest.json", ("reasoning", "think_tokens_in_source"), 1759784993),
+    ("adapters rows", "manifest.json", ("rows_per_subset", "dataset_adapters"), 220626),
+    ("easy rows", "manifest.json", ("rows_per_subset", "skill_based_easy"), 44747),
+    ("medium rows", "manifest.json", ("rows_per_subset", "skill_based_medium"), 89003),
+    ("mixed rows", "manifest.json", ("rows_per_subset", "skill_based_mixed"), 5681),
 ]
-
-
-def check_card(src_dir: Path) -> int:
-    manifest = json.loads((src_dir / "manifest.json").read_text(encoding="utf-8"))
-    bad = 0
-    for label, keys, expected in CLAIMS:
-        node: object = manifest
-        for key in keys:
-            assert isinstance(node, dict), f"{label}: {keys} is not a path into the manifest"
-            node = node[key]
-        if node != expected:
-            print(f"  MISMATCH {label}: card says {expected}, manifest says {node}")
-            bad += 1
-    print(f"[check] {len(CLAIMS) - bad}/{len(CLAIMS)} card claims match the manifest")
-    return bad
 
 
 def main() -> int:
@@ -314,47 +301,20 @@ def main() -> int:
                         help="re-upload README.md only (no parquet re-upload)")
     args = parser.parse_args()
 
-    repo = f"{args.owner}/{REPO}"
     files: list[tuple[Path, str]] = [
         (args.src / "nemotron_sft_holdout.parquet", "data/holdout.parquet"),
         (args.src / "manifest.json", "manifest.json"),
+        *[(args.src / f"nemotron_sft_train_{subset}.parquet", f"data/train_{subset}.parquet")
+          for subset in SUBSETS],
     ]
-    files += [(args.src / f"nemotron_sft_train_{subset}.parquet",
-               f"data/train_{subset}.parquet") for subset in SUBSETS]
     if args.card_only:
         files = []
-
-    for src, _dst in files:
-        if not src.is_file():
-            sys.exit(f"missing input: {src}. Run scripts/03f_build_nemotron_sft.py first.")
-    if check_card(args.src):
-        sys.exit("the card disagrees with the manifest; fix one of them before publishing")
-
-    total = sum(src.stat().st_size for src, _ in files) / 2**30
-    print(f"SFT -> {repo}  (public, {total:.2f} GiB)")
-    for src, dst in files:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size / 2**30:.2f} GiB)")
-    if args.dry_run:
-        print("\n--dry-run: nothing uploaded")
-        return 0
-
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        sys.exit("set HF_TOKEN")
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-    api.create_repo(repo, repo_type="dataset", private=False, exist_ok=True)
-    print(f"\n[{repo}] created/exists (public)")
-    for src, dst in files:
-        api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                        repo_id=repo, repo_type="dataset")
-        print(f"  uploaded {dst}")
-    api.upload_file(path_or_fileobj=CARD.encode("utf-8"), path_in_repo="README.md",
-                    repo_id=repo, repo_type="dataset")
-    print("  uploaded README.md")
-    print(f"\nhttps://huggingface.co/datasets/{repo}")
-    return 0
+    if check_card(args.src, CLAIMS):
+        sys.exit("the card disagrees with the manifests; fix one of them before publishing")
+    return publish(repo=f"{args.owner}/{REPO}", files=files, card=CARD,
+                   private=False, dry_run=args.dry_run, kind="SFT",
+                   notes=(),
+                   missing_hint="Run scripts/03f_build_nemotron_sft.py first")
 
 
 if __name__ == "__main__":

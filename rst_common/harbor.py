@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -225,3 +226,96 @@ def apply_proxy_policy(env: dict[str, str], harbor_env: str, local_url: str) -> 
     for key in ("NO_PROXY", "no_proxy"):
         current = [tok for tok in env.get(key, "").split(",") if tok]
         env[key] = ",".join(dict.fromkeys(current + extra))
+
+
+# ----------------------------------------------------------------- invocation
+
+# Terminus-2 writes its ATIF trajectory in one of two shapes, chosen by this agent
+# kwarg. Without it (Harbor 0.21's default) each agent step's `message` is the
+# harness's OWN rendering -- "Analysis: ...\nPlan: ..." -- and the commands live in
+# `tool_calls`; the model's actual completion is gone. With `raw_content` the step
+# holds the completion verbatim, which is the shape the RST release has and the only
+# shape `normalize_assistant` can turn into a training target. `linear_history`
+# splits the file at every context compaction, so each file is exactly the history
+# the model was shown rather than a stitched-together view it never saw.
+# Every rollout meant to feed the data loop -- eval with --export-trajectories, RL
+# with RST_EXPORT_TRAJECTORIES=1 -- must carry this. See BUG.md BUG-19.
+TRAJECTORY_EXPORT_CONFIG: dict[str, bool] = {"raw_content": True, "linear_history": True}
+
+
+def export_agent_kwargs() -> list[str]:
+    """`--agent-kwarg` values that make a Terminus-2 trajectory SFT-exportable."""
+    return ["trajectory_config=" + json.dumps(TRAJECTORY_EXPORT_CONFIG, separators=(",", ":"))]
+
+
+def run_argv(
+    *,
+    harbor_bin: str,
+    task_dir: Path,
+    agent: str,
+    model: str | None,
+    env: str,
+    jobs_dir: Path,
+    job_name: str,
+    env_kwargs: Iterable[str] = (),
+    agent_kwargs: Iterable[str] = (),
+    extra: Iterable[str] = (),
+) -> list[str]:
+    """The one `harbor run` command line eval, both RL paths and the release probe launch.
+
+    One attempt, one concurrent trial, no retries: the caller owns concurrency and
+    the retry policy (a retried infra failure would otherwise be scored as if the
+    first attempt had never happened). `--quiet` keeps Harbor's progress UI out of
+    the stdout the caller classifies with `refine_with_stdout`.
+
+    `model=None` omits `--model`: Harbor's `oracle` and `nop` agents and the probe's
+    custom agents (`PROBE_AGENT_IMPORT_PATHS`) make no model call, and Harbor 0.21
+    accepts `--agent module.path:ClassName` in the same `--agent` slot.
+    """
+    argv = [
+        harbor_bin, "run",
+        "--path", str(Path(task_dir).resolve()),
+        "--agent", agent,
+    ]
+    if model is not None:
+        argv += ["--model", model]
+    argv += [
+        "--env", env,
+        "--n-attempts", "1",
+        "--n-concurrent", "1",
+        "--max-retries", "0",
+        "--jobs-dir", str(jobs_dir),
+        "--job-name", job_name,
+        "--quiet",
+    ]
+    argv += list(extra)
+    for kwarg in agent_kwargs:
+        argv += ["--agent-kwarg", kwarg]
+    for kwarg in env_kwargs:
+        argv += ["--environment-kwarg", kwarg]
+    return argv
+
+
+# The release probe's agents (rst_common/probe_agents.py). Harbor imports the module
+# with `importlib.import_module` inside ITS OWN interpreter, which is why the module
+# is stdlib+harbor only and why `custom_agent_env` has to put the repo root on
+# PYTHONPATH -- a bad import otherwise surfaces as a generic `exception_info` on
+# every trial, i.e. as 100% infra failures.
+PROBE_AGENT_IMPORT_PATHS = {
+    "snapshot_oracle": "rst_common.probe_agents:SnapshotOracleAgent",
+    "replay_artifacts": "rst_common.probe_agents:ReplayArtifactsAgent",
+    "touch_paths": "rst_common.probe_agents:TouchPathsAgent",
+    "replay_keystrokes": "rst_common.probe_agents:ReplayKeystrokesAgent",
+}
+
+
+def custom_agent_env(env: dict[str, str], repo_root: Path) -> None:
+    """Make `rst_common.probe_agents` importable by the harbor subprocess, in place."""
+    root = str(Path(repo_root).resolve())
+    current = [tok for tok in env.get("PYTHONPATH", "").split(":") if tok and tok != root]
+    env["PYTHONPATH"] = ":".join([root, *current])
+
+
+def harbor_python(harbor_bin: str) -> Path:
+    """The interpreter behind a `harbor` entry point, for an import pre-flight."""
+    return Path(harbor_bin).resolve().parent / "python"

@@ -687,6 +687,50 @@ change, and the reward for changing it was two half-trained anneals reported as 
 
 ---
 
+## BUG-19 — a kept rollout trajectory holds the harness's rendering, not the model's output
+
+*data loop · latent · fixed in this pass · **measured on `data/eval/probe2`***
+
+`06_eval.py --keep-jobs` (and `RST_KEEP_JOBS=1` on both RL paths) preserves Harbor's job
+directories, and nothing in the repo turned them into training data — so the loop from "our
+checkpoint solved a task" back to "train on that" was never closed. Worse, had anyone closed
+it naively, the data would have been wrong: Terminus-2 2.0.0 (Harbor 0.21.0) writes its ATIF
+`steps[].message` for an agent turn as its **own rendering**,
+
+```
+Analysis: The terminal is at /app directory. I need to ...
+Plan: Check if R is available, then ...
+```
+
+with the commands moved into `tool_calls` and `task_complete` into a `mark_task_complete`
+call. The model's completion — the `{analysis, plan, commands}` JSON that `normalize_assistant`
+canonicalizes and that the RST release stores verbatim — is not in the file. Only the turns
+whose parse *failed* keep the raw text. Measured on the one local Terminus-2 rollout
+(`data/eval/probe2/.../agent/trajectory.json`): 65 of 70 agent steps rendered, 5 raw, 0
+occurrences of the raw JSON anywhere.
+
+**Established by** reading `harbor/agents/terminus_2/terminus_2.py`: the shape is chosen by
+the `trajectory_config` agent kwarg — `raw_content: true` stores `llm_response.content`
+("Useful for SFT data export", its own comment) and skips `tool_calls`; `linear_history: true`
+splits the file at every context compaction (`trajectory.json`, `trajectory.cont-1.json`, …)
+so each file is the history the model was actually shown. Neither is on by default.
+
+**Fix.** `rst_common.harbor.export_agent_kwargs()` is the single definition of that kwarg;
+`06_eval.py --export-trajectories` forwards it (and implies `--keep-jobs`, refusing on a
+harbor build without `--agent-kwarg`), `RST_EXPORT_TRAJECTORIES=1` does the same for
+`rl/generate.py` and `verl_backend/harbor_agent_loop.py`, and the three call sites now build
+their command through one `run_argv`. `scripts/03h_build_rollout_sft.py` consumes the result
+through the release builder's own `reconstruct_trajectory`, refuses rendered trajectories by
+default (`drop_rendered_trajectory`), and can salvage them under `--allow-rendered` with every
+re-synthesized turn counted. Pinned by `tests/test_harbor_invocation.py` and
+`tests/test_rollout_sft.py`.
+
+**Still open.** No rollout has yet been run *with* the flag; the salvage path was exercised on
+the probe trajectory (24 linear segments out of 28 compactions, 5 turns dropped as raw
+parse failures) and the raw path on synthetic ATIF only.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

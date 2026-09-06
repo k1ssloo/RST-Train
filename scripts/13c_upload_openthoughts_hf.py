@@ -22,10 +22,12 @@ drifted from what is on disk.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hf_publish import check_card, publish  # noqa: E402
 
 REPO = "OpenThoughts-Agent-v1-SFT-terminus"
 
@@ -241,24 +243,6 @@ CLAIMS: list[tuple[str, str, tuple[str, ...], object]] = [
 ]
 
 
-def check_card(src_dir: Path) -> int:
-    """Fail loudly if any number in the card disagrees with the manifests."""
-    cache: dict[str, dict] = {}
-    bad = 0
-    for label, filename, keys, expected in CLAIMS:
-        if filename not in cache:
-            cache[filename] = json.loads((src_dir / filename).read_text(encoding="utf-8"))
-        node: object = cache[filename]
-        for key in keys:
-            assert isinstance(node, dict)
-            node = node[key]
-        if node != expected:
-            print(f"  MISMATCH {label}: card says {expected}, {filename} says {node}")
-            bad += 1
-    print(f"[check] {len(CLAIMS) - bad}/{len(CLAIMS)} card claims match the manifests")
-    return bad
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -269,7 +253,6 @@ def main() -> int:
                         help="re-upload README.md only (no parquet re-upload)")
     args = parser.parse_args()
 
-    repo = f"{args.owner}/{REPO}"
     files: list[tuple[Path, str]] = [
         (args.src / "ota_sft_train.parquet", "data/messages/train.parquet"),
         (args.src / "ota_sft_holdout.parquet", "data/messages/holdout.parquet"),
@@ -281,37 +264,11 @@ def main() -> int:
     ]
     if args.card_only:
         files = []
-
-    for src, _dst in files:
-        if not src.is_file():
-            sys.exit(f"missing input: {src}")
-    if check_card(args.src):
+    if check_card(args.src, CLAIMS):
         sys.exit("the card disagrees with the manifests; fix one of them before publishing")
-
-    print(f"SFT -> {repo}  (public)")
-    for src, dst in files:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size / 2**20:.1f} MB)")
-    if args.dry_run:
-        print("\n--dry-run: nothing uploaded")
-        return 0
-
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        sys.exit("set HF_TOKEN")
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-    api.create_repo(repo, repo_type="dataset", private=False, exist_ok=True)
-    print(f"\n[{repo}] created/exists (public)")
-    for src, dst in files:
-        api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                        repo_id=repo, repo_type="dataset")
-        print(f"  uploaded {dst}")
-    api.upload_file(path_or_fileobj=CARD.encode("utf-8"), path_in_repo="README.md",
-                    repo_id=repo, repo_type="dataset")
-    print("  uploaded README.md")
-    print(f"\nhttps://huggingface.co/datasets/{repo}")
-    return 0
+    return publish(repo=f"{args.owner}/{REPO}", files=files, card=CARD,
+                   private=False, dry_run=args.dry_run, kind="SFT",
+                   notes=())
 
 
 if __name__ == "__main__":

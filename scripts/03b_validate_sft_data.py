@@ -10,7 +10,6 @@ trained-token budget is what the LR/step schedule assumes.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
@@ -115,7 +114,7 @@ def main() -> int:
     print(f"  projected trained tokens for full split: {int(trained_tokens*scale):,}")
 
     lengths = frame.n_tokens.to_numpy()
-    print(f"\n=== length distribution (full split) ===")
+    print("\n=== length distribution (full split) ===")
     for q in (0.5, 0.9, 0.95, 0.99):
         print(f"  p{int(q*100)}: {np.quantile(lengths, q):,.0f}")
     print(f"  max: {lengths.max():,}   total: {lengths.sum():,}")

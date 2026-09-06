@@ -40,6 +40,15 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from sft_common import (  # noqa: E402
+    contract_length_gate,
+    dedup_records,
+    group_disjoint_split,
+    token_stats,
+)
+
 # ---------------------------------------------------------------- normalization
 
 _FENCE_BLOCK = re.compile(r"```(?:json|JSON)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -179,6 +188,87 @@ def command_signature(messages: list[dict[str, str]]) -> str:
     return hashlib.sha256("\x00".join(keystrokes).encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------- one trajectory
+
+def reconstruct_trajectory(record: dict[str, Any], stats: Counter) -> dict[str, Any] | None:
+    """One ATIF trajectory -- `steps` with `source` user/agent -- to our `messages`.
+
+    Returns None and counts the reason when the trajectory cannot be represented.
+    The prompt is the first user step; every later agent step becomes an assistant
+    turn through `normalize_assistant`, and its observation becomes the NEXT user
+    turn. `system` steps (Terminus-2's context-summarization markers) are skipped,
+    which stitches the conversation across a compaction as if it were linear; that
+    is how the release was built and what its example count rests on.
+
+    Shared by `build_from_shard` (the release tars) and `03h_build_rollout_sft.py`
+    (Harbor job dirs, which hold the same ATIF), so the repo's own rollouts and the
+    paper's trajectories are canonicalized by one function.
+    """
+    steps = record.get("steps") or []
+    if not steps or steps[0].get("source") != "user":
+        stats["drop_no_user_prompt"] += 1
+        return None
+
+    prompt = steps[0].get("message")
+    if not isinstance(prompt, str) or not prompt.strip():
+        stats["drop_empty_prompt"] += 1
+        return None
+
+    messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+    agent_steps = [s for s in steps[1:] if s.get("source") == "agent"]
+    if not agent_steps:
+        stats["drop_no_agent_steps"] += 1
+        return None
+
+    rewritten_turns = 0
+    pending_observation: str | None = None
+    pending_rewritten = False
+
+    for step in agent_steps:
+        raw = step.get("message")
+        if not isinstance(raw, str):
+            stats["drop_nonstring_message"] += 1
+            return None
+        canonical, rewritten, reason = normalize_assistant(raw)
+        if canonical is None:
+            stats[f"drop_{reason}"] += 1
+            return None
+
+        # Flush the previous observation as a user turn, repairing its warning
+        # preamble if we just rewrote the turn it complains about.
+        if pending_observation is not None:
+            text = pending_observation
+            if pending_rewritten:
+                repaired = _WARNING_PREAMBLE.sub("", text)
+                if repaired != text:
+                    stats["repaired_warning_preamble"] += 1
+                text = repaired
+            messages.append({"role": "user", "content": text})
+
+        messages.append({"role": "assistant", "content": canonical})
+        rewritten_turns += int(rewritten)
+        pending_observation = observation_text(step)
+        pending_rewritten = rewritten
+
+    # Trailing observation intentionally dropped: no assistant turn follows it.
+    if messages[-1]["role"] != "assistant":
+        stats["drop_not_assistant_terminated"] += 1
+        return None
+    if len(messages) < 2:
+        stats["drop_too_short"] += 1
+        return None
+
+    return {
+        "messages": messages,
+        "n_assistant_turns": sum(m["role"] == "assistant" for m in messages),
+        "n_rewritten_turns": rewritten_turns,
+        "command_signature": command_signature(messages),
+        "content_hash": hashlib.sha256(
+            json.dumps(messages, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 # ------------------------------------------------------------------ per-shard
 
 def build_from_shard(job: tuple[str, str, dict[str, str]]) -> tuple[list[dict], Counter]:
@@ -202,78 +292,10 @@ def build_from_shard(job: tuple[str, str, dict[str, str]]) -> tuple[list[dict], 
             except (json.JSONDecodeError, ValueError):
                 stats["drop_bad_json"] += 1
                 continue
-
-            steps = record.get("steps") or []
-            if not steps or steps[0].get("source") != "user":
-                stats["drop_no_user_prompt"] += 1
+            built = reconstruct_trajectory(record, stats)
+            if built is None:
                 continue
-
-            prompt = steps[0].get("message")
-            if not isinstance(prompt, str) or not prompt.strip():
-                stats["drop_empty_prompt"] += 1
-                continue
-
-            messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
-            agent_steps = [s for s in steps[1:] if s.get("source") == "agent"]
-            if not agent_steps:
-                stats["drop_no_agent_steps"] += 1
-                continue
-
-            rewritten_turns = 0
-            failed = False
-            pending_observation: str | None = None
-            pending_rewritten = False
-
-            for step in agent_steps:
-                raw = step.get("message")
-                if not isinstance(raw, str):
-                    failed = True
-                    stats["drop_nonstring_message"] += 1
-                    break
-                canonical, rewritten, reason = normalize_assistant(raw)
-                if canonical is None:
-                    failed = True
-                    stats[f"drop_{reason}"] += 1
-                    break
-
-                # Flush the previous observation as a user turn, repairing its
-                # warning preamble if we just rewrote the turn it complains about.
-                if pending_observation is not None:
-                    text = pending_observation
-                    if pending_rewritten:
-                        repaired = _WARNING_PREAMBLE.sub("", text)
-                        if repaired != text:
-                            stats["repaired_warning_preamble"] += 1
-                        text = repaired
-                    messages.append({"role": "user", "content": text})
-
-                messages.append({"role": "assistant", "content": canonical})
-                rewritten_turns += int(rewritten)
-                pending_observation = observation_text(step)
-                pending_rewritten = rewritten
-
-            if failed:
-                continue
-            # Trailing observation intentionally dropped: no assistant turn follows it.
-            if messages[-1]["role"] != "assistant":
-                stats["drop_not_assistant_terminated"] += 1
-                continue
-            if len(messages) < 2:
-                stats["drop_too_short"] += 1
-                continue
-
-            out.append(
-                {
-                    "trajectory_id": tid,
-                    "messages": messages,
-                    "n_assistant_turns": sum(m["role"] == "assistant" for m in messages),
-                    "n_rewritten_turns": rewritten_turns,
-                    "command_signature": command_signature(messages),
-                    "content_hash": hashlib.sha256(
-                        json.dumps(messages, sort_keys=True, ensure_ascii=False).encode("utf-8")
-                    ).hexdigest(),
-                }
-            )
+            out.append({"trajectory_id": tid, **built})
             stats["built"] += 1
     return out, stats
 
@@ -282,7 +304,6 @@ def build_from_shard(job: tuple[str, str, dict[str, str]]) -> tuple[list[dict], 
 
 def select_trajectories(frame, per_group: int, seed: int):
     """Deterministic group cap that round-robins across model sources."""
-    import pandas as pd  # local import keeps worker processes lean
 
     frame = frame.copy()
     # Deterministic per-row ordering key independent of file order.
@@ -375,29 +396,15 @@ def main() -> int:
     print(f"[build] reconstructed={len(built)} stats={dict(stats)}", flush=True)
 
     # ---- dedup -------------------------------------------------------------
-    by_id = {r["trajectory_id"]: r for r in built}
     group_of = dict(zip(selected.trajectory_id, selected.task_group_id))
     model_of = dict(zip(selected.trajectory_id, selected.model_name))
-
-    seen_content: set[str] = set()
-    seen_cmd: set[tuple[str, str]] = set()
-    kept: list[dict] = []
-    for tid in sorted(by_id):
-        record = by_id[tid]
-        if record["content_hash"] in seen_content:
-            stats["dedup_exact"] += 1
-            continue
-        cmd_key = (group_of[tid], record["command_signature"])
-        if cmd_key in seen_cmd:
-            stats["dedup_command_signature"] += 1
-            continue
-        seen_content.add(record["content_hash"])
-        seen_cmd.add(cmd_key)
-        record["task_group_id"] = group_of[tid]
-        record["model_name"] = model_of[tid]
-        kept.append(record)
+    for record in built:
+        record["task_group_id"] = group_of[record["trajectory_id"]]
+        record["model_name"] = model_of[record["trajectory_id"]]
+    kept, cross_task = dedup_records(built, stats)
     print(f"[dedup] kept={len(kept)} exact_dropped={stats['dedup_exact']} "
-          f"cmd_dropped={stats['dedup_command_signature']}", flush=True)
+          f"cmd_dropped={stats['dedup_command_signature']} "
+          f"(command signatures shared across tasks, not dropped: {cross_task})", flush=True)
 
     # ---- tokenize + verify slime contract ----------------------------------
     from transformers import AutoTokenizer
@@ -406,21 +413,15 @@ def main() -> int:
     lengths: list[int] = []
     final: list[dict] = []
     for record in kept:
-        messages = record["messages"]
-        rendered = tokenizer.apply_chat_template(messages, tokenize=False, return_dict=False)
-        # No offset mapping here on purpose: this stage needs the LENGTH and the
-        # render-vs-direct-tokenize contract, nothing else. Character offsets are what
-        # a loss mask needs, and that is built once, later, by 15_export_pretokenized.py.
-        ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
-        expected = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False)
-        if ids != expected:
+        n_tokens, reason = contract_length_gate(tokenizer, record["messages"], args.max_seq_len)
+        if reason == "contract_mismatch":
             stats["drop_slime_contract_mismatch"] += 1
             continue
-        if len(ids) > args.max_seq_len:
+        if reason == "too_long":
             stats["drop_too_long"] += 1
             continue
-        record["n_tokens"] = len(ids)
-        lengths.append(len(ids))
+        record["n_tokens"] = n_tokens
+        lengths.append(n_tokens)
         final.append(record)
     print(f"[tokenize] kept={len(final)} contract_mismatch={stats['drop_slime_contract_mismatch']} "
           f"too_long={stats['drop_too_long']}", flush=True)
@@ -434,31 +435,21 @@ def main() -> int:
     # offline number this pipeline produces (06b_eval_offline.py reads exactly this
     # file, and 20_run_all.sh quotes it when no sandbox is available).
     final.sort(key=lambda r: r["trajectory_id"])
-    rng = random.Random(args.seed)
     by_group: dict[str, list[dict]] = defaultdict(list)
     for record in final:
         by_group[record["task_group_id"]].append(record)
 
-    chosen_groups: set[str] = set()
     if args.holdout_mode == "row":
         shuffled = list(final)
-        rng.shuffle(shuffled)
+        random.Random(args.seed).shuffle(shuffled)
         holdout, train = shuffled[: args.holdout], shuffled[args.holdout :]
     else:
         # Whole groups, in a seed-determined order, until the target is met. The
         # fraction cap is what keeps a coarse group structure (few groups, many
         # trajectories each) from handing the entire dataset to the holdout.
-        order = sorted(by_group)
-        rng.shuffle(order)
-        cap = int(len(final) * args.max_holdout_fraction)
-        target = min(args.holdout, cap)
-        holdout = []
-        for group_id in order:
-            if len(holdout) >= target:
-                break
-            holdout.extend(by_group[group_id])
-            chosen_groups.add(group_id)
-        train = [r for r in final if r["task_group_id"] not in chosen_groups]
+        train, holdout, _chosen, target = group_disjoint_split(
+            final, holdout=args.holdout, seed=args.seed,
+            max_fraction=args.max_holdout_fraction)
         if args.holdout and target < args.holdout:
             print(f"[split] holdout target reduced from {args.holdout} to {target}: "
                   f"--max-holdout-fraction {args.max_holdout_fraction} of "
@@ -504,9 +495,6 @@ def main() -> int:
     train_path = write(train, "rst_sft_train.parquet")
     holdout_path = write(holdout, "rst_sft_holdout.parquet")
 
-    import numpy as np
-
-    array = np.array(lengths) if lengths else np.array([0])
     manifest = {
         "source_dataset": "Zhongzhi1228/Recursive-Task-Synthesis-Trajectories",
         "trajectories_total": int(total),
@@ -530,18 +518,12 @@ def main() -> int:
             "memorization check and must be described that way."
         ),
         "max_seq_len": args.max_seq_len,
-        "token_stats": {
-            "mean": float(array.mean()),
-            "p50": float(np.quantile(array, 0.50)),
-            "p90": float(np.quantile(array, 0.90)),
-            "p99": float(np.quantile(array, 0.99)),
-            "max": int(array.max()),
-            "total_tokens": int(array.sum()),
-        },
+        "token_stats": token_stats(lengths),
         "groups_covered": len({r["task_group_id"] for r in final}),
+        "command_signatures_shared_across_tasks": cross_task,
         "model_mix": dict(Counter(r["model_name"] for r in final)),
         "turns": {
-            "mean": float(np.mean([r["n_assistant_turns"] for r in final])) if final else 0.0,
+            "mean": (sum(r["n_assistant_turns"] for r in final) / len(final)) if final else 0.0,
             "max": int(max((r["n_assistant_turns"] for r in final), default=0)),
         },
         "rewritten_turn_fraction": (

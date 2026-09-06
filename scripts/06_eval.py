@@ -61,10 +61,12 @@ from rst_common.harbor import (  # noqa: E402  (path shim must run first)
     AGENT_BUDGET_MARKERS,
     HARNESS_INFRA,
     HARNESS_INFRA_MARKERS,
-    Outcome,
     apply_proxy_policy,
+    export_agent_kwargs,
+    Outcome,
     read_reward,
     refine_with_stdout,
+    run_argv,
     wall_clock_timeout,
 )
 from rst_common.paper import PAPER  # noqa: E402
@@ -224,6 +226,34 @@ def agent_kwargs_argv(args) -> tuple[list[str], dict]:
     return ["--agent-kwarg", "model_info=" + json.dumps(model_info, separators=(",", ":"))], record
 
 
+def trajectory_export_argv(args) -> tuple[list[str], dict]:
+    """`--agent-kwarg trajectory_config=...` when the run should feed the data loop.
+
+    Terminus-2 without it writes its own "Analysis:/Plan:" rendering into the
+    trajectory and drops the model's completion -- a file that looks like training
+    data and cannot become any (BUG.md BUG-19). So this is all-or-nothing: if the
+    operator asked to export and this harbor build cannot take the kwarg, refuse the
+    run rather than produce a jobs tree that will fail in 03h hours later.
+    """
+    record: dict = {"enabled": bool(args.export_trajectories), "agent_kwargs": [], "control": ""}
+    if not args.export_trajectories:
+        record["control"] = ("NOT REQUESTED: job dirs are deleted after scoring unless "
+                             "--keep-jobs, and kept ones are not SFT-exportable "
+                             "(pass --export-trajectories for that)")
+        return [], record
+    if "--agent-kwarg" not in harbor_run_flags(args.harbor_bin):
+        sys.exit("--export-trajectories needs harbor's --agent-kwarg, which this harbor "
+                 "build does not have; the trajectories it would write hold the harness's "
+                 "rendering of each turn, not the model's output, and cannot become "
+                 "training data. Upgrade harbor (0.21.0 has it) or drop the flag.")
+    args.keep_jobs = True
+    kwargs = export_agent_kwargs()
+    record["agent_kwargs"] = kwargs
+    record["control"] = (f"forwarded {kwargs[0]}; job dirs kept under "
+                         f"{Path(args.out) / 'jobs'} for 03h_build_rollout_sft.py")
+    return kwargs, record
+
+
 def sampling_argv(args) -> tuple[list[str], dict]:
     """`harbor run` sampling flags plus the record that goes into results.json."""
     wanted = {"temperature": args.temperature, "top_p": args.top_p}
@@ -264,16 +294,14 @@ async def run_task(task_dir: Path, benchmark: str, run: int, args, sem: asyncio.
     outcome = TaskOutcome(benchmark=benchmark, run=run, task_id=task_id)
     started = time.time()
 
-    argv = [
-        args.harbor_bin, "run", "--path", str(task_dir.resolve()),
-        "--agent", "terminus-2", "--model", f"hosted_vllm/{served_name}",
-        "--env", args.harbor_env, "--n-attempts", "1", "--n-concurrent", "1",
-        "--max-retries", "0", "--jobs-dir", str(jobs_dir), "--job-name", job_name, "--quiet",
-    ]
-    argv += args.sampling_argv
-    argv += args.agent_kwargs_argv
-    for kwarg in harbor_env_kwargs(args):
-        argv += ["--environment-kwarg", kwarg]
+    argv = run_argv(
+        harbor_bin=args.harbor_bin, task_dir=task_dir, agent="terminus-2",
+        model=f"hosted_vllm/{served_name}", env=args.harbor_env,
+        jobs_dir=jobs_dir, job_name=job_name,
+        extra=[*args.sampling_argv, *args.agent_kwargs_argv],
+        agent_kwargs=args.export_agent_kwargs,
+        env_kwargs=harbor_env_kwargs(args),
+    )
     env = harbor_process_env(args)
 
     async with sem:
@@ -407,6 +435,8 @@ async def main_async(args) -> int:
     print(f"[protocol] sampling: {args.sampling_record['control']}", flush=True)
     args.agent_kwargs_argv, args.agent_kwargs_record = agent_kwargs_argv(args)
     print(f"[protocol] model_info: {args.agent_kwargs_record['control']}", flush=True)
+    args.export_agent_kwargs, args.export_record = trajectory_export_argv(args)
+    print(f"[protocol] trajectory export: {args.export_record['control']}", flush=True)
     server = None
     if args.model_path:
         args.endpoint = f"http://127.0.0.1:{args.port}/v1"
@@ -507,6 +537,10 @@ async def main_async(args) -> int:
         # Without this, harbor 0.21.0 fails every task before the agent starts.
         # Recorded so a zero-denominator run is diagnosable from results.json alone.
         "agent_model_info": args.agent_kwargs_record,
+        # Whether the job dirs this run leaves behind can be turned into training
+        # data (03h_build_rollout_sft.py), and what was asked of Terminus-2 to make
+        # that so. A run without it has trajectories that LOOK complete and are not.
+        "trajectory_export": args.export_record,
         "failure_taxonomy": {
             HARNESS_INFRA: list(HARNESS_INFRA_MARKERS),
             AGENT_BUDGET: list(AGENT_BUDGET_MARKERS),
@@ -588,6 +622,13 @@ def main() -> int:
     p.add_argument("--harbor-env-kwarg", action="append", default=None, metavar="K=V",
                    help="repeatable; forwarded as harbor --environment-kwarg K=V")
     p.add_argument("--keep-jobs", action="store_true")
+    p.add_argument("--export-trajectories", action="store_true",
+                   help="close the data loop: keep every job dir AND ask Terminus-2 to "
+                        "record the model's raw completions (trajectory_config "
+                        "raw_content + linear_history), so scripts/03h_build_rollout_sft.py "
+                        "can turn this run into SFT/DPO data. Without it the kept "
+                        "trajectories hold the harness's own 'Analysis:/Plan:' rendering, "
+                        "not what the model wrote. Implies --keep-jobs.")
     p.add_argument("--chat-template", default=os.environ.get("SERVE_CHAT_TEMPLATE", ""),
                    help="override the served chat template (see configs/models.json "
                         "serve_chat_template_repo)")

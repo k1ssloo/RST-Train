@@ -47,13 +47,15 @@ RST pool's `tests/test_state.py`.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
 import sys
 import tarfile
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from taskpool_common import base_image, find_verifier_leak, sha256_bytes  # noqa: E402
 
 SOURCE_DATASET = "allenai/open-instruct-termigen"
 
@@ -69,16 +71,6 @@ SOURCE_DATASET = "allenai/open-instruct-termigen"
 # sound tasks. This is the same reason `10_build_rl_taskset.py` hardcodes the RST
 # pool's two verifier names rather than globbing its `tests/` directory.
 VERIFIER_FILES = ("test.sh", "test_outputs.py")
-
-
-def sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
-def base_image(dockerfile: str) -> str:
-    """The FROM line, so a pre-build pass knows what to pull. Same as 10_build's."""
-    match = re.search(r"^\s*FROM\s+(\S+)", dockerfile or "", re.M | re.I)
-    return match.group(1) if match else "?"
 
 
 def main() -> int:
@@ -162,20 +154,9 @@ def main() -> int:
         # so a renamed copy is caught too.
         verifier_hashes = {sha256_bytes(files[f"tests/{name}"])
                            for name in VERIFIER_FILES if f"tests/{name}" in files}
-        hit = None
-        for name, blob in sorted(files.items()):
-            if not name.startswith("environment/"):
-                continue
-            identical = sha256_bytes(blob) in verifier_hashes
-            if Path(name).name in VERIFIER_FILES or identical:
-                # `identical` is the unambiguous case: the agent can read its own
-                # grader. A name-only match is a project file that merely shares the
-                # verifier's name -- excluded anyway, because for an RL pool a
-                # false exclusion costs one task and a false inclusion costs the
-                # meaning of every reward that task produces.
-                hit = (name, "byte_identical" if identical else "name_only")
-                if identical:
-                    break
+        context = ((name, sha256_bytes(blob)) for name, blob in files.items()
+                   if name.startswith("environment/"))
+        hit = find_verifier_leak(context, verifier_hashes, VERIFIER_FILES)
         if hit:
             leaked.append((task_id, hit[0], hit[1]))
             stats["drop_verifier_leak"] += 1

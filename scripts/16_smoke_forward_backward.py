@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
+import math
 import time
 from pathlib import Path
 
@@ -49,7 +49,6 @@ def build_labels(input_ids, loss_mask, ignore_index: int = -100):
     single most likely silent bug in the whole pipeline, which is why the caller
     cross-checks it against an all-masked control.
     """
-    import torch
 
     labels = input_ids.clone()
     labels[loss_mask == 0] = ignore_index
@@ -90,7 +89,22 @@ def main() -> int:
     results["arch"] = cfg.architectures
     results["vocab_size"] = getattr(text_cfg, "vocab_size", None)
 
+    # Loaded, and then actually checked. This used to be a bare assignment nothing
+    # read. The config's `vocab_size` sizes the LM head; the tokenizer's is what the
+    # data was built with. Qwen3.5 pads the head above the tokenizer (248,320 vs
+    # 246,400-odd real tokens), so head >= tokenizer is normal and head < tokenizer is
+    # fatal -- the model cannot represent tokens the data contains, and the failure
+    # shows up as a device-side assert inside the loss, not as a message about the
+    # vocabulary.
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    results["tokenizer_vocab_size"] = len(tokenizer)
+    head_vocab = results["vocab_size"]
+    if isinstance(head_vocab, int) and len(tokenizer) > head_vocab:
+        sys.exit(f"the tokenizer has {len(tokenizer):,} tokens but the LM head only "
+                 f"{head_vocab:,}. Any id above {head_vocab - 1} indexes past the head; "
+                 f"training would die in the loss with a device-side assert. The "
+                 f"checkpoint and the tokenizer do not belong together.")
+    print(f"=== vocab: head {head_vocab:,} >= tokenizer {len(tokenizer):,}")
 
     # ---- data ---------------------------------------------------------------
     full = pd.read_parquet(args.parquet)

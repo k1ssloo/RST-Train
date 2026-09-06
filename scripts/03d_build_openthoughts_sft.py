@@ -50,35 +50,31 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import random
 import statistics
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from sft_common import contract_length_gate, dedup_records, token_stats  # noqa: E402
+from siblings import load_script  # noqa: E402
 
 SOURCE_DATASET = "open-thoughts/OpenThoughts-Agent-v1-SFT"
 SOURCE_FILE = "data/train-00000-of-00001.parquet"
 
 
 def load_builder() -> Any:
-    """Load `03_build_sft_data.py` by path and return it as a module.
+    """`03_build_sft_data.py` as a module, via the shared loader.
 
-    By path because `scripts/` is not a package and the filename starts with a
-    digit. The point is to share `normalize_assistant`, `command_signature` and
-    `_WARNING_PREAMBLE` with the RST pipeline, not to copy them: a divergence
-    between the two would silently mean two different canonical forms in one
-    training mixture.
+    Shared rather than copied: `normalize_assistant`, `command_signature` and
+    `_WARNING_PREAMBLE` define this repo's canonical assistant form, and a second
+    copy would silently mean two canonical forms in one training mixture.
     """
-    path = Path(__file__).resolve().parent / "03_build_sft_data.py"
-    spec = importlib.util.spec_from_file_location("_rst_sft_builder", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        sys.exit(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script("03_build_sft_data")
 
 
 def reconstruct(conversation: list[dict[str, str]], builder: Any,
@@ -194,29 +190,10 @@ def main() -> int:
           f"repaired_warning_preamble={stats['repaired_warning_preamble']}", flush=True)
 
     # ---- dedup ---------------------------------------------------------------
-    # Exact content is always safe to drop. The command signature is keyed WITH the
-    # task, exactly as in the RST pipeline: two different tasks that happen to need
-    # the same commands are two different instruction->action mappings, not a
-    # duplicate. Upstream tasks are unique, so that key drops nothing here -- the
-    # cross-task collision count is reported instead of acted on, because it is a
-    # property of the task pool worth knowing and not a defect.
-    seen_content: set[str] = set()
-    seen_cmd: set[tuple[str, str]] = set()
-    signature_owners: dict[str, set[str]] = defaultdict(set)
-    kept: list[dict[str, Any]] = []
-    for record in sorted(records, key=lambda r: r["trajectory_id"]):
-        signature_owners[record["command_signature"]].add(record["task_group_id"])
-        if record["content_hash"] in seen_content:
-            stats["dedup_exact"] += 1
-            continue
-        key = (record["task_group_id"], record["command_signature"])
-        if key in seen_cmd:
-            stats["dedup_command_signature"] += 1
-            continue
-        seen_content.add(record["content_hash"])
-        seen_cmd.add(key)
-        kept.append(record)
-    cross_task = sum(1 for owners in signature_owners.values() if len(owners) > 1)
+    # Upstream tasks are unique, so the (task, command_signature) key drops nothing
+    # here -- the cross-task collision count is reported instead of acted on, because
+    # it is a property of the task pool worth knowing and not a defect.
+    kept, cross_task = dedup_records(records, stats)
     print(f"[dedup] kept={len(kept)} exact_dropped={stats['dedup_exact']} "
           f"cmd_dropped={stats['dedup_command_signature']} "
           f"(command signatures shared across tasks, not dropped: {cross_task})", flush=True)
@@ -228,20 +205,17 @@ def main() -> int:
     final: list[dict[str, Any]] = []
     lengths: list[int] = []
     for record in kept:
-        messages = record["messages"]
-        rendered = tokenizer.apply_chat_template(messages, tokenize=False, return_dict=False)
-        ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
-        expected = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False)
-        if ids != expected:
+        n_tokens, reason = contract_length_gate(tokenizer, record["messages"], args.max_seq_len)
+        if reason == "contract_mismatch":
             # render-then-tokenize must equal tokenize-directly, or the character
             # offsets 15_export_pretokenized.py builds the mask from do not apply.
             stats["drop_template_contract_mismatch"] += 1
             continue
-        if len(ids) > args.max_seq_len:
+        if reason == "too_long":
             stats["drop_too_long"] += 1
             continue
-        record["n_tokens"] = len(ids)
-        lengths.append(len(ids))
+        record["n_tokens"] = n_tokens
+        lengths.append(n_tokens)
         final.append(record)
     print(f"[tokenize] kept={len(final)} "
           f"contract_mismatch={stats['drop_template_contract_mismatch']} "
@@ -296,14 +270,7 @@ def main() -> int:
         "command_signatures_shared_across_tasks": cross_task,
         "max_seq_len": args.max_seq_len,
         "tokenizer": str(args.tokenizer),
-        "token_stats": {
-            "mean": statistics.mean(lengths),
-            "p50": statistics.median(lengths),
-            "p90": statistics.quantiles(lengths, n=10)[8] if len(lengths) > 10 else max(lengths),
-            "p99": statistics.quantiles(lengths, n=100)[98] if len(lengths) > 100 else max(lengths),
-            "max": max(lengths),
-            "total_tokens": sum(lengths),
-        },
+        "token_stats": token_stats(lengths),
         "turns": {"mean": statistics.mean(turns), "max": max(turns)},
         "rewritten_turn_fraction": (
             sum(r["n_rewritten_turns"] for r in final) / max(1, sum(turns))

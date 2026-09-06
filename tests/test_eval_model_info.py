@@ -137,7 +137,9 @@ def test_a_harbor_without_the_flag_is_reported_loudly_and_not_silently_skipped()
 def test_the_flag_is_actually_passed_to_the_harbor_subprocess():
     # A correct payload that never reaches argv is the same as no payload.
     source = (ROOT / "scripts" / "06_eval.py").read_text(encoding="utf-8")
-    assert "argv += args.agent_kwargs_argv" in source, (
+    # The command line is built by rst_common.harbor.run_argv; the payload has to be
+    # in what run_task hands it.
+    assert "*args.agent_kwargs_argv" in source, (
         "model_info was built but never added to the harbor command line")
     assert "args.agent_kwargs_argv, args.agent_kwargs_record = agent_kwargs_argv(args)" in source
 

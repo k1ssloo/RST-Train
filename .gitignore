@@ -29,3 +29,12 @@ wandb/
 
 # local GPU test env + smoke-test model weights
 .venv-gpu/
+
+# local sglang scratch env
+.venv-sglang/
+
+# Claude Code scratch: agent worktrees, session state
+.claude/
+
+# pasted screenshots dropped at the repo root by the editor
+/[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*.png

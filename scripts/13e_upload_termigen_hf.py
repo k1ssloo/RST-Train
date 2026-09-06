@@ -31,10 +31,12 @@ sibling datasets have already caused this confusion. All 3,556 upstream rows are
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hf_publish import check_card, publish  # noqa: E402
 
 REPO = "Termigen-RL-Taskset"
 
@@ -165,31 +167,16 @@ leaks, given content hashes, and rewritten into this repo's GRPO prompt-data sha
 No rollouts were generated and no verifier was executed.
 """
 
-CLAIMS: list[tuple[str, tuple[str, ...], object]] = [
-    ("source rows", ("source_rows",), 3556),
-    ("assistant turns", ("source_assistant_turns",), 0),
-    ("tasks selected", ("tasks_selected",), 3541),
-    ("task dirs in tarball", ("task_dirs_in_tarball",), 3556),
-    ("leaks excluded", ("verifier_leaks_excluded",), 15),
-    ("byte-identical leaks", ("verifier_leaks_byte_identical",), 10),
-    ("name-only leaks", ("verifier_leaks_name_only",), 5),
-    ("distinct images", ("distinct_base_images",), 3541),
+CLAIMS: list[tuple[str, str, tuple[str, ...], object]] = [
+    ("source rows", "manifest.json", ("source_rows",), 3556),
+    ("assistant turns", "manifest.json", ("source_assistant_turns",), 0),
+    ("tasks selected", "manifest.json", ("tasks_selected",), 3541),
+    ("task dirs in tarball", "manifest.json", ("task_dirs_in_tarball",), 3556),
+    ("leaks excluded", "manifest.json", ("verifier_leaks_excluded",), 15),
+    ("byte-identical leaks", "manifest.json", ("verifier_leaks_byte_identical",), 10),
+    ("name-only leaks", "manifest.json", ("verifier_leaks_name_only",), 5),
+    ("distinct images", "manifest.json", ("distinct_base_images",), 3541),
 ]
-
-
-def check_card(src_dir: Path) -> int:
-    manifest = json.loads((src_dir / "manifest.json").read_text(encoding="utf-8"))
-    bad = 0
-    for label, keys, expected in CLAIMS:
-        node: object = manifest
-        for key in keys:
-            assert isinstance(node, dict)
-            node = node[key]
-        if node != expected:
-            print(f"  MISMATCH {label}: card says {expected}, manifest says {node}")
-            bad += 1
-    print(f"[check] {len(CLAIMS) - bad}/{len(CLAIMS)} card claims match the manifest")
-    return bad
 
 
 def main() -> int:
@@ -204,42 +191,17 @@ def main() -> int:
                              "for anything evaluated on it.")
     args = parser.parse_args()
 
-    repo = f"{args.owner}/{REPO}"
     files: list[tuple[Path, str]] = [
         (args.src / "rl_tasks.jsonl", "rl_tasks.jsonl"),
         (args.src / "manifest.json", "manifest.json"),
         (args.src / "verifier_leaks.json", "verifier_leaks.json"),
     ]
-    for src, _dst in files:
-        if not src.is_file():
-            sys.exit(f"missing input: {src}. Run scripts/10b_build_termigen_taskset.py first.")
-    if check_card(args.src):
-        sys.exit("the card disagrees with the manifest; fix one of them before publishing")
-
-    print(f"taskset -> {repo}  ({'PUBLIC' if args.public else 'private'})")
-    for src, dst in files:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size / 2**20:.1f} MB)")
-    print("   (task bodies deliberately not uploaded)")
-    if args.dry_run:
-        print("\n--dry-run: nothing uploaded")
-        return 0
-
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        sys.exit("set HF_TOKEN")
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-    api.create_repo(repo, repo_type="dataset", private=not args.public, exist_ok=True)
-    for src, dst in files:
-        api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                        repo_id=repo, repo_type="dataset")
-        print(f"  uploaded {dst}")
-    api.upload_file(path_or_fileobj=CARD.encode("utf-8"), path_in_repo="README.md",
-                    repo_id=repo, repo_type="dataset")
-    print("  uploaded README.md")
-    print(f"\nhttps://huggingface.co/datasets/{repo}")
-    return 0
+    if check_card(args.src, CLAIMS):
+        sys.exit("the card disagrees with the manifests; fix one of them before publishing")
+    return publish(repo=f"{args.owner}/{REPO}", files=files, card=CARD,
+                   private=not args.public, dry_run=args.dry_run, kind="taskset",
+                   notes=("task bodies deliberately not uploaded",),
+                   missing_hint="Run scripts/10b_build_termigen_taskset.py first")
 
 
 if __name__ == "__main__":

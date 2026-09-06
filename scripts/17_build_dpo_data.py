@@ -103,7 +103,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
-import importlib.util
 import json
 import re
 import sys
@@ -113,27 +112,12 @@ from pathlib import Path
 from typing import Any
 
 HERE = Path(__file__).resolve().parent
-_SIBLINGS: dict[str, Any] = {}
+sys.path.insert(0, str(HERE))
 
-
-def _load_sibling(stem: str) -> Any:
-    """Import a sibling script whose module name starts with a digit.
-
-    Same shim as `06b_eval_offline.py`, and for the same reason: the trajectory
-    reconstruction here MUST be the one that built the SFT data, and the mask MUST
-    be the one that pretokenized it. A second copy of either would drift.
-    """
-    if stem in _SIBLINGS:
-        return _SIBLINGS[stem]
-    path = HERE / f"{stem}.py"
-    spec = importlib.util.spec_from_file_location(stem.lstrip("0123456789_") or stem, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _SIBLINGS[stem] = module
-    return module
+# The trajectory reconstruction here MUST be the one that built the SFT data, and
+# the mask MUST be the one that pretokenized it -- so both are loaded from their
+# scripts rather than copied. See scripts/siblings.py.
+from siblings import load_script as _load_sibling  # noqa: E402
 
 
 def _order_key(seed: int, trajectory_id: str) -> str:

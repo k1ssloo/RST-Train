@@ -105,15 +105,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
-import random
 import re
 import statistics
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from sft_common import dedup_records, group_disjoint_split, token_stats  # noqa: E402
+from siblings import load_script  # noqa: E402
 
 SOURCE_DATASET = "allenai/tmax-sft"
 SOURCE_CONFIG = "skill_tax_20260505_2.2k_combined_balanced_thinking_only_success"
@@ -131,21 +134,13 @@ TURN_END = "<|im_end|>\n"
 
 
 def load_exporter() -> Any:
-    """Load `15_export_pretokenized.py` for `qwen3_5_mask`.
+    """`15_export_pretokenized.py` as a module, for `qwen3_5_mask`.
 
-    By path because `scripts/` is not a package and the filename starts with a
-    digit. Shared rather than reimplemented so the mask this script gates on is
-    the same one the training data is finally built with -- two copies of a mask
-    contract are two contracts, and this is the one defect in the pipeline that
-    no loss curve would reveal.
+    Shared rather than reimplemented so the mask this script gates on is the same
+    one the training data is finally built with -- two copies of a mask contract
+    are two contracts, and this is the one defect no loss curve would reveal.
     """
-    path = Path(__file__).resolve().parent / "15_export_pretokenized.py"
-    spec = importlib.util.spec_from_file_location("_rst_pretokenize", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - defensive
-        sys.exit(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script("15_export_pretokenized")
 
 
 def to_plain(messages: Any) -> list[dict[str, Any]]:
@@ -598,27 +593,10 @@ def main() -> int:
         sys.exit("nothing survived the gates")
 
     # ---- dedup ---------------------------------------------------------------
-    # Keyed WITH the task, as in the RST pipeline: two different tasks needing the
-    # same commands are two instruction->action mappings, not a duplicate. Unlike
-    # the OpenThoughts converter this actually bites here, because TMax runs
-    # several rollouts per task (5,795 trajectories over 2,020 tasks).
-    seen_content: set[str] = set()
-    seen_command: set[tuple[str, str]] = set()
-    signature_owners: dict[str, set[str]] = defaultdict(set)
-    kept: list[dict[str, Any]] = []
-    for record in sorted(records, key=lambda r: r["trajectory_id"]):
-        signature_owners[record["command_signature"]].add(record["task_group_id"])
-        if record["content_hash"] in seen_content:
-            stats["dedup_exact"] += 1
-            continue
-        key = (record["task_group_id"], record["command_signature"])
-        if key in seen_command:
-            stats["dedup_command_signature"] += 1
-            continue
-        seen_content.add(record["content_hash"])
-        seen_command.add(key)
-        kept.append(record)
-    cross_task = sum(1 for owners in signature_owners.values() if len(owners) > 1)
+    # Unlike the OpenThoughts converter the (task, command_signature) key actually
+    # bites here, because TMax runs several rollouts per task (5,795 trajectories
+    # over 2,020 tasks).
+    kept, cross_task = dedup_records(records, stats)
     print(f"[dedup] kept={len(kept)} exact_dropped={stats['dedup_exact']} "
           f"cmd_dropped={stats['dedup_command_signature']} "
           f"(signatures shared across tasks, not dropped: {cross_task})", flush=True)
@@ -627,21 +605,9 @@ def main() -> int:
     # TMax `task` is NOT unique per row -- several rollouts share one task -- so a
     # row-wise split would put siblings of a held-out task in train and the holdout
     # loss would be reading a task the model had already been shown.
-    by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for record in kept:
-        by_task[record["task_group_id"]].append(record)
-    task_ids = sorted(by_task)
-    rng = random.Random(args.seed)
-    rng.shuffle(task_ids)
-
-    holdout: list[dict[str, Any]] = []
-    holdout_tasks: list[str] = []
-    for task_id in task_ids:
-        if len(holdout) >= args.holdout:
-            break
-        holdout.extend(by_task[task_id])
-        holdout_tasks.append(task_id)
-    train = [r for r in kept if r["task_group_id"] not in set(holdout_tasks)]
+    train, holdout, holdout_tasks, _target = group_disjoint_split(
+        kept, holdout=args.holdout, seed=args.seed)
+    by_task = {r["task_group_id"] for r in kept}
     overlap = {r["task_group_id"] for r in train} & set(holdout_tasks)
     if overlap:  # pragma: no cover - defensive
         sys.exit(f"{len(overlap)} task_group_id(s) landed in both splits")
@@ -711,16 +677,7 @@ def main() -> int:
                         "apply_chat_template needs no `tools` argument and the render is "
                         "byte-identical to the native tool-calling shape (asserted per row).",
         },
-        "token_stats": {
-            "mean": statistics.mean(lengths),
-            "p50": statistics.median(lengths),
-            "p90": statistics.quantiles(lengths, n=10)[8] if len(lengths) > 10 else max(lengths),
-            "p99": statistics.quantiles(lengths, n=100)[98] if len(lengths) > 100 else max(lengths),
-            "max": max(lengths),
-            "total_tokens": sum(lengths),
-            "trained_tokens": sum(trained),
-            "trained_fraction": round(sum(trained) / max(1, sum(lengths)), 4),
-        },
+        "token_stats": token_stats(lengths, trained),
         "turns": {"mean": statistics.mean(turns), "max": max(turns)},
         "drop_counters": dict(sorted(stats.items())),
         "seed": args.seed,

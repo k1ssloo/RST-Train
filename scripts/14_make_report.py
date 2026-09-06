@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -672,9 +671,9 @@ def render(args, config, manifest, training, evals, findings: Findings,
     A("| model | " + " | ".join(cols) + " |")
     A("|---|" + "---|" * len(cols))
     if not has_paper_reference(model_key):
-        A(f"> The paper reports numbers only for Qwen3.5-27B and 122B-A10B. This run is")
+        A("> The paper reports numbers only for Qwen3.5-27B and 122B-A10B. This run is")
         A(f"> `{model_key}`, so the paper rows below are context, **not a target**, and no")
-        A(f"> regression-vs-base verdict is claimed.\n")
+        A("> regression-vs-base verdict is claimed.\n")
     for key, label in (("base", "Qwen3.5-27B base *(paper)*"),
                        ("sft_r1", "paper SFT round 1"),
                        ("sft_r3", "paper SFT round 3"),

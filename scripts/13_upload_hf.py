@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hf_publish import publish  # noqa: E402
 
 SFT_REPO = "RST-SFT-Qwen3.5-27B"
 DPO_REPO = "RST-DPO-Qwen3.5-27B"
@@ -428,13 +431,6 @@ def main() -> int:
                         help="which local DPO build to publish (default: the adopted one)")
     args = parser.parse_args()
 
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        sys.exit("set HF_TOKEN")
-
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
     root = args.data_root
 
     sft_repo = f"{args.owner}/{SFT_REPO}"
@@ -500,33 +496,15 @@ def main() -> int:
     if args.only != "all":
         jobs = [j for j in jobs if j[0].strip().lower() == args.only]
 
+    # Every input of every job is checked BEFORE the first repo is created, so a typo
+    # in one job cannot leave another half-published.
     for _, _, _, _, files in jobs:
         for src, _dst in files:
             if not src.is_file():
                 sys.exit(f"missing input: {src}")
-
-    for name, repo, private, _card, files in jobs:
-        vis = "PRIVATE" if private else "public"
-        print(f"{name} -> {repo}  ({vis})")
-        for src, dst in files:
-            print(f"   {src}  ->  {dst}  ({src.stat().st_size/2**20:.1f} MB)")
-    if args.dry_run:
-        print("\n--dry-run: nothing uploaded")
-        return 0
-
-    for _name, repo, private, card, files in jobs:
-        api.create_repo(repo, repo_type="dataset", private=private, exist_ok=True)
-        print(f"\n[{repo}] created/exists (private={private})")
-        for src, dst in files:
-            api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                            repo_id=repo, repo_type="dataset")
-            print(f"  uploaded {dst}")
-        api.upload_file(path_or_fileobj=card.encode("utf-8"), path_in_repo="README.md",
-                        repo_id=repo, repo_type="dataset")
-        print("  uploaded README.md")
-
-    for _name, repo, private, _card, _files in jobs:
-        print(f"\nhttps://huggingface.co/datasets/{repo}" + ("  (private)" if private else ""))
+    for name, repo, private, card, files in jobs:
+        publish(repo=repo, files=files, card=card, private=private,
+                dry_run=args.dry_run, kind=name.strip())
     return 0
 
 

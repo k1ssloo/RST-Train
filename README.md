@@ -30,6 +30,8 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | RL image prebuild / launcher | ⚠️ written, needs a rootless Docker daemon + cluster |
 | FSDP2 unsharded-gradient-accumulation fix (`verl_backend/fsdp2_grad_accum.py`) | ✅ **measured** on one H100: verl's path retains fp32 unsharded gradients covering every parameter, the patched path retains none, gradients differ by 0.000e+00. Projects to 93.8 GiB/GPU freed at shard 32 — ⏳ the 4×8 launch it unblocks has not rerun yet |
 | Container-free offline eval (`06b_eval_offline.py`) | ⚠️ **crashed on the cluster** — `device_map="auto"` + a tied head put logits and targets on different cards, so the 4B run that finished all 82 steps has *no* eval at all (`BUG.md` BUG-11). Fixed, and the chunked scoring arithmetic is now checked against a full-logits computation (`tests/test_offline_eval_scoring.py`); ⏳ not yet rerun on the checkpoint |
+| Self-improvement loop: rollouts -> SFT data (`03h`, `21_rsi_round.sh`) | ⚠️ **the loop was broken and is now closed in code**: nothing turned a verifier-passed rollout of our own checkpoint back into training data, and a naive attempt would have produced wrong data — Terminus-2 stores its own `Analysis:/Plan:` rendering, not the model's completion, unless asked for `raw_content` (`BUG.md` BUG-19, measured: 65 of 70 agent steps rendered on the one local rollout). Fixed via `--export-trajectories`; the refusal path, the salvage path and the ATIF reconstruction are tested, but **no rollout has yet been run with the flag** |
+| LLM supervision on the curation band (`rst_common/judge.py`, `03g_curate_sft.py`) | ✅ **run end to end** against a local sglang server on real Nemotron rows: heuristics band 30,536 corpus rows into 81.0 % clear_keep / **18.0 % borderline** / 1.1 % clear_drop, and only the borderline reaches the judge. Cache verified (rerun: 31 hits, 9 calls). ⚠️ judged by Qwen3.5-0.8B — this proves the plumbing, not the verdict quality |
 | DPO on logged trajectories — **the default post-SFT stage** (`DPO_PLAN.md`) | ✅ **run end to end SINGLE-GPU** on 0.8B/H100: 2,673 pairs, step-0 loss = log 2 exactly; off-policy, so not an RL result. ⚠️ the multi-rank path was **never executed** and was broken until `BUG.md` BUG-2 — `shard_model` sharded the FSDP2 root while the DPO forward calls `decoder(...)`/`lm_head(...)` directly, so every `torchrun` run died on `aten.embedding` with mixed Tensor/DTensor. Fixed and layout-tested (`tests/test_dpo_sharding.py`); still not run on >1 rank |
 
 ## Supported models
@@ -89,6 +91,10 @@ OPERATOR_PROMPT.md             copy-paste kickoff message for the cluster LLM
 scripts/
   00_preflight.sh              detect GPU mem / NVLink / IB / shared FS / RAM → config row
   lib_env.sh                   sourced by every launcher: enter the conda env, then prove it
+  siblings.py                  ONE loader for the digit-prefixed scripts (they cannot be imported)
+  sft_common.py                ONE dedup / template gate / group split / token-stats tail
+  taskpool_common.py           ONE tier table, FROM-line reader and verifier-leak rule
+  hf_publish.py                ONE card check + upload path behind every 13* script
   01_setup_env.sh              slime/Megatron env (secondary path)
   01b_setup_env_verl.sh        PRIMARY env: verl+FSDP, driver-adaptive torch build
   16_smoke_forward_backward.py real fwd/bwd on 1 GPU; measures peak memory
@@ -96,6 +102,12 @@ scripts/
   03_build_sft_data.py         327,189 trajectories → slime `messages` parquet
   03b_validate_sft_data.py     ports slime's qwen3_5 mask; asserts the training target
   03d_build_openthoughts_sft.py  OpenThoughts-Agent-v1 → this format, via the same normalizer
+  03e_build_tmax_sft.py        AI2 TMax trajectories → this format (native tool-calling source)
+  03f_build_nemotron_sft.py    NVIDIA Nemotron-Terminal-Corpus → this format, 366k rows sharded
+  03g_curate_sft.py            reward 1 is not "worth imitating": heuristics band every row,
+                               an LLM judge sees the borderline 18% only, decisions archived
+  03h_build_rollout_sft.py     OUR OWN rollouts (Harbor job dirs / TerminalEvo golden episodes)
+                               → the same messages parquet. The arrow that closes the loop
   04_convert_ckpt.sh           HF ↔ Megatron torch_dist
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
@@ -104,6 +116,8 @@ scripts/
                                can serve: shard-completeness gate, merge, sidecars, vision
                                restore, base-diff, load+generate smoke test
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
+  10b_build_termigen_taskset.py  AI2 open-instruct-termigen → a task pool (zero assistant turns)
+  10c_build_swegym_taskset.py  SWE-Gym → a tiered pool, tiered from its own rollouts
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
@@ -117,6 +131,9 @@ scripts/
   18_dpo_ref_logprobs.py       frozen reference logprobs, once, sharded across GPUs
   19_train_dpo.py              DPO with a step-0 = log 2 calibration gate (FSDP2)
   dpo_common.py                the one logprob implementation both 18 and 19 use
+  21_rsi_round.sh              ONE self-improvement round: roll out -> harvest -> curate ->
+                               pretokenize. Rejection sampling, not RL; mixes the seed corpus
+                               back in so the policy cannot narrow onto its own output
   33_run_dpo.sh                the three DPO stages, resumable, container-free
   resume_guard.py              refuses a resume whose lr schedule changed under it
   34_diagnose_oom.py           why an OOM does not move when you cut the token budget
@@ -125,6 +142,9 @@ verl_backend/                  verl dataset + Harbor AgentLoop bridge
   model_registry.py            resolve+validate a model's launch config
   fsdp2_grad_accum.py          stops FSDP2 retaining a full unsharded fp32 gradient
 rst_common/                    definitions that must be identical in eval and RL
+  harbor.py                    the infra-vs-budget split, plus the ONE `harbor run` command line
+  judge.py                     LLM supervision: cached, budgeted, off the critical path,
+                               and a NullJudge when no endpoint is configured
 tests/                         no-GPU, no-cluster unit tests (see "Tests" below)
 configs/models.json            the model registry
 rl/generate.py                 slime --custom-generate-function-path implementation
@@ -253,6 +273,77 @@ too. `data/sft-v1-cap10/` predates them — all 126,630 of its assistant turns a
 byte-identical under the current code, so it is not wrong, but a rebuild would
 recover ~492 turns it dropped.
 
+## Training on our own rollouts
+
+Every dataset above came from somebody else's policy. `scripts/21_rsi_round.sh` is the
+arrow back: serve a checkpoint, roll it out on tasks whose verifier can score it, keep
+what passed, curate it, and hand back a parquet the next SFT reads.
+
+```bash
+export BASE_FOLDER=/shared/rst MODEL_KEY=qwen3.5-9b
+export RST_DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock   # or RST_HARBOR_ENV=daytona
+bash scripts/21_rsi_round.sh --ckpt $BASE_FOLDER/out-hf-full \
+     --tasks $BASE_FOLDER/rl-sweet/tasks --runs 4 --round 1
+# -> $BASE_FOLDER/rsi/round1/pretokenized_train.parquet  + rsi_round.json
+DATA_DIR=$BASE_FOLDER/rsi/round1 RUN_NAME=qwen3.5-9b-rsi-r1 bash scripts/30_run_sft_verl.sh
+```
+
+This is rejection sampling (expert iteration), **not** RL: no advantage, no importance
+ratio, no gradient from a failure. `12_run_grpo.sh` is that, and it is strictly more
+informative per rollout. This path exists because it needs no trainer-side rollout
+plumbing — one sglang server, one Harbor loop, one parquet — so on a pod that can run
+containers but cannot stand up a colocated actor, it is the only loop that closes.
+
+**The flag that makes it possible at all.** Terminus-2 writes its own `Analysis:/Plan:`
+rendering into the trajectory and drops the model's completion unless asked for
+`raw_content` (`BUG.md` BUG-19; measured 65 of 70 agent steps on the one local rollout).
+`06_eval.py --export-trajectories` sends that kwarg and keeps the job dirs;
+`RST_EXPORT_TRAJECTORIES=1` does the same for both RL paths. `03h_build_rollout_sft.py`
+**refuses** a rendered trajectory rather than inventing text from it.
+
+Measured on real (salvaged) rollout data, stages 2-4 chained: 24 rows survive curation and
+pretokenize to a **32.98 % trained-token fraction** — inside the 0.25-0.45 band
+`30_run_sft_verl.sh` gates on, and next to the release corpus's 32.42 %. Self-produced data
+passes the launcher's own check without widening any threshold.
+
+**Two defences against self-training narrowing the policy**, both on by default:
+`--mix-ratio` concatenates the seed corpus back in (1:1 by default) so the next SFT still
+sees the distribution the first one was trained on, and `rsi_round.json` records the pass
+rate per round — a round whose pass rate did not move, or whose kept-row count collapsed,
+taught nothing.
+
+### Reward 1 is not the same as "worth imitating"
+
+`scripts/03g_curate_sft.py` is the second gate, and it runs on any messages parquet, not
+just rollouts. Deterministic heuristics — repeated commands, error-laden observations,
+harness complaints, completion claims the agent then retracted, turn count against the
+task's own siblings — band every row; an LLM judge sees only the ambiguous band, plus a
+small random audit of the clear-keep band for calibration. Measured over the 30,536 rows
+of `cap10` + OpenThoughts + TMax + Nemotron-holdout:
+
+| band | rows | share |
+|---|---|---|
+| clear_keep | 24,722 | 81.0 % |
+| **borderline** (the only band the judge sees) | **5,493** | **18.0 %** |
+| clear_drop | 321 | 1.1 % |
+
+That 18 % is the whole speed argument: judge cost tracks the borderline, not the corpus.
+Verdicts are cached by content hash, so re-curating with different thresholds is free.
+
+```bash
+export RST_JUDGE_BASE_URL=http://127.0.0.1:30000/v1 RST_JUDGE_MODEL=my-judge
+export RST_JUDGE_API_KEY=... RST_JUDGE_MAX_CALLS=2000        # see rst_common/judge.py
+python scripts/03g_curate_sft.py --parquet data/sft-v1-cap10/rst_sft_train.parquet \
+       --out-dir data/curated-v1
+```
+
+With no endpoint configured it runs to completion on heuristics alone and writes
+`judge.enabled: false` into its manifest — it never pretends the borderline was reviewed.
+**The judge is never consulted for a reward, a loss mask or an eval score**: the task's
+verifier is the reward, and an LLM opinion in any of those makes the numbers
+incomparable with the paper and with each other. See the header of `rst_common/judge.py`
+for where the line is drawn and why.
+
 ## Local quick start (no cluster)
 
 ```bash
@@ -267,7 +358,7 @@ validated on a single machine before booking the cluster — see `PLAN.md` §4.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 252 tests, ~1 s (those needing torch/numpy say SKIP)
+python -m pytest tests/ -q     # 333 pass / 18 skip, ~2 s (those needing torch/numpy say SKIP)
 python tests/run_tests.py      # same tests, for an env without pytest
 ```
 
@@ -291,6 +382,14 @@ They need no GPU, no cluster, no container runtime and no dataset. What they cov
 | `tests/test_nccl_timeout_report.py` | `BUG.md` BUG-14: when the 4B DPO trainer hung ten minutes in an NCCL watchdog timeout, the launcher answered with GATE 1 / GATE 2 / GATE 3 — three hypotheses that are all checked *before* the first collective — and the trainer's output was never on disk to read. Runs the real `rst_explain_nccl_timeout` against the observed log text and pins the two readings apart: per-rank `NumelIn` that differs (the ranks are running different collectives, a code divergence) versus identical everywhere (one rank never arrived — host OOM killer first). Also that a `[rank*]: *Error` raised before the timeout is surfaced as the first failure, that a log with no timeout stays silent, and that the launcher tees and classifies |
 | `tests/test_report_loss_curve.py` | `BUG.md` BUG-17: every verl report so far WARNed "no loss values scraped from logs" while 110 usable steps sat in `$BASE_FOLDER/logs/run.log` — `--run-dir` pointed at the trainer's *output* directory, which under verl/FSDP holds only `global_step_*/`. Scrapes the real verl line format (`step:41 - train/loss:… - train/lr:…`, progress-bar prefix and all, including the short `lr` spelling the long pattern never matched) and pins the stage slice: one appended `run.log` holds SFT, GRPO and DPO, and DPO's loss is log 2 by construction, so scraping the file whole turns two healthy runs into a curve that ends at 0.693. Plus source assertions that the launcher passes its own log and names the stage for each report |
 | `tests/test_resume_schedule_gate.py` | `BUG.md` BUG-18: the 4B tmax model came out of two launches of one `RUN_NAME` — the first ended at step 42 with `train/lr` 3.0e-07, its `min_lr_ratio` floor; the second, relaunched with `total_epochs=3`, was resumed by `trainer.resume_mode=auto` and started step 43 at 2.35e-06, because `total_training_steps` is re-derived every launch and the cosine rebuilt over the new total. Both exited 0, nothing warned, and the 42 extra steps moved the loss 0.1954 → 0.1965. Pins `scripts/resume_guard.py` against that exact pair: the epoch change on a resume is exit 2 naming the knob and the measured lr jump, an honest same-schedule resume and a pre-gate resume are allowed, the escape hatch *records* the new schedule instead of ignoring it, every curve-shaping knob (including one that disappears) is compared while `save_freq` and the wandb project are not, and the step comes from `global_step_*/` rather than the stale `latest_checkpointed_iteration.txt`. Plus the report-side `find_lr_restart`, which catches the same thing from the log alone without flagging warmup |
+| `tests/test_sft_common.py` | the shared builder tail against the inline code it replaced -- the test re-implements the old group split and asserts the shared one reproduces it exactly, and checks `quantile` pointwise against `numpy.quantile`. Plus that no builder grew its own dedup or percentile back |
+| `tests/test_taskpool_common.py` | that the three RL pools share one TIERS *object* (asserted with `is`: a copied tuple can drift), and the verifier-leak decision -- byte-identical beats name-only whatever the file order, and a pool's own verifier names are honoured (termigen grades with `test_outputs.py`, not `test_state.py`) |
+| `tests/test_hf_publish.py` | that a missing input stops a publish BEFORE any repo is created, and that none of the six `13*` scripts kept a private `check_card` or a direct `HfApi` |
+| `tests/test_judge.py` | the LLM client's contract on a fake transport: cache before network, budget exhaustion degrading to counted refusals rather than an exception, one JSON-only retry billed as one budget unit, bearer vs Azure `api-key`, failures never cached, 429 retried and 401 not |
+| `tests/test_curate_sft.py` | the curation bands, on both dialects. Two are regressions from the first real run: a `<tool_call>` turn is parseable (the curator had grown a JSON-only parser and called every TMax row unparseable), and **two consecutive completion claims are a normal ending** -- Terminus-2 asks the agent to repeat the claim -- so only a claim followed by more work is a retraction. Before that fix, `clear_keep` was 156 rows of 30,536; after, 24,722 |
+| `tests/test_rollout_sft.py` | `BUG.md` BUG-19: a rendered trajectory is refused by default and counted, the salvage path reconstructs the action JSON from the rendering plus tool calls and marks every turn it invented, compaction boundaries split into the linear segments Harbor would have written, and an infra failure never becomes a reward-0 training row |
+| `tests/test_harbor_invocation.py` | that all three rollout launchers build their `harbor run` through one `run_argv`, and that asking for exportable trajectories on a harbor without `--agent-kwarg` refuses the run instead of producing a jobs tree that fails hours later in `03h` |
+| `tests/test_siblings.py` | that the test helper and the scripts get the same module object, and that no script kept its own `spec_from_file_location` |
 | `tests/test_restore_vision.py` | `07_restore_vision.py` end to end on synthetic 2-shard checkpoints: vision/MTP preserved, dtype cast back, a missing text tensor refused with nothing written, `--allow-original-fallback` recorded, shape and naming mismatches refused. Skips without torch |
 
 What they do **not** cover, and no test in this repo does: anything that needs the

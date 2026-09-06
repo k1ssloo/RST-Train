@@ -49,7 +49,6 @@ MEMORY NOTE (the reason this is not four lines of transformers)
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import math
 import os
@@ -62,27 +61,12 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 
 
-_SIBLINGS: dict[str, Any] = {}
+sys.path.insert(0, str(HERE))
 
-
-def _load_sibling(stem: str) -> Any:
-    """Import a sibling script whose module name starts with a digit.
-
-    Done by path, deliberately: `normalize_assistant` here MUST be the same
-    function that built the training data, and `qwen3_5_mask` the same one that
-    pretokenized it. A second copy of either would drift.
-    """
-    if stem in _SIBLINGS:
-        return _SIBLINGS[stem]
-    path = HERE / f"{stem}.py"
-    spec = importlib.util.spec_from_file_location(stem.lstrip("0123456789_") or stem, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _SIBLINGS[stem] = module
-    return module
+# `normalize_assistant` here MUST be the same function that built the training
+# data, and `qwen3_5_mask` the same one that pretokenized it -- so both are loaded
+# from their scripts rather than copied. See scripts/siblings.py.
+from siblings import load_script as _load_sibling  # noqa: E402
 
 
 # ------------------------------------------------------------------ B: actions
@@ -254,11 +238,14 @@ def pick_turn_indices(messages: list[dict], per_row: int) -> list[int]:
 
 # --------------------------------------------------------------- model loading
 
-AUTO_CLASSES = ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModel")
-
-
 def load_model(model_path: str, dtype_name: str) -> tuple[Any, str]:
-    """Load whatever kind of model this checkpoint is, and say which class worked."""
+    """Load whatever kind of model this checkpoint is, and say which class worked.
+
+    The auto-class probe itself is `dpo_common.load_model`, shared with the DPO path
+    so both answer "which class fits this checkpoint" the same way. What this wrapper
+    adds is the two things eval needs and DPO does not: a `device_map="auto"` load so
+    a checkpoint larger than one card still scores, and the path check below.
+    """
     # A local path that does not exist comes back from transformers as
     #   OSError: Repo id must be in the form 'repo_name' or 'namespace/repo_name'
     # because it falls through to the Hub resolver -- three times, once per auto
@@ -277,25 +264,14 @@ def load_model(model_path: str, dtype_name: str) -> tuple[Any, str]:
     # Imported after the path check on purpose: importing torch costs seconds and a
     # CUDA context, and it cannot make a missing directory exist.
     import torch
-    import transformers
+
+    from dpo_common import load_model as probe_auto_classes
 
     dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
              "float32": torch.float32}[dtype_name]
-    errors: list[str] = []
-    for name in AUTO_CLASSES:
-        cls = getattr(transformers, name, None)
-        if cls is None:
-            continue
-        try:
-            model = cls.from_pretrained(
-                model_path, dtype=dtype, device_map="auto", trust_remote_code=True,
-            )
-        except Exception as exc:  # noqa: BLE001 - we are probing which class fits
-            errors.append(f"{name}: {type(exc).__name__}: {exc}"[:300])
-            continue
-        model.eval()
-        return model, name
-    raise SystemExit("could not load the checkpoint with any auto class:\n  " + "\n  ".join(errors))
+    model, name = probe_auto_classes(model_path, dtype=dtype, device_map="auto")
+    model.eval()
+    return model, name
 
 
 # ------------------------------------------------------- A: teacher-forced loss

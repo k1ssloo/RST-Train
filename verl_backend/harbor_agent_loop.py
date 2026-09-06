@@ -67,10 +67,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rst_common.harbor import (  # noqa: E402
     HARNESS_INFRA,
-    Outcome,
     apply_proxy_policy,
+    export_agent_kwargs,
+    Outcome,
     read_reward,
     refine_with_stdout,
+    run_argv,
     wall_clock_timeout,
 )
 
@@ -347,24 +349,26 @@ class HarborTerminusAgentLoop(AgentLoopBase):
             )
         finally:
             shim.close_session(session_id)
-            if os.environ.get("RST_KEEP_JOBS", "0") != "1":
+            keep = (os.environ.get("RST_KEEP_JOBS", "0") == "1"
+                    or os.environ.get("RST_EXPORT_TRAJECTORIES", "0") == "1")
+            if not keep:
                 shutil.rmtree(jobs_root, ignore_errors=True)
 
     async def _run_harbor(self, *, task_dir: Path, job_name: str, jobs_root: Path,
                           session_id: str, base_url: str, harbor_env: str,
                           docker_host: str) -> Outcome:
-        argv = [
-            os.environ.get("RST_HARBOR_BIN", "harbor"), "run",
-            "--path", str(task_dir.resolve()),
-            "--agent", os.environ.get("RST_AGENT", "terminus-2"),
-            "--model", os.environ.get("RST_SERVED_MODEL", "hosted_vllm/rst-policy"),
-            "--env", harbor_env, "--n-attempts", "1", "--n-concurrent", "1",
-            "--max-retries", "0", "--jobs-dir", str(jobs_root),
-            "--job-name", job_name, "--quiet",
-        ]
-        for kwarg in os.environ.get("RST_HARBOR_ENV_KWARGS", "").split():
-            if "=" in kwarg:
-                argv += ["--environment-kwarg", kwarg]
+        argv = run_argv(
+            harbor_bin=os.environ.get("RST_HARBOR_BIN", "harbor"), task_dir=task_dir,
+            agent=os.environ.get("RST_AGENT", "terminus-2"),
+            model=os.environ.get("RST_SERVED_MODEL", "hosted_vllm/rst-policy"),
+            env=harbor_env, jobs_dir=jobs_root, job_name=job_name,
+            # RST_EXPORT_TRAJECTORIES=1: raw completions + linear history in the ATIF,
+            # so 03h_build_rollout_sft.py can turn these rollouts into data.
+            agent_kwargs=(export_agent_kwargs()
+                          if os.environ.get("RST_EXPORT_TRAJECTORIES", "0") == "1" else ()),
+            env_kwargs=[kwarg for kwarg in os.environ.get("RST_HARBOR_ENV_KWARGS", "").split()
+                        if "=" in kwarg],
+        )
         env = dict(os.environ)
         # The API key IS the session id: the shim reads it from the Bearer header.
         env.update({

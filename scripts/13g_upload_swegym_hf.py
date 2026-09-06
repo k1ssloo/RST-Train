@@ -20,10 +20,12 @@ everyone who later evaluates on SWE-Gym. Pass it only deliberately.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from hf_publish import check_card, publish  # noqa: E402
 
 REPO = "SWE-Gym-RL-Taskset"
 
@@ -185,35 +187,20 @@ and hint text, and rewritten into this repo's GRPO prompt-data shape. No rollout
 generated and no verifier was executed.
 """
 
-CLAIMS: list[tuple[str, tuple[str, ...], object]] = [
-    ("pool instances", ("pool_instances",), 2438),
-    ("tasks selected", ("tasks_selected",), 2438),
-    ("hard tier", ("tier_counts_all_instances", "hard"), 2144),
-    ("sweet tier", ("tier_counts_all_instances", "sweet"), 187),
-    ("easy tier", ("tier_counts_all_instances", "easy"), 107),
-    ("zero-gradient fraction", ("zero_gradient_fraction",), 0.8794),
-    ("rollouts used", ("rollouts_used",), 6055),
-    ("distinct repos", ("distinct_repos",), 11),
-    ("hints upstream", ("hints_text_available_upstream_count",), 1528),
-    ("gold patch excluded", ("gold_patch_excluded",), True),
-    ("pairable instances", ("dpo_verdict", "pairable_instances"), 188),
-    ("dpo pairs", ("dpo_verdict", "pairs_at_min_per_instance"), 291),
+CLAIMS: list[tuple[str, str, tuple[str, ...], object]] = [
+    ("pool instances", "manifest.json", ("pool_instances",), 2438),
+    ("tasks selected", "manifest.json", ("tasks_selected",), 2438),
+    ("hard tier", "manifest.json", ("tier_counts_all_instances", "hard"), 2144),
+    ("sweet tier", "manifest.json", ("tier_counts_all_instances", "sweet"), 187),
+    ("easy tier", "manifest.json", ("tier_counts_all_instances", "easy"), 107),
+    ("zero-gradient fraction", "manifest.json", ("zero_gradient_fraction",), 0.8794),
+    ("rollouts used", "manifest.json", ("rollouts_used",), 6055),
+    ("distinct repos", "manifest.json", ("distinct_repos",), 11),
+    ("hints upstream", "manifest.json", ("hints_text_available_upstream_count",), 1528),
+    ("gold patch excluded", "manifest.json", ("gold_patch_excluded",), True),
+    ("pairable instances", "manifest.json", ("dpo_verdict", "pairable_instances"), 188),
+    ("dpo pairs", "manifest.json", ("dpo_verdict", "pairs_at_min_per_instance"), 291),
 ]
-
-
-def check_card(src_dir: Path) -> int:
-    manifest = json.loads((src_dir / "manifest.json").read_text(encoding="utf-8"))
-    bad = 0
-    for label, keys, expected in CLAIMS:
-        node: object = manifest
-        for key in keys:
-            assert isinstance(node, dict), f"{label}: {keys} is not a path into the manifest"
-            node = node[key]
-        if node != expected:
-            print(f"  MISMATCH {label}: card says {expected}, manifest says {node}")
-            bad += 1
-    print(f"[check] {len(CLAIMS) - bad}/{len(CLAIMS)} card claims match the manifest")
-    return bad
 
 
 def main() -> int:
@@ -223,47 +210,22 @@ def main() -> int:
     parser.add_argument("--src", type=Path, default=Path("data/swegym"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--public", action="store_true",
-                        help="publish publicly. Read the docstring first: this pool "
-                             "contains the complete verifier for 2,438 SWE-bench "
-                             "instances.")
+                        help="publish publicly. Read the docstring first: the default is "
+                             "private because this pool's verifiers are the reward signal "
+                             "for anything evaluated on it.")
     args = parser.parse_args()
 
-    repo = f"{args.owner}/{REPO}"
     files: list[tuple[Path, str]] = [
         (args.src / "rl_tasks.jsonl", "rl_tasks.jsonl"),
         (args.src / "verifier_spec.parquet", "verifier_spec.parquet"),
         (args.src / "manifest.json", "manifest.json"),
     ]
-    for src, _dst in files:
-        if not src.is_file():
-            sys.exit(f"missing input: {src}. Run scripts/10c_build_swegym_taskset.py first.")
-    if check_card(args.src):
-        sys.exit("the card disagrees with the manifest; fix one of them before publishing")
-
-    print(f"taskset -> {repo}  ({'PUBLIC' if args.public else 'private'})")
-    for src, dst in files:
-        print(f"   {src}  ->  {dst}  ({src.stat().st_size / 2**20:.1f} MB)")
-    print("   (gold patches excluded; hints_text never included as text)")
-    if args.dry_run:
-        print("\n--dry-run: nothing uploaded")
-        return 0
-
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        sys.exit("set HF_TOKEN")
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=token)
-    api.create_repo(repo, repo_type="dataset", private=not args.public, exist_ok=True)
-    for src, dst in files:
-        api.upload_file(path_or_fileobj=str(src), path_in_repo=dst,
-                        repo_id=repo, repo_type="dataset")
-        print(f"  uploaded {dst}")
-    api.upload_file(path_or_fileobj=CARD.encode("utf-8"), path_in_repo="README.md",
-                    repo_id=repo, repo_type="dataset")
-    print("  uploaded README.md")
-    print(f"\nhttps://huggingface.co/datasets/{repo}")
-    return 0
+    if check_card(args.src, CLAIMS):
+        sys.exit("the card disagrees with the manifests; fix one of them before publishing")
+    return publish(repo=f"{args.owner}/{REPO}", files=files, card=CARD,
+                   private=not args.public, dry_run=args.dry_run, kind="taskset",
+                   notes=("gold patches excluded; hints_text never included as text",),
+                   missing_hint="Run scripts/10c_build_swegym_taskset.py first")
 
 
 if __name__ == "__main__":

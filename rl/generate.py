@@ -69,10 +69,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rst_common.harbor import (  # noqa: E402
     HARNESS_INFRA,
-    Outcome,
     apply_proxy_policy,
+    export_agent_kwargs,
+    Outcome,
     read_reward,
     refine_with_stdout,
+    run_argv,
     wall_clock_timeout,
 )
 
@@ -95,6 +97,11 @@ class RolloutConfig:
     jobs_root: Path
     keep_jobs: bool
     max_concurrent_sandboxes: int
+    # RST_EXPORT_TRAJECTORIES=1: ask Terminus-2 for raw completions and keep every job
+    # dir, so the rollouts of this run can be turned into SFT/DPO data by
+    # scripts/03h_build_rollout_sft.py. Off by default: the trajectories cost disk and
+    # the on-policy tokens already reach the trainer through the adapter.
+    export_trajectories: bool
 
     @classmethod
     def from_env(cls) -> RolloutConfig:
@@ -114,8 +121,10 @@ class RolloutConfig:
             agent_timeout_sec=agent_timeout,
             guard_sec=int(os.environ.get("RST_ROLLOUT_GUARD_SEC", "0") or 0) or (agent_timeout + 600),
             jobs_root=Path(os.environ.get("RST_JOBS_ROOT", "/tmp/rst-rl-jobs")),
-            keep_jobs=os.environ.get("RST_KEEP_JOBS", "0") == "1",
+            keep_jobs=(os.environ.get("RST_KEEP_JOBS", "0") == "1"
+                       or os.environ.get("RST_EXPORT_TRAJECTORIES", "0") == "1"),
             max_concurrent_sandboxes=int(os.environ.get("RST_MAX_SANDBOXES", "8")),
+            export_trajectories=os.environ.get("RST_EXPORT_TRAJECTORIES", "0") == "1",
         )
 
 
@@ -186,21 +195,12 @@ async def _run_harbor(state: _AdapterService, session_id: str, task_dir: Path,
     jobs_dir = CONFIG.jobs_root / job_name
     jobs_dir.mkdir(parents=True, exist_ok=True)
 
-    argv = [
-        CONFIG.harbor_bin, "run",
-        "--path", str(task_dir.resolve()),
-        "--agent", CONFIG.agent,
-        "--model", CONFIG.model_name,
-        "--env", CONFIG.harbor_env,
-        "--n-attempts", "1",
-        "--n-concurrent", "1",
-        "--max-retries", "0",
-        "--jobs-dir", str(jobs_dir),
-        "--job-name", job_name,
-        "--quiet",
-    ]
-    for kwarg in CONFIG.harbor_env_kwargs:
-        argv += ["--environment-kwarg", kwarg]
+    argv = run_argv(
+        harbor_bin=CONFIG.harbor_bin, task_dir=task_dir, agent=CONFIG.agent,
+        model=CONFIG.model_name, env=CONFIG.harbor_env, jobs_dir=jobs_dir, job_name=job_name,
+        agent_kwargs=export_agent_kwargs() if CONFIG.export_trajectories else (),
+        env_kwargs=CONFIG.harbor_env_kwargs,
+    )
     env = dict(os.environ)
     env.update(
         {

@@ -34,35 +34,28 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import tarfile
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-TIERS = (
-    ("sweet", 0.10, 0.90),   # primary GRPO pool: reliable within-group variance
-    ("hard", 0.00, 0.10),    # exploration: only worth it once the policy improves
-    ("easy", 0.90, 1.01),    # near-saturated: keep a trickle to avoid regression
-)
-TRACKED = (
-    "instruction.md",
-    "task.toml",
-    "environment/Dockerfile",
-    "solution/solve.sh",
-    "tests/test.sh",
-    "tests/test_state.py",
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The tier bands, the six-file contract and the leak rule are shared with the
+# termigen and SWE-Gym pool builders -- "sweet" has to mean one thing per project.
+from taskpool_common import (  # noqa: E402
+    RST_VERIFIER_FILES,
+    TIERS,
+    TRACKED,
+    base_image,
+    find_verifier_leak,
+    materialize_tasks,
+    sha256_bytes,
+    verify_tracked,
 )
 
 
 def _sha256(path: Path) -> str:
-    import hashlib
-
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def base_image(dockerfile: str) -> str:
-    match = re.search(r"^\s*FROM\s+(\S+)", dockerfile or "", re.M | re.I)
-    return match.group(1) if match else "?"
+    return sha256_bytes(path.read_bytes())
 
 
 def leak_guard(chosen, task_root: Path, out: Path):
@@ -88,15 +81,14 @@ def leak_guard(chosen, task_root: Path, out: Path):
             continue
         private = {
             _sha256(task_dir / "tests" / name)
-            for name in ("test.sh", "test_state.py")
+            for name in RST_VERIFIER_FILES
             if (task_dir / "tests" / name).is_file()
         }
-        for path in env_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.name in ("test_state.py", "test.sh") or _sha256(path) in private:
-                leaked.append((row.task_id, str(path.relative_to(task_dir))))
-                break
+        context = ((str(path.relative_to(task_dir)), _sha256(path))
+                   for path in env_dir.rglob("*") if path.is_file())
+        hit = find_verifier_leak(context, private)
+        if hit:
+            leaked.append((row.task_id, hit[0]))
     if leaked:
         print(f"[LEAK] {len(leaked)} tasks expose the private verifier in the build "
               f"context and are EXCLUDED, e.g. {leaked[:3]}")
@@ -175,34 +167,12 @@ def main() -> int:
         wanted: dict[str, dict[str, str]] = defaultdict(dict)
         for row in chosen.itertuples():
             wanted[row.shard][row.member_prefix.rstrip("/")] = row.task_id
-        for shard, members in sorted(wanted.items()):
-            prefix_to_id = {p + "/": tid for p, tid in members.items()}
-            with tarfile.open(args.tasks_root / shard) as tar:
-                for member in tar:
-                    if not member.isfile():
-                        continue
-                    for prefix, tid in prefix_to_id.items():
-                        if not member.name.startswith(prefix):
-                            continue
-                        rel = member.name[len(prefix) :]
-                        # path-safety: never write outside the task dir
-                        if rel.startswith("/") or ".." in Path(rel).parts:
-                            raise SystemExit(f"unsafe member path: {member.name}")
-                        dest = task_root / tid / rel
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        handle = tar.extractfile(member)
-                        if handle is not None:
-                            dest.write_bytes(handle.read())
-                        break
-            print(f"  materialized from {shard}", flush=True)
+        # The extraction loop is shared with the release probe (22-24): one
+        # definition of "materialize a task dir", so both pools have the same files.
+        materialize_tasks(args.tasks_root, wanted, task_root,
+                          log=lambda msg: print(msg, flush=True))
         # verify the six-file RST contract
-        incomplete = []
-        for row in chosen.itertuples():
-            missing = [f for f in TRACKED if not (task_root / row.task_id / f).is_file()]
-            if missing:
-                incomplete.append((row.task_id, missing))
-            else:
-                materialized += 1
+        materialized, incomplete = verify_tracked(task_root, chosen.task_id)
         if incomplete:
             print(f"[warn] {len(incomplete)} tasks missing tracked files, e.g. {incomplete[:3]}")
         print(f"[materialize] complete task dirs: {materialized:,}")
