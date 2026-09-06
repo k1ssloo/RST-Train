@@ -78,6 +78,16 @@ eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CL
           --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
           --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell)"
 
+# The registry eval above exports the registry default for NUM_EPOCH, which
+# overwrites anything the caller exported before this script ran. Re-apply the
+# caller's intent here, and only if it was stated: a corpus small enough that
+# one epoch is 42 steps needs more than one pass, and that has to be sayable
+# without editing the shared default.
+if [[ -n "${RST_NUM_EPOCH:-}" ]]; then
+  echo "[epochs] NUM_EPOCH ${NUM_EPOCH} -> ${RST_NUM_EPOCH} (RST_NUM_EPOCH)"
+  export NUM_EPOCH="$RST_NUM_EPOCH"
+fi
+
 # ---- multi-node rendezvous gate ---------------------------------------------
 # torchrun's defaults below are MASTER_ADDR=127.0.0.1 NODE_RANK=0, which is right for
 # one node and catastrophic for four: every node then forms its OWN world_size=8 group,
@@ -187,11 +197,15 @@ fi
 # may have been downloaded (HF ships its manifest under a different name) or copied,
 # and a manifest can be stale while the data is not. Checking the actual tensors is
 # both stronger and provenance-independent.
-python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" <<'EOF_PY'
+python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" "${RST_TRAINED_FRAC_MIN:-0.25}" "${RST_TRAINED_FRAC_MAX:-0.45}" <<'EOF_PY'
 import sys
 import pandas as pd
 
 path, max_len = sys.argv[1], int(sys.argv[2])
+# Band bounds are arguments so a corpus with a different, separately verified
+# trained fraction can state it instead of the check being edited away.
+frac_lo = float(sys.argv[3]) if len(sys.argv) > 3 else 0.25
+frac_hi = float(sys.argv[4]) if len(sys.argv) > 4 else 0.45
 df = pd.read_parquet(path)
 for col in ("input_ids", "loss_mask"):
     if col not in df.columns:
@@ -229,15 +243,20 @@ if leading:
 if too_long:
     sys.exit(f"REFUSING TO TRAIN: {too_long} rows exceed max_seq_len={max_len}. Re-export with "
              f"--max-seq-len {max_len} so the drop is counted, or raise the limit.")
-# 32.42% measured for cap10. A mask bug typically lands far outside this band: ~100%
-# means nothing is masked (training on the harness prompt and terminal output), ~0%
-# means everything is.
+# The default band is 32.42% measured for cap10, widened either way. A mask bug
+# typically lands far outside any sane band: ~100% means nothing is masked
+# (training on the harness prompt and terminal output), ~0% means everything is.
+# A corpus whose supervised share is genuinely different -- one that trains
+# reasoning on every turn rather than the last, say -- states its own bounds via
+# RST_TRAINED_FRAC_MIN / RST_TRAINED_FRAC_MAX rather than having the check
+# removed, so the expected value ends up recorded in the run instead of lost.
 # This band is tighter than the 0.15-0.55 one in 16_smoke_forward_backward.py on purpose:
 # here the fraction covers every row at full length, there it covers 4 rows truncated to
 # --seq-len, which has both sampling spread and a truncation bias toward the untrained
 # preamble. Tight where the measurement is stable, loose where it is not.
-if not (0.25 <= frac <= 0.45):
-    sys.exit(f"REFUSING TO TRAIN: trained fraction {frac:.2%} is outside the 0.25-0.45 band "
+if not (frac_lo <= frac <= frac_hi):
+    sys.exit(f"REFUSING TO TRAIN: trained fraction {frac:.2%} is outside the "
+             f"{frac_lo:.2f}-{frac_hi:.2f} band "
              f"measured for this dataset. Near 100% means the mask is absent (you would train "
              f"on terminal output); near 0% means it masks everything. Investigate before "
              f"spending GPU time.")
