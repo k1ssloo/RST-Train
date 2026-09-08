@@ -10,13 +10,16 @@ DeepSeek **11,938 train + 200 holdout**；Opus 未评分 **8,066 train + 200 hol
 
 - [Terminal-Lego-DeepSeek-SFT-terminus](https://huggingface.co/datasets/NiuNiu0110/Terminal-Lego-DeepSeek-SFT-terminus)：
   `292330c713254548893fbaef435cfd7fb6199096`，含 messages/pretokenized 与 train/holdout。
+- [Terminal-Lego-Opus-SFT-unscored](https://huggingface.co/datasets/NiuNiu0110/Terminal-Lego-Opus-SFT-unscored)：
+  `06096e5ca61f7df7f333b7f2c21285743febb2b4`，含 8,066 train + 200 holdout，
+  提供 `default`（messages）和 `pretokenized` 两种 config；全部 reward 未知。
 - [Terminal-Lego-Opus-Trajectories-unscored](https://huggingface.co/datasets/NiuNiu0110/Terminal-Lego-Opus-Trajectories-unscored)：
   `1c5578aff4cad23df70ceb46851c128aeafb2fd5`，保留原始 JSON，未推断 reward。
 
 本轮 DeepSeek、Opus 与 SETA 的 4B/9B/27B 独立训练计划、权重名称和每 200 步保存要求见
 [`TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md`](TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md)。
-Opus 已纳入九任务计划；`03j` 现支持显式未评分转换，命令见下文。
-集群执行者可直接转换并训练三个尺寸，无须另写适配器。
+Opus 已纳入九任务计划；集群可直接下载已转换的固定切分并训练三个尺寸。
+`03j` 支持显式未评分转换，独立复现命令见下文。
 
 ## 下载来源
 
@@ -44,7 +47,7 @@ data/terminal-lego-trajectories/
 
 Opus 全部 8,318 条记录的元数据只有 `oracle_passed_task`、`difficulty`。这
 不能证明每条模型轨迹通过了验证器；助手自己的 `task_complete=true` 也不是
-grader reward。HF 上保留原始下载；使用 `--allow-unscored` 单独转换为未评分 SFT。
+grader reward。原始归档和转换后的未评分 SFT 分别发布；转换使用 `--allow-unscored`。
 每条保留 `reward=null`、`reward_available=false`、`reward_policy=unscored` 及
 原始 `oracle_passed_task`、`difficulty`；未提供的 trial/path/run 保留 null。
 该开关仅支持 Opus，显式提供的 reward=0 或非法 reward 仍被排除，默认模式仍
@@ -159,7 +162,16 @@ Opus 同样以 `--strict` 导出，**8,266/8,266 条保留，零新增丢弃**�
 holdout 有 **967,048 / 330,785**。本地 `opus-unscored-sft-v1/validation.json`
 记录原始行收支、未知评分和元数据保留、任务切分、token/mask 检查及文件哈希；
 `release_manifest.json` 已通过训练启动器的 `SFT_DATA_MANIFEST` 数据检查。
-这些 Opus 转换产物保存在本地，HF 上述固定 revision 仍只含原始轨迹。
+Opus SFT 已上传上述独立私有仓库，共 12 个文件、89,727,562 bytes；每个文件均
+按固定 revision 认证下载后通过 SHA-256 校验。发布的 `release_manifest.json`
+使用仓库内相对路径，数据文件字节与本地产物一致。下载入口：
+
+```bash
+hf download NiuNiu0110/Terminal-Lego-Opus-SFT-unscored --repo-type dataset \
+  --revision 06096e5ca61f7df7f333b7f2c21285743febb2b4 \
+  --local-dir data/terminal-lego-trajectories/opus-sft-hf
+(cd data/terminal-lego-trajectories/opus-sft-hf && sha256sum -c SHA256SUMS)
+```
 
 适配器现有 22 项回归测试在 pytest 和独立 runner 下均通过；包含真实 Qwen3.5 分词器
 的助手监督、任务描述与终端观察屏蔽检查。最终 CPU suite：**436 passed，

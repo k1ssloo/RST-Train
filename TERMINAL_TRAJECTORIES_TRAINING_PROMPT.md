@@ -1,9 +1,8 @@
 # Training prompt：SETA / Terminal-Lego DeepSeek / Opus × Qwen3.5
 
 将分隔线以下内容复制给集群侧训练 agent。本轮数据已上传，尚未启动 GPU 训练。
-数据范围为 SETA、Terminal-Lego DeepSeek 和 Opus 三组。前两组已有验证过的 SFT
-产物；Opus 已上传原始轨迹，本地适配器已完成全量转换验证。集群执行者按
-第 3.1 节转换，再完成其三个尺寸的训练。
+数据范围为 SETA、Terminal-Lego DeepSeek 和 Opus 三组，均已上传验证过的 messages
+和预分词 SFT 产物。集群直接下载固定切分，完成三个尺寸的训练。
 
 ---
 
@@ -28,32 +27,31 @@ Hugging Face 权重，完成评估并提交报告。
 |---|---|---:|---|
 | SETA | `NiuNiu0110/SETA-SFT-native-tools` | 976 / 100 | SETA 原生工具调用 |
 | Terminal-Lego DeepSeek | `NiuNiu0110/Terminal-Lego-DeepSeek-SFT-terminus` | 11,938 / 200 | Terminus-2 JSON |
-| Terminal-Lego Opus | `NiuNiu0110/Terminal-Lego-Opus-Trajectories-unscored` | 8,318 条原始记录；转换后确定切分数量 | 转为 Terminus-2 SFT；保留未评分标记 |
+| Terminal-Lego Opus | `NiuNiu0110/Terminal-Lego-Opus-SFT-unscored` | 8,066 / 200 | Terminus-2 SFT；保留未评分标记 |
 
 固定数据 revision，禁止自动漂移到后续 `main`：
 
 ```text
 SETA      605f104decc273e8064e51752a43c6000774a4be
 DeepSeek  292330c713254548893fbaef435cfd7fb6199096
-Opus      1c5578aff4cad23df70ceb46851c128aeafb2fd5
+Opus      06096e5ca61f7df7f333b7f2c21285743febb2b4
 ```
 
-两个 SFT 仓库都有 `default`（messages）和 `pretokenized`（input_ids + loss_mask）
-两个 config，以及 train/holdout 两个 split。Opus 仓库提供 `default` config 的
-`unscored` split，必须先完成第 3.1 节的转换。三个尺寸复用各自数据组的同一份
+三个 SFT 仓库都有 `default`（messages）和 `pretokenized`（input_ids + loss_mask）
+两个 config，以及 train/holdout 两个 split。三个尺寸复用各自数据组的同一份
 预分词文件与固定切分；不混合三组数据，不把 holdout 加入训练，不逐轮重新渲染
-聊天模板。SETA/DeepSeek 使用已发布切分，Opus 只在首次转换时建立切分。
+聊天模板。三组均使用已发布切分。
 
 SETA 的训练数据有 **9,836,475 tokens / 4,919,395 supervised tokens**；
-DeepSeek 有 **105,263,578 / 42,581,331**。最长序列分别为 26,391 和
-32,766 tokens。Opus 的保留行数和 token 统计以转换结果为准；三组统一使用
+DeepSeek 有 **105,263,578 / 42,581,331**；Opus 有 **41,451,885 / 14,723,292**。
+最长序列分别为 26,391、32,766 和 31,781 tokens。三组统一使用
 `MAX_SEQ_LEN=32768`、`data.truncation=error`。
 
 SETA/DeepSeek 按上游 reward=1 筛选；本地没有重放验证器。**SFT 不要求 reward，
-Opus 必须作为独立的未评分 SFT 数据组训练。** 它的元数据仅有
+Opus 必须作为独立的未评分 SFT 数据组训练。** 它的原始元数据仅有
 `oracle_passed_task`、`difficulty`，不能据此推断模型轨迹成功；保留未知评分，
-不伪造 reward=1 或 reward=0。原始仓库的未评分/待转换状态不免除本轮三个 Opus
-训练任务。TerminalWorld 和 Terminal-Lego 环境包不属于本轮 SFT 数据。
+不伪造 reward=1 或 reward=0。三个 Opus 训练任务使用已发布 SFT 产物。
+TerminalWorld 和 Terminal-Lego 环境包不属于本轮 SFT 数据。
 
 ## 2. 九个任务与权重命名
 
@@ -95,12 +93,11 @@ hf download NiuNiu0110/SETA-SFT-native-tools --repo-type dataset \
 hf download NiuNiu0110/Terminal-Lego-DeepSeek-SFT-terminus --repo-type dataset \
   --revision 292330c713254548893fbaef435cfd7fb6199096 \
   --local-dir "$BASE_FOLDER/datasets/terminal-lego-deepseek-hf"
-hf download NiuNiu0110/Terminal-Lego-Opus-Trajectories-unscored --repo-type dataset \
-  --revision 1c5578aff4cad23df70ceb46851c128aeafb2fd5 \
+hf download NiuNiu0110/Terminal-Lego-Opus-SFT-unscored --repo-type dataset \
+  --revision 06096e5ca61f7df7f333b7f2c21285743febb2b4 \
   --local-dir "$BASE_FOLDER/datasets/terminal-lego-opus-unscored-hf"
-(cd "$BASE_FOLDER/datasets/terminal-lego-opus-unscored-hf" && sha256sum -c SHA256SUMS)
 
-for DATA_KEY in seta terminal-lego-deepseek; do
+for DATA_KEY in seta terminal-lego-deepseek terminal-lego-opus-unscored; do
   DATA_HF="$BASE_FOLDER/datasets/${DATA_KEY}-hf"
   (cd "$DATA_HF" && sha256sum -c SHA256SUMS)
   mkdir -p "$BASE_FOLDER/data/$DATA_KEY"
@@ -137,68 +134,34 @@ bash -n scripts/30_run_sft_verl.sh
 下载的 manifest 描述 Hub 内的原始路径；复制后的文件只改名字，内容哈希应保持
 一致。保存 `SHA256SUMS`、`release_manifest.json` 和完整数据 revision 到运行记录。
 
-### 3.1 Opus：先转换，再训练三个尺寸（必做）
+### 3.1 Opus：使用已发布的未评分 SFT
 
-使用已下载的 `data/terminal-lego-opus-4-6-8k.json`，不调用教师模型生成新轨迹。
-源文件应有 8,318 条记录，SHA-256 为
-`925da53ae7686e22320c4ac9e506b43ad1c8a55979f2f8bf500283a686a24c10`。
-8,318 是原始记录数，不能当作转换后的训练条数。
-按下述固定参数，本地实测保留 **8,066 train + 200 holdout**；预分词零新增丢弃。
-训练集为 **41,451,885 tokens / 14,723,292 supervised tokens**；在集群复现时
-核对这些计数，差异须记录原因。所有保留记录仍为未评分，GPU 训练尚未执行。
+第 3 节已将固定 revision 的 messages、预分词数据和 `release_manifest.json`
+复制到 `$BASE_FOLDER/data/terminal-lego-opus-unscored/`。已发布产物为
+**8,066 train + 200 holdout**，共 8,266 个互不跨切分的任务组；严格预分词零新增丢弃。
+训练集为 **41,451,885 tokens / 14,723,292 supervised tokens**，监督比例 35.52%。
 
-`scripts/03j_build_terminal_lego_sft.py` 已提供 `--release opus-8k --allow-unscored`
-转换模式。默认仍要求 `reward=1`，该开关只支持 Opus；显式提供的失败或非法
-reward 仍会被排除。运行现有适配器，无须另写转换脚本。它执行以下检查：
+在第 4 节环境和模型就绪后，沿用启动器的数据检查，核对：
 
-- 缺少 reward 的 Opus 记录可进入结构校验；保留 `reward=null` 或省略该字段，
-  显式记录 `reward_available=false`、`reward_policy=unscored`，不得由 oracle
-  标记或助手的 `task_complete` 声明推断成功。
-- 来源按固定 dataset revision、源文件 SHA-256、原始行号追溯，并保留
-  `oracle_passed_task`、`difficulty`。未提供的 trial/path 字段保留缺失；
-  不伪造 DeepSeek 来源路径，也不把缺失路径当作所有记录共享的任务组。
-- 复用 RST 的整条轨迹格式、角色顺序、完整性、助手 JSON/命令结构和控制标记
-  检查，规范化 `human/gpt` 为 `user/assistant`。按任务正文哈希分组，排除初始
-  随机终端屏幕；检查重复轨迹、命令签名和 train/holdout 的任务/提示重叠。
-- 使用已核对的 Qwen3.5 分词器，超过 32,768 tokens 的记录整条排除并记原因。
-  以 seed 1228、目标 holdout 200 条按任务组一次切分，记录实际数量；三个尺寸
-  复用该切分。未评分不构成排除理由，结构性排除必须逐项统计。
-- `tests/test_terminal_lego_convert.py` 覆盖正常及失败路径，包括缺失 reward/
-  来源字段、无效格式、分组泄漏、评分不被伪造及 DeepSeek 成功筛选行为。
+- `SFT_DATA_MANIFEST` 指向本组发布的 `release_manifest.json`，文件哈希、行数、
+  token 数和监督 token 数与下载产物相符。
+- messages 保留 `reward=null`、`reward_available=false`、`reward_policy=unscored`、
+  原始 `oracle_passed_task` 和 `difficulty`。未提供的 trial/path/run 保留 null。
+  预分词数据通过 `trajectory_id` 关联这些来源信息；不得推断成功评分。
+- token/mask 等长、二值掩码、首 token 屏蔽、非空助手监督及最大长度检查通过。
+  holdout 固定为已发布的 200 条，不重新切分。
+- `provenance/` 提供转换 manifest、逐条排除原因、预分词 manifest 和验证汇总；
+  三个尺寸保存同一数据 revision 与哈希到运行记录。
 
-输出目录须为新目录或空目录；已有源文件按固定 SHA-256 和大小校验。
-完成转换后复制 messages 文件为训练约定名称，再严格导出预分词文件：
+完成数据检查后，**必须依次执行 Opus 的 4B、9B、27B 三个 SFT 任务**，使用
+`DATA_KEY=terminal-lego-opus-unscored`。模型卡明确标记未评分轨迹 SFT，
+其 holdout NLL 不代表参考轨迹经过奖励验证。
 
-```bash
-export OPUS_DATA_DIR="$BASE_FOLDER/data/terminal-lego-opus-unscored"
-python tests/run_tests.py test_terminal_lego_convert
-python scripts/03j_build_terminal_lego_sft.py \
-  --release opus-8k --allow-unscored \
-  --source "$BASE_FOLDER/datasets/terminal-lego-opus-unscored-hf/data/terminal-lego-opus-4-6-8k.json" \
-  --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
-  --out-dir "$OPUS_DATA_DIR" --max-seq-len 32768 --holdout 200 --seed 1228
-for OPUS_SPLIT in train holdout; do
-  cp "$OPUS_DATA_DIR/terminal_lego_sft_${OPUS_SPLIT}.parquet" \
-     "$OPUS_DATA_DIR/rst_sft_${OPUS_SPLIT}.parquet"
-  python scripts/15_export_pretokenized.py \
-    --parquet "$OPUS_DATA_DIR/rst_sft_${OPUS_SPLIT}.parquet" \
-    --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
-    --out "$OPUS_DATA_DIR/pretokenized_${OPUS_SPLIT}.parquet" \
-    --max-seq-len 32768 --strict
-done
-```
-
-上述命令在第 4 节环境和分词器就绪后运行。全量检查 token/mask 等长、二值掩码、
-首 token 屏蔽、非空助手监督及提示/终端观察不被监督。完成检查后生成新的
-`release_manifest.json`，采用 `rst-sft-release-v1` 格式，在
-`artifacts["data/pretokenized/train.parquet"]` 中填入实际 `sha256`、`rows`、
-`total_tokens`、`trained_tokens`；同时保存 holdout 哈希、切分、排除记录、
-分词器指纹及完整验证结果。原始归档中的 `training_ready=false` manifest 不能
-直接用于 SFT 启动检查，也不能复制 DeepSeek 的统计来替代 Opus 的实测值。
-
-完成转换后，**必须依次执行 Opus 的 4B、9B、27B 三个 SFT 任务**，使用
-`DATA_KEY=terminal-lego-opus-unscored`。原始上传数据保持原样；转换产物与模型卡
-明确标记为未评分轨迹的 SFT，不能称为已验证成功轨迹训练。
+原始归档仍为 `NiuNiu0110/Terminal-Lego-Opus-Trajectories-unscored`，revision
+`1c5578aff4cad23df70ceb46851c128aeafb2fd5`，含 8,318 条源记录。需要独立复现转换时，
+使用 `scripts/03j_build_terminal_lego_sft.py --release opus-8k --allow-unscored`；
+完整命令与源文件校验见 [`TERMINAL_LEGO_TRAJECTORIES.md`](TERMINAL_LEGO_TRAJECTORIES.md)。
+复现使用新的输出目录，训练默认复用已发布文件。
 
 ## 4. 模型版本与资源
 
@@ -353,6 +316,6 @@ Apache-2.0。缺少 `khazic` 写凭据时保留已验证导出并报告路径，
 交付一份九行汇总表：run、最终/最佳 HF revision、GPU 配置、epochs/global steps、
 实际 checkpoint 列表、训练 loss、完整 holdout 指标、墙钟时间、峰值显存、恢复或
 配置偏离情况。说明每项 GPU/交互评估是否真正执行。本 prompt 的本地准备阶段
-已验证 SETA/DeepSeek SFT、Opus 下载及本地未评分转换和预分词、原始数据上传及 CPU 代码，
-没有任何可引用的 GPU 训练结果。附上执行阶段生成的 Opus 转换 manifest、实际 train/holdout 数量、
+已验证 SETA/DeepSeek SFT、Opus 未评分转换及预分词、三组数据上传与认证下载校验及 CPU 代码，
+没有任何可引用的 GPU 训练结果。附上 Opus 数据 revision、发布 manifest、实际 train/holdout 数量、
 token 统计、排除原因和未评分说明；不得将仅下载 Opus 作为其三个训练任务的完成。

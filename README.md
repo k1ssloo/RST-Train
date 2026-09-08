@@ -228,8 +228,9 @@ These are task environments, with no model trajectories or SFT rows generated.
 For existing model trajectories, see [`TERMINAL_LEGO_TRAJECTORIES.md`](TERMINAL_LEGO_TRAJECTORIES.md).
 The official downloads contain 8,318 Opus and 14,834 DeepSeek conversations. Only
 the DeepSeek file provides per-trajectory rewards; filtering produces 11,938 train
-and 200 task-disjoint holdout rows. Convert Opus with `--release opus-8k --allow-unscored`;
-scores remain null, with explicit unscored provenance and the same structural gates.
+and 200 task-disjoint holdout rows. Opus provides 8,066 train + 200 holdout rows with
+null scores and explicit unscored provenance. Both messages and pretokenized formats
+are published privately; reproduce Opus with `--release opus-8k --allow-unscored`.
 
 ## SETA trajectories
 
@@ -238,10 +239,10 @@ scores remain null, with explicit unscored provenance and the same structural ga
 assistant-only loss masks. The six SETA tools are preserved; using them in the
 current Terminus-2 evaluation requires an agent/toolkit adapter.
 
-The converted SETA/DeepSeek data and unscored Opus archive are published privately
+The converted SETA/DeepSeek/Opus data and original unscored Opus archive are published privately
 under `NiuNiu0110`. See
 [`TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md`](TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md)
-for pinned downloads, required Opus SFT conversion, nine independent
+for pinned downloads, nine independent
 Qwen3.5-4B/9B/27B SFT runs, model names, and the required **200-step checkpoint interval**.
 
 ## The two datasets
