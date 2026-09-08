@@ -731,6 +731,194 @@ parse failures) and the raw path on synthetic ATIF only.
 
 ---
 
+## BUG-20 — TerminalWorld metadata and resource aliases disagree with runnable packages
+
+**Found during dataset integration, 2026-09-07.** This is an upstream data/runner
+compatibility defect, not a measured model failure. Importing metadata as though
+it were the task itself produces stale prompts or tasks Harbor cannot load.
+
+At `andylizf/TerminalWorld-Seeds-Clean@e033a42eaf1b6748607bb563fe9f621b5e1452f9`,
+the published shard manifest describes 18,524,160 bytes, while the actual shard
+has 18,688,000 bytes and Hub LFS SHA-256
+`629bb1ad2757ae63eecf10be116d497d4c6a2a44e71962755e2644bd22e32edd`.
+Across 1,353 packages, 123 Dockerfiles, 6 instructions and 10 reference solutions
+differ from their parquet columns; 129 whole-task hashes differ. The official
+20-task sample also has 6 instructions that differ from its JSONL metadata.
+
+Current Harbor rejects 451 of the 605 selected seed candidates before execution:
+legacy `memory="2G"` and canonical `memory_mb=4096` conflict (storage aliases can
+also conflict). One more candidate, `tw_239821`, puts resources and timeouts at
+the TOML root, where Harbor ignores them and silently applies defaults.
+
+**Fix.** `10d_build_terminalworld_taskset.py` pins both releases, authenticates
+downloaded files against the Hub commit's Git/LFS hashes, and reads prompts and
+other task content from the actual archives. Internal manifest/text/hash drift
+is reported in `manifest.json` and `source_audit.json`. In output copies it keeps
+canonical numeric `*_mb` limits and removes redundant `memory`/`storage` aliases;
+source files and canary comments remain intact. Root-level resource configs are
+excluded for review. Both source and materialized content hashes are recorded.
+
+The default training selection is the upstream 663 `train_ready` IDs, minus 58
+official verified IDs and the one ambiguous config: **604 tasks**. `Clean` alone
+does not imply reward 1: upstream's 1,353 rows include 861 pass, 446 fail and 46
+unknown verdicts. Historical solved/graded fractions remain separate from local
+policy difficulty, which is unmeasured.
+
+**Validation.** `tests/test_terminalworld_taskset.py` covers stale prompts,
+checksum drift, conflicting resource fields, benchmark exclusion, invalid
+verdicts, archive traversal/links, missing/leaked graders and preserving outputs.
+All 604 training tasks and 20 official sample tasks load with the installed
+Harbor `Task` parser after conversion. This is a static compatibility check;
+execution results and exact reproduction commands are in `TERMINALWORLD.md`.
+
+---
+
+## BUG-21 — SETA tool logs cannot be flattened as single-call TMax turns
+
+**Evidence.** The official SETA Kimi thinking parquet at `0090d974…` has 1,768
+rows, including 1,212 reward=1. Its token IDs/mask target Qwen3-8B. Raw tool-call
+arguments are JSON strings, and there are 10,555 adjacent tool messages across
+the release. Applying the TMax helper unchanged would put each observation in a
+separate user turn, whereas Qwen3.5 renders consecutive observations in one turn.
+Removing the tool-response wrappers also discards earlier assistant reasoning.
+Neither transformation preserves the native conversation.
+
+**Fix.** `03i_build_seta_sft.py` reconstructs raw request/response messages,
+strictly parses arguments, and preserves SETA's six tools without inventing
+Terminus-2 fields or the missing source tool schemas. The shared `pre_render`
+helper now groups adjacent tool observations; its single-observation behavior
+is unchanged. Each retained row must render byte-for-byte like the native tools
+under Qwen3.5 and pass the existing length, mask, dedup and split checks. Action
+signatures include every tool and all arguments, including non-command tools.
+
+Reward alone also admits broken logs. Sequential gates remove 556 reward<1
+rows, 38 unfinished final responses, and 98 invalid-argument or unpaired-response
+rows, leaving **1,076**. There are no guessed repairs or truncated examples.
+The output is 976 train + 100 task-disjoint holdout rows; pretokenization keeps
+every row. This establishes data compatibility, not a SETA-capable Harbor agent.
+
+**Validation.** `tests/test_seta_convert.py` covers strict JSON, missing/duplicate
+observations, incomplete final responses, reasoning preservation, native-template
+equality, real-token mask semantics, source checksums and CLI filtering/dedup.
+All 13 pass under pytest and the standalone runner. Full CPU suite: 389 passed,
+19 skipped (18 require torch; 1 requires Harbor in the data environment).
+Sources, measured counts, output paths and reproduction commands are in `SETA.md`.
+
+---
+
+## BUG-22 — Terminal-Lego Git snapshots omit required build directories
+
+**Evidence.** The official `Lego-X/Terminal-Lego-15k` commit `9c197f1c…`
+contains 15,049 tasks. HF repo-info's `siblings` listing is incomplete, and the
+Git checkout contains LFS pointers instead of asset bytes. PrimeIntellect's
+pinned exclusion list removes 1,224 IDs, but does not establish runtime validity
+for an environment built from the official Dockerfile.
+
+Actual Harbor controls exposed a missing `COPY ./task_file /app/task_file`
+source in `task_00069`: both arms failed before an agent could run. A full audit
+found the same absent build directory in **7,022** initial candidates. Creating
+empty directories would assume what the release intended to contain, so these
+tasks are excluded for review. `task_00000` builds but its oracle fails because
+it writes to an absent output directory; it remains a static candidate and is
+absent from the locally controls-passed subset.
+
+**Fix.** `10e_build_terminal_lego_taskset.py` reads the complete pinned Git tree,
+verifies every audited source blob, resolves LFS files with SHA-256/size checks,
+and gates required files, TOML sections, the release's COPY source and verifier
+leaks. It preserves source bytes, modes, configs and canary comments, namespaces
+task IDs, and groups by source StackOverflow question. Six further exclusions
+are conservative **name-only** matches, not confirmed byte-identical grader
+copies. Final output: **6,797 static candidates**; no policy difficulty or SFT
+trajectories are inferred. The initial 13,819-task output is retained as an audit
+artifact; `train-v2` is the current candidate pool.
+
+**Validation.** `tests/test_terminal_lego_taskset.py` has 11 tests for source
+integrity, LFS, unsafe paths, exclusions, missing build directories and graders,
+leak checks, namespacing and output preservation. All pass under pytest and the
+standalone runner. Full CPU suite: **400 passed, 19 skipped** (18 require torch;
+1 requires Harbor in the data environment). All 6,797 final tasks load with
+Harbor 0.21.0 and match their materialized file hashes. Five task controls yield
+three nop=0/oracle=1 pairs, one oracle failure, and one unscored build failure;
+the smoke sample is not a dataset-wide success-rate estimate. See
+`TERMINAL_LEGO.md` for sources, outputs and exact commands.
+
+---
+
+## BUG-23 — Terminal-Lego oracle labels and reused task numbers misidentify trajectories
+
+**Evidence.** The pinned `Terminal-Lego-Traj-8k` Opus JSON has 8,318 rows whose
+only metadata fields are `oracle_passed_task` and `difficulty`. Neither provides
+a per-trajectory model reward. The separate DeepSeek 15k JSON has **14,834** rows,
+including **12,400 reward=1**. Its bare task directory numbers collide: 368
+numbers identify different instructions across task batches. For example,
+`task_00000` can mean generating a PyTorch tensor or finding files containing
+text; it cannot be joined to the local task pool by that basename.
+
+**Fix.** `03j_build_terminal_lego_sft.py` pins both downloadable files by commit,
+size and SHA-256. Conversion requires a numeric source reward of exactly 1,
+alternating human/gpt turns, valid action fields and a final `task_complete=true`.
+Oracle-only metadata never becomes a guessed reward. The shared RST normalizer
+and warning-feedback repair preserve the Terminus-2 protocol. Groups use the
+instruction text without the initial terminal's container ID; cross-split source
+task paths are checked too. No mapping to the separate environment pool is
+inferred. Shared dedup, tokenizer-contract and length gates precede SFT export.
+
+**Validation.** All 13 tests in `tests/test_terminal_lego_convert.py` pass under
+pytest and the standalone runner, including reward typing, incomplete actions,
+task-number collisions, prompt grouping, source integrity, output preservation,
+an offline build and real Qwen3.5 mask semantics. Final CPU suite: **417 passed,
+19 skipped** (18 require torch; 1 requires Harbor in the data environment).
+Download statistics, conversion counts and pretokenized outputs are recorded in
+`TERMINAL_LEGO_TRAJECTORIES.md` and the generated manifests.
+
+---
+
+## BUG-24 — rollout import loses continuations and can relabel evolved-task evidence
+
+**Evidence.** `03h_build_rollout_sft.py` read only the first embedded trajectory,
+ordered disk continuations by filename without checking links, and allowed
+`--model-name` to overwrite the recorded policy. Evolved siblings used their child
+task IDs as split groups, permitting descendants of one seed on both sides.
+
+**Fix.** Shared provenance validation follows explicit continuation links and
+rejects missing, orphaned, cyclic, escaping or mismatched-session segments. Version 3
+exports include content hashes, exact policy/profile identity, ancestry and frozen
+split membership. Import preserves every segment and groups descendants by their
+root lineage; command dedup still uses the concrete task. Model names are checked,
+smoke data requires explicit opt-in, and infrastructure/unmeasured rewards do not
+become training successes. Frozen evolutionary data cannot be randomly resplit.
+Calibration and foundation/mixed subset metadata also survive reconstruction.
+An optional `--max-foundation-fraction` caps foundation rows after deduplication
+and token filtering without dropping their original rollout evidence; rows with
+missing calibration cannot silently satisfy that quota.
+Reviewed task-family exclusions also survive export and import: an original train
+label cannot admit a paraphrased relative of a frozen holdout. Exclusion evidence
+is bound to the source split and both task bundle hashes.
+
+**Regression coverage.** `tests/test_rollout_sft.py` covers complete multi-segment
+import, corrupt provenance, model relabeling, root grouping, orphan continuations,
+smoke/unmeasured filtering, deterministic foundation quotas, and held-out task-family
+exclusions. Runtime and
+tokenizer results belong in the generated conversion manifest.
+
+---
+
+## BUG-25 — the RST mask-fraction band rejects verified SETA data
+
+**Evidence.** SETA's native tool protocol supervises 4,919,395 / 9,836,475 training
+tokens (50.01%). Its verified masks fail the launcher's RST-specific 25–45% band.
+
+**Fix.** An explicit `SFT_DATA_MANIFEST` can pin the training parquet by SHA-256,
+row count, token count and supervised-token count. Every value must match the
+reviewed release. Without that contract, the original RST band still applies;
+tensor-length, first-token and sequence-length checks remain active.
+
+**Regression coverage.** `tests/test_sft_data_gate.py` covers the measured SETA
+fraction, changed file contents, every stale count, invalid manifests, empty or
+fully supervised inputs, and preservation of the legacy band.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

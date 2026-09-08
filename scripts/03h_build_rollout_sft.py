@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -70,6 +71,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rst_common.harbor import HARNESS_INFRA, Outcome, read_reward  # noqa: E402
+from rst_common.rollout_provenance import (  # noqa: E402
+    actual_model,
+    cap_foundation_records,
+    disk_segments,
+    episode_segments,
+    evolution_metadata,
+    load_export_bundle,
+    validate_export_membership,
+)
 from sft_common import (  # noqa: E402
     contract_length_gate,
     dedup_records,
@@ -221,23 +231,25 @@ def from_jobs_dir(jobs_dir: Path, *, model_name: str | None, stats: Counter,
         task = str(result.get("task_name") or trial.parent.name)
         trial_name = str(result.get("trial_name") or trial.name)
         agent_model = ((result.get("agent_info") or {}).get("model_info") or {}).get("name")
-        files = trajectory_files(trial / "agent")
+        try:
+            segments = disk_segments(trial / "agent/trajectory.json")
+            identity = actual_model(model_name, agent_model,
+                                    *((r.get("agent") or {}).get("model_name") for _, r in segments))
+        except (ValueError, OSError, TypeError):
+            stats["drop_invalid_provenance"] += 1
+            continue
         stats["trials_read"] += 1
-        stats["trajectory_files_read"] += len(files)
-        for file_index, path in enumerate(files):
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                stats["drop_bad_json"] += 1
-                continue
+        stats["trajectory_files_read"] += len(segments)
+        for file_index, (path, record) in enumerate(segments):
             for built in build_segments(record, builder=kwargs["builder"], stats=stats,
                                         on_compaction=kwargs["on_compaction"],
                                         allow_rendered=kwargs["allow_rendered"]):
                 segment = file_index * 1000 + built["segment_index"]
                 built.update({
-                    "trajectory_id": f"{trial_name}#{segment}" if (len(files) > 1 or built["segment_index"]) else trial_name,
+                    "trajectory_id": f"{trial_name}#{segment}" if (len(segments) > 1 or built["segment_index"]) else trial_name,
                     "task_group_id": task,
-                    "model_name": model_name or agent_model or "unknown",
+                    "task_id": task,
+                    "model_name": identity,
                     "reward": float(outcome.reward or 0.0),
                     "budget_failure": outcome.budget_reason,
                     "source_trial": str(trial),
@@ -250,6 +262,7 @@ def from_jobs_dir(jobs_dir: Path, *, model_name: str | None, stats: Counter,
 def from_golden_episodes(path: Path, *, model_name: str | None, stats: Counter,
                          **kwargs: Any) -> list[dict[str, Any]]:
     records = []
+    bundle = None
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -260,25 +273,46 @@ def from_golden_episodes(path: Path, *, model_name: str | None, stats: Counter,
             if not isinstance(record, dict):
                 stats["drop_episode_without_trajectory"] += 1
                 continue
-            stats["trials_read"] += 1
-            stats["trajectory_files_read"] += 1
             reward = rollout.get("reward")
+            if (rollout.get("infrastructure_failure") is True or type(reward) not in {int, float}
+                    or not math.isfinite(reward) or not 0 <= reward <= 1):
+                stats["trials_infra_unmeasured"] += 1
+                continue
             task = str((episode.get("task") or {}).get("task_id") or "unknown")
             agent_model = ((rollout.get("agent_info") or {}).get("model_info") or {}).get("name")
             trial_name = str(rollout.get("trial_name") or episode.get("episode_id"))
-            for built in build_segments(record, builder=kwargs["builder"], stats=stats,
-                                        on_compaction=kwargs["on_compaction"],
-                                        allow_rendered=kwargs["allow_rendered"]):
-                built.update({
-                    "trajectory_id": (f"{trial_name}#{built['segment_index']}"
-                                      if built["segment_index"] else trial_name),
-                    "task_group_id": task,
-                    "model_name": model_name or agent_model or "unknown",
-                    "reward": float(reward) if isinstance(reward, (int, float)) else 0.0,
-                    "budget_failure": None,
-                    "source_trial": f"{path}:{trial_name}",
-                })
-                records.append(built)
+            try:
+                segments = episode_segments(episode)
+                identity = actual_model(model_name, agent_model, rollout.get("model_name"),
+                                        *((s.get("agent") or {}).get("model_name") for s in segments))
+                metadata = {"task_id": task, "task_group_id": task}
+                if episode.get("schema_version") == 3:
+                    metadata = evolution_metadata(episode, allow_smoke=kwargs.get("allow_smoke", False))
+                    if identity == "unknown":
+                        raise ValueError("version 3 requires actual model identity")
+                    if kwargs.get("verify_bundle", False):
+                        if bundle is None:
+                            bundle = load_export_bundle(path)
+                        validate_export_membership(episode, bundle)
+            except (ValueError, OSError, TypeError, IndexError):
+                stats["drop_invalid_provenance"] += 1
+                continue
+            stats["trials_read"] += 1
+            stats["trajectory_files_read"] += len(segments)
+            for file_index, record in enumerate(segments):
+                for built in build_segments(record, builder=kwargs["builder"], stats=stats,
+                                            on_compaction=kwargs["on_compaction"],
+                                            allow_rendered=kwargs["allow_rendered"]):
+                    segment = file_index * 1000 + built["segment_index"]
+                    built.update({
+                        **metadata,
+                        "trajectory_id": (f"{trial_name}#{segment}"
+                                          if len(segments) > 1 or segment else trial_name),
+                        "model_name": identity, "reward": float(reward),
+                        "budget_failure": None, "segment_index": segment,
+                        "source_trial": f"{path}:{trial_name}",
+                    })
+                    records.append(built)
     return records
 
 
@@ -302,7 +336,13 @@ def main() -> int:
     ap.add_argument("--allow-rendered", action="store_true",
                     help="re-synthesize the action JSON for trajectories written WITHOUT "
                          "raw_content. Lossy; for salvage only. See the module docstring.")
-    ap.add_argument("--model-name", default=None, help="override the policy name recorded per row")
+    ap.add_argument("--model-name", default=None,
+                    help="expected policy name; fills missing legacy identity, never relabels a model")
+    ap.add_argument("--allow-smoke", action="store_true",
+                    help="explicitly convert pipeline smoke data; preserve its smoke label")
+    ap.add_argument("--max-foundation-fraction", type=float, default=None,
+                    help="cap all-success calibrated production rows after dedup/token filtering; "
+                         "raw rollouts remain complete (e.g. 0.5 for a balanced release)")
     ap.add_argument("--seed", type=int, default=1228)
     args = ap.parse_args()
     if not args.jobs_dir and not args.golden_episodes:
@@ -314,7 +354,8 @@ def main() -> int:
     stats: Counter = Counter()
     records: list[dict[str, Any]] = []
     common = dict(builder=builder, stats=stats, on_compaction=args.on_compaction,
-                  allow_rendered=args.allow_rendered, model_name=args.model_name)
+                  allow_rendered=args.allow_rendered, model_name=args.model_name,
+                  allow_smoke=args.allow_smoke, verify_bundle=True)
     for jobs_dir in args.jobs_dir:
         if not jobs_dir.is_dir():
             sys.exit(f"not a directory: {jobs_dir}")
@@ -358,7 +399,10 @@ def main() -> int:
         print("[sft] nothing reached --min-reward; manifest written, no parquet", flush=True)
         return 0
 
-    kept, cross_task = dedup_records(successes, stats)
+    if args.holdout and any(r.get("source_split") for r in records):
+        sys.exit("version 3 preserves the pre-feedback frozen split; do not use --holdout")
+    kept, cross_task = dedup_records(successes, stats,
+                                     group=lambda r: r.get("task_id", r["task_group_id"]))
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
@@ -373,17 +417,27 @@ def main() -> int:
         lengths.append(n_tokens)
         final.append(record)
     final.sort(key=lambda r: r["trajectory_id"])
+    if args.max_foundation_fraction is not None:
+        try:
+            final, stats["drop_foundation_quota"] = cap_foundation_records(
+                final, fraction=args.max_foundation_fraction, seed=args.seed)
+        except ValueError as error:
+            sys.exit(str(error))
+        lengths = [row["n_tokens"] for row in final]
     train, holdout, holdout_groups, _target = group_disjoint_split(
         final, holdout=args.holdout, seed=args.seed)
     holdout.sort(key=lambda r: r["trajectory_id"])
 
     columns = ["messages", "trajectory_id", "task_group_id", "model_name", "n_tokens",
                "n_assistant_turns", "n_rewritten_turns", "reward", "source_trial",
-               "segment_index", "n_resynthesized_turns"]
+               "segment_index", "n_resynthesized_turns", "task_id", "root_lineage_id",
+               "semantic_cluster_id", "overlap_group_id", "source_split", "dataset_purpose",
+               "bundle_digest", "policy_id", "inference_digest", "training_subset",
+               "student_calibration"]
     paths = {}
     for name, rows in (("train", train), ("holdout", holdout)):
         path = args.out_dir / f"rollout_sft_{name}.parquet"
-        pd.DataFrame([{k: r[k] for k in columns} for r in rows], columns=columns).to_parquet(
+        pd.DataFrame([{k: r.get(k) for k in columns} for r in rows], columns=columns).to_parquet(
             path, index=False)
         paths[name] = str(path)
         print(f"[write] {path} rows={len(rows)}", flush=True)
@@ -406,6 +460,12 @@ def main() -> int:
         "command_signatures_shared_across_tasks": cross_task,
         "on_compaction": args.on_compaction,
         "allow_rendered": args.allow_rendered,
+        "allow_smoke": args.allow_smoke,
+        "purpose_mix": dict(Counter(r.get("dataset_purpose", "legacy") for r in final)),
+        "max_foundation_fraction": args.max_foundation_fraction,
+        "training_subset_mix": dict(Counter(r.get("training_subset") or "unspecified"
+                                            for r in final)),
+        "split_policy": "frozen" if any(r.get("source_split") for r in final) else "group_disjoint",
         "resynthesized_turns": sum(r["n_resynthesized_turns"] for r in final),
         "model_mix": dict(Counter(r["model_name"] for r in final)),
         "max_seq_len": args.max_seq_len,
