@@ -919,6 +919,29 @@ fully supervised inputs, and preservation of the legacy band.
 
 ---
 
+## BUG-26 — Opus SFT conversion rejects every unscored trajectory
+
+**Evidence.** The pinned Opus release has 8,318 trajectories with only
+`oracle_passed_task` and `difficulty` metadata. The original `03j` converter
+requires a reward and DeepSeek trial/path/run fields, so every Opus row is rejected
+and all three Opus SFT training jobs lack usable input.
+
+**Fix.** `--release opus-8k --allow-unscored` explicitly admits absent rewards as
+null, with `reward_available=false` and `reward_policy=unscored`. It preserves
+the actual Opus metadata and leaves unavailable trial provenance null. Supplied
+failed or invalid rewards are still rejected. Default reward filtering and all
+conversation/action, source-integrity, dedup and tokenizer gates remain active.
+Instruction hashes determine groups; overlap checks ignore null paths and also
+check Opus task identifiers. Manifests count scored and unscored retained rows.
+
+**Regression coverage.** `tests/test_terminal_lego_convert.py` covers explicit
+opt-in, reward/provenance types, incomplete and malformed actions, overlap checks,
+unchanged DeepSeek filtering, full Opus fixture conversion, deterministic splits,
+nullable parquet fields and complete rejection accounting. Full-source conversion
+and validation results are recorded in `TERMINAL_LEGO_TRAJECTORIES.md`.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

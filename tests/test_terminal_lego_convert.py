@@ -1,4 +1,4 @@
-"""BUG-23: released Lego trajectories need real rewards and instruction-based groups."""
+"""BUG-23/26: preserve scored/unscored evidence and task-disjoint Lego SFT splits."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import copy
 import functools
 import json
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -41,14 +42,23 @@ def sample(name: str = "first", *, host: str = "container-a") -> dict:
                     "task_name": f"task_00000__{name}", "source": f"run-{name}"}}
 
 
-def build_row(row: dict, index: int = 0, stats: Counter | None = None) -> dict:
-    return convert.convert_row(row, index, "deepseek-15k", SPEC,
-                               stats if stats is not None else Counter())
+def opus_sample(name: str = "first", *, host: str = "container-a") -> dict:
+    row = sample(name, host=host)
+    row["metadata"] = {"oracle_passed_task": f"task_{name}", "difficulty": "easy"}
+    return row
 
 
-def reject(row: dict, reason: str) -> None:
+def build_row(row: dict, index: int = 0, stats: Counter | None = None, *,
+              release: str = "deepseek-15k", allow_unscored: bool = False) -> dict:
+    return convert.convert_row(row, index, release, convert.SOURCES[release],
+                               stats if stats is not None else Counter(),
+                               allow_unscored=allow_unscored)
+
+
+def reject(row: dict, reason: str, *, release: str = "deepseek-15k",
+           allow_unscored: bool = False) -> None:
     try:
-        build_row(row)
+        build_row(row, release=release, allow_unscored=allow_unscored)
     except convert.Rejected as exc:
         assert str(exc) == reason, str(exc)
     else:
@@ -77,6 +87,119 @@ def test_failed_and_invalid_rewards_cannot_enter_sft():
     for reward in (True, "1.0", None, 0.5, float("nan"), float("inf")):
         row["metadata"]["reward"] = reward
         reject(row, "invalid_reward")
+
+
+def test_opus_requires_explicit_opt_in_and_preserves_unknown_reward_and_provenance():
+    row = opus_sample()
+    original = copy.deepcopy(row)
+    reject(row, "missing_trajectory_reward", release="opus-8k")
+    record = build_row(row, index=42, release="opus-8k", allow_unscored=True)
+    assert row == original
+    assert record["reward"] is None and record["reward_available"] is False
+    assert record["reward_policy"] == "unscored"
+    assert record["model_name"] == "claude-opus-4.6"
+    assert record["source_row"] == 42 and record["trajectory_id"] == "terminal_lego_opus-8k_00042"
+    assert record["oracle_passed_task"] == row["metadata"]["oracle_passed_task"]
+    assert record["difficulty"] == "easy"
+    assert all(record[k] is None for k in ("source_trial_id", "source_task_path", "source_run"))
+    assert record["messages"] == build_row(sample())["messages"]
+
+
+def test_opus_opt_in_never_accepts_failed_or_invalid_supplied_rewards():
+    row = opus_sample()
+    row["metadata"]["reward"] = 0
+    reject(row, "reward_not_one", release="opus-8k", allow_unscored=True)
+    for reward in (True, "1", None, 0.5, float("nan"), float("inf")):
+        row["metadata"]["reward"] = reward
+        reject(row, "invalid_reward", release="opus-8k", allow_unscored=True)
+    row["metadata"]["reward"] = 1
+    record = build_row(row, release="opus-8k", allow_unscored=True)
+    assert record["reward"] == 1.0 and record["reward_available"] is True
+    assert record["reward_policy"] == "source_reward_one"
+
+
+def test_unscored_mode_cannot_relax_deepseek_reward_or_provenance_gates():
+    row = sample()
+    try:
+        build_row(row, allow_unscored=True)
+    except ValueError as exc:
+        assert "only supported for --release opus-8k" in str(exc)
+    else:
+        raise AssertionError("unscored mode must not apply to DeepSeek")
+    for key in ("task_path", "task_name", "source"):
+        broken = copy.deepcopy(row)
+        del broken["metadata"][key]
+        reject(broken, "missing_trial_provenance")
+    record = build_row(row)
+    assert record["reward_available"] is True and record["reward_policy"] == "source_reward_one"
+
+
+def test_cli_rejects_unscored_flag_for_other_releases():
+    result = subprocess.run(
+        [sys.executable, str(convert.__file__), "--release", "deepseek-15k", "--allow-unscored"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "only supported for --release opus-8k" in result.stderr
+
+
+def test_opus_task_provenance_is_required_and_optional_trial_fields_are_checked():
+    for key in ("oracle_passed_task", "difficulty"):
+        for value in (None, "", "  ", True, ["task_00000"]):
+            row = opus_sample()
+            row["metadata"][key] = value
+            reject(row, "missing_opus_provenance", release="opus-8k", allow_unscored=True)
+        row = opus_sample()
+        del row["metadata"][key]
+        reject(row, "missing_opus_provenance", release="opus-8k", allow_unscored=True)
+    for key in ("task_path", "task_name", "source"):
+        row = opus_sample()
+        row["metadata"][key] = []
+        reject(row, "invalid_trial_provenance", release="opus-8k", allow_unscored=True)
+    row = opus_sample()
+    row["metadata"].update({"task_path": "/real/path", "task_name": "real-trial", "source": "run"})
+    record = build_row(row, release="opus-8k", allow_unscored=True)
+    assert record["source_task_path"] == "/real/path" and record["source_trial_id"] == "real-trial"
+    assert record["source_run"] == "run" and record["reward"] is None
+
+
+def test_opus_opt_in_keeps_whole_trajectory_structure_gates():
+    row = opus_sample()
+    row["conversations"].pop()
+    reject(row, "incomplete_conversation", release="opus-8k", allow_unscored=True)
+    row = opus_sample()
+    row["conversations"][2]["from"] = "gpt"
+    reject(row, "nonalternating_roles", release="opus-8k", allow_unscored=True)
+    for final, reason in (
+        (action(complete=False), "incomplete_final_action"),
+        ('{"analysis": "truncated', "unparseable"),
+        (json.dumps({"analysis": "a", "plan": "b", "commands": [{"keystrokes": 1}],
+                     "task_complete": True}), "invalid_command_schema"),
+        (action(complete=True) + "<|im_end|>", "source_control_markup"),
+    ):
+        row = opus_sample()
+        row["conversations"][-1]["value"] = final
+        reject(row, reason, release="opus-8k", allow_unscored=True)
+
+
+def test_opus_grouping_uses_instruction_and_checks_only_present_task_identifiers():
+    first = build_row(opus_sample(), release="opus-8k", allow_unscored=True)
+    same = opus_sample(host="other-host")
+    same["metadata"]["oracle_passed_task"] = "different-id"
+    second = build_row(same, index=1, release="opus-8k", allow_unscored=True)
+    assert first["task_group_id"] == second["task_group_id"]
+    distinct = build_row(opus_sample("other"), index=2, release="opus-8k", allow_unscored=True)
+    assert first["task_group_id"] != distinct["task_group_id"]
+    convert.check_split_overlap([first], [distinct])  # Null paths are not a shared task.
+    for field in ("prompt_hash", "oracle_passed_task", "source_task_path"):
+        left, right = copy.deepcopy(first), copy.deepcopy(distinct)
+        left[field] = right[field] = "shared"
+        try:
+            convert.check_split_overlap([left], [right])
+        except ValueError as exc:
+            assert "overlaps train and holdout" in str(exc) and field in str(exc)
+        else:
+            raise AssertionError(f"cross-split {field} must be rejected")
 
 
 def test_native_prompt_observations_reasoning_and_commands_are_preserved():
@@ -218,8 +341,88 @@ def test_complete_fixture_build_filters_deduplicates_and_splits_by_instruction()
         held = pq.read_table(manifest["outputs"]["holdout"]["path"]).to_pylist()
         assert not ({r["task_group_id"] for r in train} & {r["task_group_id"] for r in held})
         assert all(r["reward"] == 1 for r in train + held)
+        assert all(r["reward_available"] and r["reward_policy"] == "source_reward_one"
+                   for r in train + held)
+        assert manifest["allow_unscored"] is False and manifest["unscored_examples"] == 0
+        assert manifest["reward_available_examples"] == 6
         assert manifest["local_model_rollouts"] == 0
         assert manifest["task_pool_id_mapping_verified"] is False
+
+
+def test_opus_fixture_build_exports_nullable_scores_and_auditable_rejections():
+    need("pyarrow")
+    pq = need("pyarrow.parquet")
+    tokenizer()
+    rows = [opus_sample(str(i)) for i in range(6)]
+    rows.extend([copy.deepcopy(rows[0]), opus_sample("0", host="duplicate-host")])
+    failed = opus_sample("failed")
+    failed["metadata"]["reward"] = 0
+    invalid = opus_sample("invalid")
+    invalid["metadata"]["reward"] = None
+    unfinished = opus_sample("unfinished")
+    unfinished["conversations"][-1]["value"] = action(complete=False)
+    long = opus_sample("long")
+    long["conversations"][2]["value"] += " token" * 32768
+    rows.extend([failed, invalid, unfinished, long])
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source.json"
+        source.write_text(json.dumps(rows), encoding="utf-8")
+        spec = {**convert.SOURCES["opus-8k"], "sha256": convert.file_sha256(source),
+                "size_bytes": source.stat().st_size}
+        args = argparse.Namespace(release="opus-8k", allow_unscored=True, source=source,
+                                  download=False, tokenizer=ROOT / "data/Qwen3.5-27B-tokenizer",
+                                  out_dir=root / "out", max_seq_len=32768, holdout=1, seed=1228)
+        manifest = convert.build(args, spec=spec)
+        assert manifest["source_rows"] == 12 and manifest["final_examples"] == 6
+        assert manifest["train_examples"] == 5 and manifest["holdout_examples"] == 1
+        assert manifest["reward_policy"] == "unscored" and manifest["allow_unscored"] is True
+        assert manifest["source_reward_counts"] == {"missing": 10, "0": 1, "None": 1}
+        assert manifest["unscored_examples"] == 6 and manifest["reward_available_examples"] == 0
+        for reason in ("dedup_exact", "dedup_command_signature", "drop_reward_not_one",
+                       "drop_invalid_reward", "drop_incomplete_final_action", "drop_too_long"):
+            assert manifest["stats"][reason] == 1, reason
+        train = pq.read_table(manifest["outputs"]["train"]["path"]).to_pylist()
+        held = pq.read_table(manifest["outputs"]["holdout"]["path"]).to_pylist()
+        for record in train + held:
+            assert record["reward"] is None and record["reward_available"] is False
+            assert record["reward_policy"] == "unscored"
+            assert record["source_task_path"] is None and record["source_trial_id"] is None
+            assert record["source_run"] is None
+            assert record["oracle_passed_task"] == rows[record["source_row"]]["metadata"]["oracle_passed_task"]
+            assert record["difficulty"] == "easy"
+        convert.check_split_overlap(train, held)
+        rejected = [json.loads(line) for line in (args.out_dir / "rejected_rows.jsonl").read_text().splitlines()]
+        assert {r["source_row"] for r in rejected} == set(range(6, 12))
+        assert {r["source_row"] for r in train + held} == set(range(6))
+        assert manifest["source"]["sha256"] == spec["sha256"]
+        assert manifest["source"]["revision"] == spec["revision"]
+        assert manifest["local_model_rollouts"] == 0
+        assert manifest["task_pool_id_mapping_verified"] is False
+        assert json.loads((args.out_dir / "manifest.json").read_text()) == manifest
+        args.out_dir = root / "repeat"
+        repeated = convert.build(args, spec=spec)
+        assert repeated["holdout_groups"] == manifest["holdout_groups"]
+        for split in ("train", "holdout"):
+            assert repeated["outputs"][split]["sha256"] == manifest["outputs"][split]["sha256"]
+
+
+def test_opus_without_opt_in_fails_before_writing_outputs():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source.json"
+        source.write_text(json.dumps([opus_sample()]), encoding="utf-8")
+        spec = {**convert.SOURCES["opus-8k"], "sha256": convert.file_sha256(source),
+                "size_bytes": source.stat().st_size}
+        args = argparse.Namespace(release="opus-8k", source=source, download=False,
+                                  out_dir=root / "out", max_seq_len=32768, holdout=200)
+        try:
+            convert.build(args, spec=spec)
+        except ValueError as exc:
+            assert "--allow-unscored" in str(exc) and "missing_trajectory_reward" in str(exc)
+        else:
+            raise AssertionError("unscored conversion requires explicit opt-in")
+        assert not args.out_dir.exists()
 
 
 def test_real_qwen_mask_trains_assistants_and_masks_task_and_observations():

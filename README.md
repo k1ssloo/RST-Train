@@ -109,7 +109,7 @@ scripts/
   03h_build_rollout_sft.py     OUR OWN rollouts (Harbor job dirs / TerminalEvo golden episodes)
                                → the same messages parquet. The arrow that closes the loop
   03i_build_seta_sft.py        CAMEL-AI SETA Kimi trajectories → Qwen3.5 SFT; native tool protocol
-  03j_build_terminal_lego_sft.py  download official Lego trajectories → reward-filtered SFT
+  03j_build_terminal_lego_sft.py  official Lego trajectories → scored / opt-in unscored SFT
   04_convert_ckpt.sh           HF ↔ Megatron torch_dist
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
@@ -228,7 +228,8 @@ These are task environments, with no model trajectories or SFT rows generated.
 For existing model trajectories, see [`TERMINAL_LEGO_TRAJECTORIES.md`](TERMINAL_LEGO_TRAJECTORIES.md).
 The official downloads contain 8,318 Opus and 14,834 DeepSeek conversations. Only
 the DeepSeek file provides per-trajectory rewards; filtering produces 11,938 train
-and 200 task-disjoint holdout rows. The Opus file is retained as an unscored source.
+and 200 task-disjoint holdout rows. Convert Opus with `--release opus-8k --allow-unscored`;
+scores remain null, with explicit unscored provenance and the same structural gates.
 
 ## SETA trajectories
 

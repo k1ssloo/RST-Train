@@ -1,7 +1,7 @@
 # Terminal-Lego 现成轨迹下载与 SFT
 
-已下载官方生成的 **23,152 条原始记录、709.1 MB**，并将其中 **12,138 条
-DeepSeek 轨迹**转换为 Qwen3.5 SFT：**11,938 train + 200 holdout**。
+已下载官方生成的 **23,152 条原始记录、709.1 MB**，并分别转换为 Qwen3.5 SFT：
+DeepSeek **11,938 train + 200 holdout**；Opus 未评分 **8,066 train + 200 holdout**。
 没有调用教师模型生成新轨迹，也没有执行 GPU 训练。
 
 ## Hugging Face 发布
@@ -15,7 +15,8 @@ DeepSeek 轨迹**转换为 Qwen3.5 SFT：**11,938 train + 200 holdout**。
 
 本轮 DeepSeek、Opus 与 SETA 的 4B/9B/27B 独立训练计划、权重名称和每 200 步保存要求见
 [`TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md`](TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md)。
-Opus 已纳入九任务计划，执行者须先完成未评分轨迹的 SFT 转换，再训练三个尺寸。
+Opus 已纳入九任务计划；`03j` 现支持显式未评分转换，命令见下文。
+集群执行者可直接转换并训练三个尺寸，无须另写适配器。
 
 ## 下载来源
 
@@ -43,8 +44,27 @@ data/terminal-lego-trajectories/
 
 Opus 全部 8,318 条记录的元数据只有 `oracle_passed_task`、`difficulty`。这
 不能证明每条模型轨迹通过了验证器；助手自己的 `task_complete=true` 也不是
-grader reward。当前磁盘和 HF 上保留原始下载，未加入要求 reward=1 的 SFT 产物。
-SFT 本身不要求 reward；训练 prompt 已要求将其单独转换为未评分 SFT 并训练。
+grader reward。HF 上保留原始下载；使用 `--allow-unscored` 单独转换为未评分 SFT。
+每条保留 `reward=null`、`reward_available=false`、`reward_policy=unscored` 及
+原始 `oracle_passed_task`、`difficulty`；未提供的 trial/path/run 保留 null。
+该开关仅支持 Opus，显式提供的 reward=0 或非法 reward 仍被排除，默认模式仍
+要求 reward=1。未评分模式继续检查完整性、动作格式、控制标记、去重及长度。
+
+2026-09-08 对固定 Opus 源文件的实测结果：
+
+```text
+8,318 条原始轨迹
+  − 14 条助手动作缺少必需字段
+  −  8 条助手回答无法解析
+  −  3 条含聊天模板控制标记
+  − 12 条最后未声明任务完成
+  = 8,281 条完整候选；共同去重检查未再删除记录
+  − 15 条超过 32,768 tokens
+  = 8,266 条未评分 SFT：8,066 train + 200 holdout
+```
+
+共 **42,418,933 tokens**，最长 **31,781 tokens**；8,266 条评分全部保留未知。
+共享规范化器改写了 2,266 个助手回合，并修复 1,562 段已过时的格式警告前缀。
 
 DeepSeek 按以下顺序过滤：
 
@@ -76,7 +96,8 @@ DeepSeek 文件有 **368 个裸 `task_编号` 对应不同任务正文**。例�
 
 转换器按初始提示中 `Task Description` 正文的 SHA-256 建立任务组，分组时
 排除初始终端屏幕里的随机容器 ID；训练消息仍保留完整屏幕。按任务组切分，并
-额外检查来源路径不跨 train/holdout。未声称完成跨数据集的语义去重。
+额外检查非空来源路径及 Opus 任务标识不跨 train/holdout；缺失路径不充当任务组。
+未声称完成跨数据集的语义去重。
 
 ## 复现命令
 
@@ -88,41 +109,60 @@ DeepSeek 文件有 **368 个裸 `task_编号` 对应不同任务正文**。例�
 .venv/bin/python scripts/03j_build_terminal_lego_sft.py \
   --release opus-8k --download --download-only
 
+# 显式转换未评分 Opus；绝不推断模型 reward。
+.venv/bin/python scripts/03j_build_terminal_lego_sft.py \
+  --release opus-8k --allow-unscored \
+  --tokenizer data/Qwen3.5-27B-tokenizer \
+  --out-dir data/terminal-lego-trajectories/opus-unscored-sft-v1 \
+  --max-seq-len 32768 --holdout 200 --seed 1228
+
 # 下载 DeepSeek 原始轨迹并转换；仅下载时同样可用 --download-only。
 .venv/bin/python scripts/03j_build_terminal_lego_sft.py \
   --release deepseek-15k --download \
   --tokenizer data/Qwen3.5-27B-tokenizer \
   --out-dir data/terminal-lego-trajectories/deepseek-sft-v1
 
-# 为 train 和 holdout 导出 token 与助手损失掩码。
+# 为任一转换目录导出 token 与助手损失掩码。
+# DeepSeek 使用 data/terminal-lego-trajectories/deepseek-sft-v1。
+LEGO_SFT_DIR=data/terminal-lego-trajectories/opus-unscored-sft-v1
 for lego_split in train holdout; do
   .venv/bin/python scripts/15_export_pretokenized.py \
-    --parquet "data/terminal-lego-trajectories/deepseek-sft-v1/terminal_lego_sft_${lego_split}.parquet" \
+    --parquet "$LEGO_SFT_DIR/terminal_lego_sft_${lego_split}.parquet" \
     --tokenizer data/Qwen3.5-27B-tokenizer \
-    --out "data/terminal-lego-trajectories/deepseek-sft-v1/pretokenized_${lego_split}.parquet" \
+    --out "$LEGO_SFT_DIR/pretokenized_${lego_split}.parquet" \
     --strict
 done
 ```
 
-输出位于 `data/terminal-lego-trajectories/deepseek-sft-v1/`：
+两个转换目录分别包含：
 
 - `terminal_lego_sft_train.parquet`、`terminal_lego_sft_holdout.parquet`：messages
   数据；保留 `source_row`、`source_task_path`、`source_trial_id` 以定位原始记录。
 - `pretokenized_train.parquet`、`pretokenized_holdout.parquet`：`input_ids` 和
   `loss_mask`；提示及终端输出不参与训练损失。
-- `manifest.json`：过滤计数、任务组、token 统计、输入版本和输出哈希。
+- `manifest.json`：过滤计数、任务组、token 统计、输入版本和输出哈希；新增
+  `allow_unscored`、`reward_available_examples`、`unscored_examples`。
+  `reward_policy` 为 `source_reward_one` 或 `unscored`，详细规则见
+  `reward_policy_description`。DeepSeek 的筛选与切分不变；新增列使 parquet 哈希改变。
 - `rejected_rows.jsonl`：原始行号及排除原因；各预分词产物另有独立 manifest。
 
 ## 验证
 
-两份预分词产物均以 `--strict` 导出，**12,138/12,138 条保留，零新增丢弃**。
+DeepSeek 两份预分词产物均以 `--strict` 导出，**12,138/12,138 条保留，零新增丢弃**。
 训练部分有 42,581,331 个受监督 tokens；连同 holdout 共 43,272,763 个。
 所有落盘行均通过来源对应、token/mask 等长、二值掩码及首 token 屏蔽检查。
 原始行号收支与分组核对见 `sft_validation.json`，预分词文件哈希及检查结果见
 `pretokenized_validation.json`；下载汇总为上一级的 `download_manifest.json`。
 
-新增 13 项回归测试在 pytest 和独立 runner 下均通过；包含真实 Qwen3.5 分词器
-的助手监督、任务描述与终端观察屏蔽检查。最终 CPU suite：**417 passed，
+Opus 同样以 `--strict` 导出，**8,266/8,266 条保留，零新增丢弃**。
+训练集有 **41,451,885 tokens / 14,723,292 supervised tokens（35.52%）**；
+holdout 有 **967,048 / 330,785**。本地 `opus-unscored-sft-v1/validation.json`
+记录原始行收支、未知评分和元数据保留、任务切分、token/mask 检查及文件哈希；
+`release_manifest.json` 已通过训练启动器的 `SFT_DATA_MANIFEST` 数据检查。
+这些 Opus 转换产物保存在本地，HF 上述固定 revision 仍只含原始轨迹。
+
+适配器现有 22 项回归测试在 pytest 和独立 runner 下均通过；包含真实 Qwen3.5 分词器
+的助手监督、任务描述与终端观察屏蔽检查。最终 CPU suite：**436 passed，
 19 skipped**，跳过项为 18 项缺 torch、1 项缺 Harbor。
 
 ```bash

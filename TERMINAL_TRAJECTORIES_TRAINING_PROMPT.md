@@ -2,7 +2,8 @@
 
 将分隔线以下内容复制给集群侧训练 agent。本轮数据已上传，尚未启动 GPU 训练。
 数据范围为 SETA、Terminal-Lego DeepSeek 和 Opus 三组。前两组已有验证过的 SFT
-产物；Opus 已上传原始轨迹，执行者须先转换，再完成其三个尺寸的训练。
+产物；Opus 已上传原始轨迹，本地适配器已完成全量转换验证。集群执行者按
+第 3.1 节转换，再完成其三个尺寸的训练。
 
 ---
 
@@ -142,10 +143,13 @@ bash -n scripts/30_run_sft_verl.sh
 源文件应有 8,318 条记录，SHA-256 为
 `925da53ae7686e22320c4ac9e506b43ad1c8a55979f2f8bf500283a686a24c10`。
 8,318 是原始记录数，不能当作转换后的训练条数。
+按下述固定参数，本地实测保留 **8,066 train + 200 holdout**；预分词零新增丢弃。
+训练集为 **41,451,885 tokens / 14,723,292 supervised tokens**；在集群复现时
+核对这些计数，差异须记录原因。所有保留记录仍为未评分，GPU 训练尚未执行。
 
-当前 `scripts/03j_build_terminal_lego_sft.py` 尚未提供未评分转换模式：它默认要求
-`reward=1`，还要求 DeepSeek 特有的 `task_path/task_name/source`。执行者须先
-为 Opus 添加显式 `unscored` 模式或独立适配器，保留默认成功筛选模式，并验证：
+`scripts/03j_build_terminal_lego_sft.py` 已提供 `--release opus-8k --allow-unscored`
+转换模式。默认仍要求 `reward=1`，该开关只支持 Opus；显式提供的失败或非法
+reward 仍会被排除。运行现有适配器，无须另写转换脚本。它执行以下检查：
 
 - 缺少 reward 的 Opus 记录可进入结构校验；保留 `reward=null` 或省略该字段，
   显式记录 `reward_available=false`、`reward_policy=unscored`，不得由 oracle
@@ -159,16 +163,23 @@ bash -n scripts/30_run_sft_verl.sh
 - 使用已核对的 Qwen3.5 分词器，超过 32,768 tokens 的记录整条排除并记原因。
   以 seed 1228、目标 holdout 200 条按任务组一次切分，记录实际数量；三个尺寸
   复用该切分。未评分不构成排除理由，结构性排除必须逐项统计。
-- 为适配器添加正常及失败路径测试，覆盖缺失 reward/来源字段、无效格式、
-  分组泄漏和评分不被伪造；确认原 DeepSeek 成功筛选行为保持正确。
+- `tests/test_terminal_lego_convert.py` 覆盖正常及失败路径，包括缺失 reward/
+  来源字段、无效格式、分组泄漏、评分不被伪造及 DeepSeek 成功筛选行为。
 
-完成格式转换并验证后，将产物放入
-`$BASE_FOLDER/data/terminal-lego-opus-unscored/`，命名为
-`rst_sft_train.parquet`、`rst_sft_holdout.parquet`，再严格导出预分词文件：
+输出目录须为新目录或空目录；已有源文件按固定 SHA-256 和大小校验。
+完成转换后复制 messages 文件为训练约定名称，再严格导出预分词文件：
 
 ```bash
 export OPUS_DATA_DIR="$BASE_FOLDER/data/terminal-lego-opus-unscored"
+python tests/run_tests.py test_terminal_lego_convert
+python scripts/03j_build_terminal_lego_sft.py \
+  --release opus-8k --allow-unscored \
+  --source "$BASE_FOLDER/datasets/terminal-lego-opus-unscored-hf/data/terminal-lego-opus-4-6-8k.json" \
+  --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
+  --out-dir "$OPUS_DATA_DIR" --max-seq-len 32768 --holdout 200 --seed 1228
 for OPUS_SPLIT in train holdout; do
+  cp "$OPUS_DATA_DIR/terminal_lego_sft_${OPUS_SPLIT}.parquet" \
+     "$OPUS_DATA_DIR/rst_sft_${OPUS_SPLIT}.parquet"
   python scripts/15_export_pretokenized.py \
     --parquet "$OPUS_DATA_DIR/rst_sft_${OPUS_SPLIT}.parquet" \
     --tokenizer "$BASE_FOLDER/Qwen3.5-27B" \
@@ -342,6 +353,6 @@ Apache-2.0。缺少 `khazic` 写凭据时保留已验证导出并报告路径，
 交付一份九行汇总表：run、最终/最佳 HF revision、GPU 配置、epochs/global steps、
 实际 checkpoint 列表、训练 loss、完整 holdout 指标、墙钟时间、峰值显存、恢复或
 配置偏离情况。说明每项 GPU/交互评估是否真正执行。本 prompt 的本地准备阶段
-只验证了 SETA/DeepSeek SFT、Opus 原始下载、上传和 CPU 代码，没有任何可引用的
-GPU 训练结果。附上执行阶段生成的 Opus 转换 manifest、实际 train/holdout 数量、
+已验证 SETA/DeepSeek SFT、Opus 下载及本地未评分转换和预分词、原始数据上传及 CPU 代码，
+没有任何可引用的 GPU 训练结果。附上执行阶段生成的 Opus 转换 manifest、实际 train/holdout 数量、
 token 统计、排除原因和未评分说明；不得将仅下载 Opus 作为其三个训练任务的完成。

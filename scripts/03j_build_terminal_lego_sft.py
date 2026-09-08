@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Download released Terminal-Lego trajectories and build reward-filtered SFT.
+"""Download Terminal-Lego trajectories and build scored or explicitly unscored SFT.
 
     python scripts/03j_build_terminal_lego_sft.py --release deepseek-15k --download \
         --tokenizer data/Qwen3.5-27B-tokenizer \
         --out-dir data/terminal-lego-trajectories/deepseek-sft-v1
 
-    python scripts/03j_build_terminal_lego_sft.py --release opus-8k \
-        --download --download-only
+    python scripts/03j_build_terminal_lego_sft.py --release opus-8k --allow-unscored \
+        --download --tokenizer data/Qwen3.5-27B-tokenizer \
+        --out-dir data/terminal-lego-trajectories/opus-unscored-sft-v1
 
 The 8k release lacks per-trajectory rewards: oracle_passed_task identifies an
-environment, not a successful model rollout. Never synthesize reward=1. The
+environment, not a successful model rollout. --allow-unscored admits these rows
+with null reward and explicit provenance; known failures remain excluded. The
 DeepSeek release reuses task directory numbers across different task batches;
 group by the actual instruction, not the basename or the separate task pool.
-Shared RST normalizer, dedup, template, length and split gates apply. BUG-23.
+Shared RST normalizer, dedup, template, length and split gates apply. BUG-23/26.
 """
 
 from __future__ import annotations
@@ -133,20 +135,34 @@ def validate_action(action: dict[str, Any]) -> None:
 
 
 def convert_row(row: dict[str, Any], index: int, release: str,
-                spec: dict[str, Any], stats: Counter) -> dict[str, Any]:
+                spec: dict[str, Any], stats: Counter, *,
+                allow_unscored: bool = False) -> dict[str, Any]:
+    if allow_unscored and release != "opus-8k":
+        raise ValueError("--allow-unscored is only supported for --release opus-8k")
     if not isinstance(row, dict) or not isinstance(row.get("metadata"), dict):
         raise Rejected("invalid_metadata")
     metadata = row["metadata"]
-    if "reward" not in metadata:
+    reward_available = "reward" in metadata
+    if not reward_available and not allow_unscored:
         raise Rejected("missing_trajectory_reward")
-    reward = metadata["reward"]
-    if (isinstance(reward, bool) or not isinstance(reward, (int, float))
-            or not math.isfinite(reward) or reward not in (0, 1)):
-        raise Rejected("invalid_reward")
-    if reward != 1:
-        raise Rejected("reward_not_one")
-    if any(not isinstance(metadata.get(k), str) or not metadata[k].strip()
-           for k in ("task_path", "task_name", "source")):
+    reward = metadata.get("reward")
+    if reward_available:
+        if (isinstance(reward, bool) or not isinstance(reward, (int, float))
+                or not math.isfinite(reward) or reward not in (0, 1)):
+            raise Rejected("invalid_reward")
+        if reward != 1:
+            raise Rejected("reward_not_one")
+    trial_keys = ("task_path", "task_name", "source")
+    if release == "opus-8k":
+        if any(not isinstance(metadata.get(k), str) or not metadata[k].strip()
+               for k in ("oracle_passed_task", "difficulty")):
+            raise Rejected("missing_opus_provenance")
+        if any(metadata.get(k) is not None
+               and (not isinstance(metadata[k], str) or not metadata[k].strip())
+               for k in trial_keys):
+            raise Rejected("invalid_trial_provenance")
+    elif any(not isinstance(metadata.get(k), str) or not metadata[k].strip()
+             for k in trial_keys):
         raise Rejected("missing_trial_provenance")
 
     conversation = row.get("conversations")
@@ -182,16 +198,33 @@ def convert_row(row: dict[str, Any], index: int, release: str,
     return {
         **record, "trajectory_id": f"terminal_lego_{release}_{index:05d}",
         "task_group_id": f"terminal_lego_prompt_{prompt_hash}", "prompt_hash": prompt_hash,
-        "model_name": spec["model_name"], "reward": float(reward), "source_row": index,
-        "source_trial_id": metadata["task_name"], "source_task_path": metadata["task_path"],
-        "source_run": metadata["source"],
+        "model_name": spec["model_name"],
+        "reward": float(reward) if reward_available else None,
+        "reward_available": reward_available,
+        "reward_policy": "source_reward_one" if reward_available else "unscored",
+        "source_row": index, "source_trial_id": metadata.get("task_name"),
+        "source_task_path": metadata.get("task_path"), "source_run": metadata.get("source"),
+        "oracle_passed_task": metadata.get("oracle_passed_task") if release == "opus-8k" else None,
+        "difficulty": metadata.get("difficulty") if release == "opus-8k" else None,
     }
+
+
+def check_split_overlap(train: list[dict[str, Any]], held: list[dict[str, Any]]) -> None:
+    """Check measured task identifiers and instruction hashes; null is not a task."""
+    for field in ("prompt_hash", "source_task_path", "oracle_passed_task"):
+        train_keys = {r[field] for r in train if r.get(field) is not None}
+        held_keys = {r[field] for r in held if r.get(field) is not None}
+        if train_keys & held_keys:
+            raise ValueError(f"source task or identical instruction overlaps train and holdout: {field}")
 
 
 def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> dict[str, Any]:
     spec = spec or SOURCES[args.release]
     if args.out_dir.exists() and (not args.out_dir.is_dir() or any(args.out_dir.iterdir())):
         raise ValueError("out-dir must be new or empty")
+    allow_unscored = getattr(args, "allow_unscored", False)
+    if allow_unscored and args.release != "opus-8k":
+        raise ValueError("--allow-unscored is only supported for --release opus-8k")
     if args.max_seq_len <= 0 or args.holdout < 0:
         raise ValueError("max-seq-len must be positive and holdout nonnegative")
     if args.download:
@@ -210,7 +243,8 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
         rewards[str(metadata.get("reward", "missing")) if isinstance(metadata, dict)
                 else "missing"] += 1
         try:
-            records.append(convert_row(row, index, args.release, spec, stats))
+            records.append(convert_row(row, index, args.release, spec, stats,
+                                       allow_unscored=allow_unscored))
         except Rejected as exc:
             reason = str(exc)
             stats[f"drop_{reason}"] += 1
@@ -223,7 +257,9 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
     rejected.extend({"source_row": r["source_row"], "reason": "duplicate"}
                     for r in records if r["trajectory_id"] not in kept_ids)
     if not kept:
-        raise ValueError(f"no reward-validated complete trajectories: {dict(stats)}")
+        hint = ("; Opus conversion requires explicit --allow-unscored"
+                if args.release == "opus-8k" and not allow_unscored else "")
+        raise ValueError(f"no complete trajectories passed the data gates: {dict(stats)}{hint}")
 
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -249,17 +285,17 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
     train, held, held_groups, target = group_disjoint_split(
         final, holdout=args.holdout, seed=args.seed, max_fraction=0.2,
     )
-    if ({r["source_task_path"] for r in train} & {r["source_task_path"] for r in held}
-            or {r["prompt_hash"] for r in train} & {r["prompt_hash"] for r in held}):
-        raise ValueError("source task or identical instruction overlaps train and holdout")
+    check_split_overlap(train, held)
     schema = pa.schema([
         ("messages", pa.list_(pa.struct([("role", pa.string()), ("content", pa.string())]))),
         ("trajectory_id", pa.string()), ("task_group_id", pa.string()),
         ("model_name", pa.string()), ("reward", pa.float64()),
+        ("reward_available", pa.bool_()), ("reward_policy", pa.string()),
         ("n_tokens", pa.int64()), ("n_assistant_turns", pa.int64()),
         ("n_rewritten_turns", pa.int64()), ("source_row", pa.int64()),
         ("source_trial_id", pa.string()), ("source_task_path", pa.string()),
         ("source_run", pa.string()), ("prompt_hash", pa.string()),
+        ("oracle_passed_task", pa.string()), ("difficulty", pa.string()),
     ])
     args.out_dir.mkdir(parents=True, exist_ok=True)
     outputs = {}
@@ -275,13 +311,16 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
     manifest = {
         "source": provenance, "source_rows": sum(rewards.values()),
         "source_reward_counts": dict(rewards), "reconstructed": len(records),
+        "allow_unscored": allow_unscored,
+        "reward_available_examples": sum(r["reward_available"] for r in final),
+        "unscored_examples": sum(not r["reward_available"] for r in final),
         "after_dedup": len(kept), "final_examples": len(final),
         "train_examples": len(train), "holdout_examples": len(held),
         "groups_covered": len({r["task_group_id"] for r in final}),
         "holdout_groups": sorted(held_groups), "holdout_requested": args.holdout,
         "holdout_target": target, "seed": args.seed, "stats": dict(stats),
         "split_policy": "SHA-256 of instruction between Task Description and terminal screen; "
-                        "source task paths also checked for cross-split overlap",
+                        "non-null source task paths and oracle task IDs also checked for overlap",
         "task_pool_id_mapping_verified": False, "benchmark_overlap_checked": False,
         "command_signatures_shared_across_tasks": cross_task,
         "max_seq_len": args.max_seq_len, "tokenizer": str(args.tokenizer),
@@ -291,7 +330,11 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
         "token_stats": token_stats([r["n_tokens"] for r in final]),
         "n_rewritten_turns": sum(r["n_rewritten_turns"] for r in final),
         "protocol": "Terminus-2 analysis/plan/commands JSON; shared RST canonicalizer",
-        "reward_policy": "source metadata.reward == 1; not inferred from oracle or task_complete",
+        "reward_policy": "unscored" if allow_unscored else "source_reward_one",
+        "reward_policy_description": (
+            "missing Opus reward stays null; any supplied reward must equal 1"
+            if allow_unscored else "source metadata.reward == 1"
+        ) + "; not inferred from oracle or task_complete",
         "validation_scope": "source integrity and SFT structure; upstream rewards not replayed locally",
         "local_model_rollouts": 0, "outputs": outputs,
     }
@@ -305,6 +348,8 @@ def build(args: argparse.Namespace, *, spec: dict[str, Any] | None = None) -> di
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", choices=sorted(SOURCES), default="deepseek-15k")
+    parser.add_argument("--allow-unscored", action="store_true",
+                        help="allow missing Opus rewards as null; still reject known failures")
     parser.add_argument("--source", type=Path)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--download-only", action="store_true")
@@ -314,6 +359,8 @@ def main() -> int:
     parser.add_argument("--holdout", type=int, default=200)
     parser.add_argument("--seed", type=int, default=1228)
     args = parser.parse_args()
+    if args.allow_unscored and args.release != "opus-8k":
+        parser.error("--allow-unscored is only supported for --release opus-8k")
     spec = SOURCES[args.release]
     if args.source is None:
         args.source = Path("data/terminal-lego-trajectories") / f"source-{args.release}" / spec["filename"]
