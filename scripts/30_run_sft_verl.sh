@@ -187,11 +187,14 @@ fi
 # may have been downloaded (HF ships its manifest under a different name) or copied,
 # and a manifest can be stale while the data is not. Checking the actual tensors is
 # both stronger and provenance-independent.
-python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" <<'EOF_PY'
+python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" "${SFT_DATA_MANIFEST:-}" <<'EOF_PY'
 import sys
 import pandas as pd
 
-path, max_len = sys.argv[1], int(sys.argv[2])
+sys.path.insert(0, "scripts")
+from sft_data_gate import validate_mask_fraction
+
+path, max_len, release_manifest = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 df = pd.read_parquet(path)
 for col in ("input_ids", "loss_mask"):
     if col not in df.columns:
@@ -229,18 +232,17 @@ if leading:
 if too_long:
     sys.exit(f"REFUSING TO TRAIN: {too_long} rows exceed max_seq_len={max_len}. Re-export with "
              f"--max-seq-len {max_len} so the drop is counted, or raise the limit.")
-# 32.42% measured for cap10. A mask bug typically lands far outside this band: ~100%
-# means nothing is masked (training on the harness prompt and terminal output), ~0%
-# means everything is.
-# This band is tighter than the 0.15-0.55 one in 16_smoke_forward_backward.py on purpose:
-# here the fraction covers every row at full length, there it covers 4 rows truncated to
-# --seq-len, which has both sampling spread and a truncation bias toward the untrained
-# preamble. Tight where the measurement is stable, loose where it is not.
-if not (0.25 <= frac <= 0.45):
-    sys.exit(f"REFUSING TO TRAIN: trained fraction {frac:.2%} is outside the 0.25-0.45 band "
-             f"measured for this dataset. Near 100% means the mask is absent (you would train "
-             f"on terminal output); near 0% means it masks everything. Investigate before "
-             f"spending GPU time.")
+# Native SETA supervision is 50.01%, outside the band measured for RST cap10.
+# A reviewed release can supply exact counts AND the training parquet's SHA-256;
+# absent that explicit contract, the original 0.25-0.45 guard still applies (BUG-25).
+try:
+    checked = validate_mask_fraction(
+        path, rows=len(df), total_tokens=total, trained_tokens=trained,
+        manifest=release_manifest or None,
+    )
+except ValueError as exc:
+    sys.exit(f"REFUSING TO TRAIN: {exc}")
+print(f"[gate] {checked}")
 EOF_PY
 
 

@@ -108,6 +108,8 @@ scripts/
                                an LLM judge sees the borderline 18% only, decisions archived
   03h_build_rollout_sft.py     OUR OWN rollouts (Harbor job dirs / TerminalEvo golden episodes)
                                → the same messages parquet. The arrow that closes the loop
+  03i_build_seta_sft.py        CAMEL-AI SETA Kimi trajectories → Qwen3.5 SFT; native tool protocol
+  03j_build_terminal_lego_sft.py  download official Lego trajectories → reward-filtered SFT
   04_convert_ckpt.sh           HF ↔ Megatron torch_dist
   05_run_sft.sh                32-GPU SFT; auto-picks the 80GB/40GB parallelism row
   06_eval.py                   SGLang + Harbor/Terminus-2 on Docker; 3 runs, mean±std
@@ -118,6 +120,10 @@ scripts/
   10_build_rl_taskset.py       difficulty-tiered GRPO task pool + verifier-leak guard
   10b_build_termigen_taskset.py  AI2 open-instruct-termigen → a task pool (zero assistant turns)
   10c_build_swegym_taskset.py  SWE-Gym → a tiered pool, tiered from its own rollouts
+  10d_build_terminalworld_taskset.py  TerminalWorld → version-pinned Harbor task pools;
+                               archive/metadata audit, verified-ID exclusion, resource repair
+  10e_build_terminal_lego_taskset.py  Terminal-Lego → pinned Git/LFS task pool;
+                               upstream exclusions, missing COPY source and leak guards
   11_prebuild_images.py        prebuild/cache task Docker images (refuses default daemon)
   12_run_grpo.sh               32-GPU agentic GRPO (Harbor/Terminus-2 rollout)
   13_upload_hf.py              publish the derived datasets (sanitizes local paths)
@@ -157,6 +163,9 @@ data/
   dpo-v2/                      ★ adopted DPO pairs: 2,673 (--per-side 14)
   dpo-v1/                      first DPO build, --per-side 5 → 1,330; kept for the yield table
   openthoughts-agent-v1/       second SFT source, same format: 14,312 examples
+  seta-sft/                   SETA source and validated SFT: 976 train + 100 holdout
+  terminal-lego/              6,797 static task candidates; 3 passed local nop/oracle controls
+  terminal-lego-trajectories/ official downloads; DeepSeek SFT: 11,938 train + 200 holdout
   rst-tasks/                   3.7 GB task release (8 tars)
 probe/                         paper.pdf + the upstream sources I read
 .venv/                         local CPU-only env for the data pipeline
@@ -200,6 +209,39 @@ python scripts/03_build_sft_data.py --traj-root $BASE_FOLDER/rst-trajectories \
 python scripts/10_build_rl_taskset.py --tasks-root $BASE_FOLDER/rst-tasks \
        --traj-root $BASE_FOLDER/rst-trajectories --out $BASE_FOLDER/rl-sweet --tier sweet --materialize
 ```
+
+## TerminalWorld task pools
+
+For TerminalWorld, see [`TERMINALWORLD.md`](TERMINALWORLD.md): the official release
+contains tasks and oracle scripts, so it enters through the task-pool builder before
+trajectory collection. The local trial produced 604 training candidates from the
+repaired Seeds-Clean release and kept the official 20-task sample separate.
+
+## Terminal-Lego task pools
+
+[`TERMINAL_LEGO.md`](TERMINAL_LEGO.md) documents the pinned official task conversion:
+15,049 source tasks become 6,797 static candidates after third-party exclusions and
+local checks. Missing Docker COPY sources exclude 7,022 tasks. Three smoke tasks
+passed nop=0/oracle=1 controls; the full pool still requires runtime validation.
+These are task environments, with no model trajectories or SFT rows generated.
+
+For existing model trajectories, see [`TERMINAL_LEGO_TRAJECTORIES.md`](TERMINAL_LEGO_TRAJECTORIES.md).
+The official downloads contain 8,318 Opus and 14,834 DeepSeek conversations. Only
+the DeepSeek file provides per-trajectory rewards; filtering produces 11,938 train
+and 200 task-disjoint holdout rows. The Opus file is retained as an unscored source.
+
+## SETA trajectories
+
+[`SETA.md`](SETA.md) records the official Kimi thinking trajectory conversion:
+1,768 source rows become 976 train + 100 holdout examples, with Qwen3.5 tokens and
+assistant-only loss masks. The six SETA tools are preserved; using them in the
+current Terminus-2 evaluation requires an agent/toolkit adapter.
+
+The converted SETA/DeepSeek data and unscored Opus archive are published privately
+under `NiuNiu0110`. See
+[`TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md`](TERMINAL_TRAJECTORIES_TRAINING_PROMPT.md)
+for pinned downloads, required Opus SFT conversion, nine independent
+Qwen3.5-4B/9B/27B SFT runs, model names, and the required **200-step checkpoint interval**.
 
 ## The two datasets
 

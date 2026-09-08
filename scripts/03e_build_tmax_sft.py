@@ -330,7 +330,7 @@ def pre_render(messages: list[dict[str, Any]], baked_system: str) -> list[dict[s
     emit and the same one every consumer downstream already reads.
     """
     out: list[dict[str, str]] = []
-    for message in messages:
+    for index, message in enumerate(messages):
         role = message["role"]
         # The template trims every message's content before using it
         # (chat_template line 81: `render_content(message.content, true)|trim`), and
@@ -344,9 +344,9 @@ def pre_render(messages: list[dict[str, Any]], baked_system: str) -> list[dict[s
         elif role == "user":
             out.append({"role": "user", "content": content})
         elif role == "tool":
-            # Identical bytes to the template's tool branch (lines 130-141) for a
-            # non-adjacent tool message, which is all TMax has: one bash call per
-            # assistant turn means observations never abut.
+            # The template groups consecutive tool observations into ONE user
+            # turn. TMax has one bash call per turn; SETA also reuses this helper
+            # and can return several tools after one assistant message (BUG-21).
             #
             # Carrying an observation as a `user` turn does not cost us the
             # reasoning of earlier turns, which is the thing that would quietly ruin
@@ -355,12 +355,11 @@ def pre_render(messages: list[dict[str, Any]], baked_system: str) -> list[dict[s
             # </tool_response> (lines 69-74), so `last_query_index` still lands on
             # the task description and every assistant turn stays after it. The
             # wrapper is load-bearing, not decoration.
-            out.append(
-                {
-                    "role": "user",
-                    "content": f"<tool_response>\n{content}\n</tool_response>",
-                }
-            )
+            response = f"<tool_response>\n{content}\n</tool_response>"
+            if index and messages[index - 1]["role"] == "tool":
+                out[-1]["content"] += "\n" + response
+            else:
+                out.append({"role": "user", "content": response})
         elif role == "assistant":
             reasoning = (message.get("reasoning_content") or "").strip()
             text = f"<think>\n{reasoning}\n</think>\n\n{content}"
