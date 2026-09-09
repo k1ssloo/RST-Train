@@ -49,7 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rst_common.tokenization import (  # noqa: E402
-    MASK_TYPES, resolve_mask_type, template_loss_mask, tokenization_identity,
+    MASK_TYPES, load_training_tokenizer, resolve_mask_type, template_loss_mask, tokenization_identity,
     write_tokenized_parquet,
 )
 
@@ -125,9 +125,8 @@ def main() -> int:
     args = ap.parse_args()
 
     import pandas as pd
-    from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
+    tokenizer = load_training_tokenizer(args.tokenizer)
     if not tokenizer.is_fast:
         sys.exit("a fast tokenizer is required (offset mapping)")
     mask_type = resolve_mask_type(args.tokenizer, args.loss_mask_type)

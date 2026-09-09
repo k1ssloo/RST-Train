@@ -68,9 +68,11 @@ def main() -> int:
 
     import pandas as pd
     import torch
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoConfig
     from dpo_common import load_model as load_checkpoint
-    from rst_common.tokenization import mask_type_for_model, validate_tokenized_parquet
+    from rst_common.tokenization import (
+        load_training_tokenizer, mask_type_for_model, validate_tokenized_parquet,
+    )
 
     results: dict = {"checks": {}, "model": args.model, "seq_len": args.seq_len}
 
@@ -98,7 +100,7 @@ def main() -> int:
     # fatal -- the model cannot represent tokens the data contains, and the failure
     # shows up as a device-side assert inside the loss, not as a message about the
     # vocabulary.
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = load_training_tokenizer(args.model)
     mask_type = mask_type_for_model(args.model)
     validate_tokenized_parquet(args.parquet, tokenizer, mask_type)
     results["tokenizer_vocab_size"] = len(tokenizer)

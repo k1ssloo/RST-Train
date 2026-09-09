@@ -1,0 +1,30 @@
+{
+  "checked_at_utc": "2026-09-09",
+  "scope": "Official Phi tokenizer and downloaded upstream verl tokenizer helper only; no installed verl trainer or GPU run.",
+  "repository": "microsoft/Phi-4-mini-instruct",
+  "revision": "cfbefacb99257ffa30c83adab238a50856ac3083",
+  "tokenizer_config_sha256": "9c9b6bc0c94d95f69f826c41069a3e8b387ac3ced89601d201886e99240ac9db",
+  "pad_token": "<|endoftext|>",
+  "pad_token_id": 199999,
+  "eos_token": "<|endoftext|>",
+  "eos_token_id": 199999,
+  "preparation_status": "ready",
+  "plain_and_upstream_helper_match": true,
+  "identity": {
+    "schema": "rst-tokenization-v1",
+    "loss_mask_type": "phi3",
+    "tokenizer_sha256": "fcca7ba9426a0b6bde9dbc6c13e0efba6c8ad858466c136d1d4e8f00e681df1a",
+    "special_tokens": {
+      "bos_token": "<|endoftext|>",
+      "eos_token": "<|endoftext|>",
+      "unk_token": "<|endoftext|>",
+      "pad_token": "<|endoftext|>"
+    },
+    "chat_template_sha256": "7329549bd965083583b7be7c26d182fc1208060ec88767cf43cc6ec61478b8ef",
+    "chat_template_options": {},
+    "fingerprint": "a27b5b93270b31565d4ef2044239dde2cabc142989496b258ca5dc6df8311e57"
+  },
+  "upstream_helper_url": "https://raw.githubusercontent.com/volcengine/verl/main/verl/utils/tokenizer/tokenizer.py",
+  "upstream_helper_sha256": "ce2d4aedc1eeb4c745efacfd10830e6a7b50ee42ccd27789e8816fb68b03c112",
+  "llama_limit": "Official Llama tokenizer is not available locally; preparation regression tests use synthetic tokenizers. Verify the actual checkpoint and installed verl on the training server."
+}

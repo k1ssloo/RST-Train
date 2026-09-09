@@ -120,7 +120,7 @@ sys.path.insert(0, str(HERE))
 from siblings import load_script as _load_sibling  # noqa: E402
 sys.path.insert(0, str(HERE.parent))
 from rst_common.tokenization import (  # noqa: E402
-    MASK_TYPES, resolve_mask_type, tokenization_identity, write_tokenized_parquet,
+    MASK_TYPES, load_training_tokenizer, resolve_mask_type, tokenization_identity, write_tokenized_parquet,
 )
 
 
@@ -319,6 +319,14 @@ def main() -> int:
 
     import pandas as pd
 
+    if not args.dry_run:
+        # Check before expensive trajectory reconstruction, not at tokenization.
+        tokenizer = load_training_tokenizer(args.tokenizer)
+        if not tokenizer.is_fast:
+            sys.exit("a fast tokenizer is required (the mask needs offset mapping)")
+        mask_type = resolve_mask_type(args.tokenizer, args.loss_mask_type)
+        identity = tokenization_identity(tokenizer, mask_type)
+
     builder = _load_sibling("03_build_sft_data")
     exporter = _load_sibling("15_export_pretokenized")
 
@@ -444,14 +452,6 @@ def main() -> int:
           f"nothing (raise --per-side to cover more variants)", flush=True)
 
     # ---- tokenize both sides with the verified mask -------------------------
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
-    if not tokenizer.is_fast:
-        sys.exit("a fast tokenizer is required (the mask needs offset mapping)")
-    mask_type = resolve_mask_type(args.tokenizer, args.loss_mask_type)
-    identity = tokenization_identity(tokenizer, mask_type)
-
     dropped = Counter()
     rows: list[dict] = []
     for chosen, rejected in candidate_pairs:

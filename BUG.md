@@ -960,6 +960,31 @@ new reference caches to dataset hashes. Original Qwen mask behavior remains.
 gradients; the reference/training/save flow is exercised on CPU. Full-size GPU
 and distributed numerical validation remain separate. See `MODEL_SUPPORT.md`.
 
+## BUG-28 — verl supplies missing padding after data was fingerprinted
+
+**Evidence.** Llama-3.2's tokenizer has no configured pad token. Plain HF export
+fingerprints that state, while verl fills padding with EOS and changes
+`special_tokens_map`. Comparing two plain loads misses this discrepancy; strict
+dataset validation correctly rejects it. The checked Phi-4-mini revision already
+uses `<|endoftext|>` (199999) for both EOS and padding.
+
+**Fix.** `14_prepare_tokenizer.py` persists an existing padding token before data
+export, with original-file backups, hashes, staged reload checks, and optional
+validation through the installed verl loader. Llama can use its existing
+`<|finetune_right_pad_id|>`; vocabulary and EOS are preserved. Model/generation
+padding metadata is synchronized. SFT/DPO export and DPO validation reject missing
+padding early. The SFT launcher compares plain and actual verl tokenizers before
+training. Old incompatible parquet identities remain rejected and must be
+regenerated from messages; affected reference scores must also be rebuilt.
+
+**Regression tests.** `tests/test_tokenizer_preparation.py` reproduces the loader
+discrepancy, checks preparation/reload/export, unchanged IDs and loss masks, old
+data rejection, idempotence, missing/out-of-range tokens, legacy token maps,
+symlink-safe backups, and refusal before writes if verl changes the template.
+Phi-style EOS-as-pad retains supervision on real EOS and excludes only appended
+padding. Unit tests model the verl fallback; deployment must additionally run
+`--verify-verl` with its installed version. Full-size GPU training is separate.
+
 ---
 
 # Open — not fixed, needs the cluster

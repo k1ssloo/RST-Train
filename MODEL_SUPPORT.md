@@ -33,6 +33,8 @@ export MODEL_KEY=smollm3-3b
 export MODEL_PATH=$BASE_FOLDER/SmolLM3-3B
 export DATA_DIR=$BASE_FOLDER/sft-v1-cap10
 
+python scripts/14_prepare_tokenizer.py --model "$MODEL_PATH" --verify-verl
+
 python scripts/15_export_pretokenized.py \
   --parquet "$DATA_DIR/rst_sft_train.parquet" \
   --tokenizer "$MODEL_PATH" \
@@ -43,6 +45,23 @@ NNODES=1 NGPUS=2 MAX_SEQ_LEN=8192 bash scripts/30_run_sft_verl.sh
 ```
 
 `NGPUS=2` 仅是调用示例，实际配置须通过启动器的显存检查和短 GPU smoke。未提供 `PRETOK` 时，新模型自动使用 `DATA_DIR/MODEL_KEY/`；若文件不存在，启动器会从 messages 重新导出。Qwen 沿用原来的数据路径。序列超长会被计数并丢弃，不会悄悄截断。
+
+### 固定 tokenizer padding
+
+导出前须在 checkpoint 中明确保存 `pad_token`（BUG-28）。否则 verl 自动补 EOS，
+会使训练指纹与普通加载时导出的数据不一致。`14_prepare_tokenizer.py` 默认只检查，
+`--apply` 才备份并持久化配置；`--verify-verl` 要在训练环境运行，核验真实加载路径。
+Llama-3.2 可使用现有 `<|finetune_right_pad_id|>`：
+
+```bash
+python scripts/14_prepare_tokenizer.py --model "$MODEL_PATH" \
+  --pad-token '<|finetune_right_pad_id|>' --apply --verify-verl
+```
+
+脚本从实际词表解析 ID，不新增 token，并同步已有 model/generation padding 配置。
+Phi-4-mini 官方 tokenizer 已有 EOS/pad `199999`，检查一致时保留。配置变化后从 messages
+重新导出受影响的 SFT/DPO 数据，并重算相应 DPO reference；不能重写旧指纹绕过校验。
+具体修复及版本归档步骤见 `LLAMA_PHI_TRAINING_PROMPT.md` 第 2.1 节。
 
 ## DPO
 
@@ -66,12 +85,14 @@ NNODES=1 NGPUS=2 MAX_SEQ_LEN=8192 bash scripts/33_run_dpo.sh
 - CPU 测试涵盖各家族的原生 SFT loss、分块 DPO logprob/梯度、Gemma soft-capping、共享 embedding 分组、DPO 单步训练/保存和失败路径。真实官方 tokenizer 另做本地检查；Llama 受访问许可限制，模板单测使用合成 tokenizer。
 - **尚未验证全尺寸 GPU/多卡训练与质量收益**。新增家族的 Megatron/slime 与在线 RL 会明确拒绝；本轮不宣称支持。
 
-本次全量 CPU 检查为 **476 passed、1 skipped**；跳过项需要未安装的 Harbor。
+本次全量 CPU 检查为 **484 passed、1 skipped**；跳过项需要未安装的 Harbor。
 最后的参考缓存兼容性修改另通过相关回归。四个开放访问的官方 tokenizer 均通过整段渲染、
 观察文本排除和屏蔽指定 assistant 回合的检查；检查记录位于
 `reports/model_tokenizer_compatibility_20260909.json`。
 该记录还包含 Phi 官方 tokenizer 对七组历史数据各 10 条的抽样检查（Nemotron
 使用 holdout）；70 条均通过模板和掩码检查。这不替代全量重新分词及 GPU 验证。
+BUG-28 的官方 Phi padding/上游 tokenizer helper 检查记录在
+`reports/tokenizer_padding_check_20260909.json`；实际训练环境仍须运行 `--verify-verl`。
 
 ```bash
 .venv/bin/python -m pytest tests/ -q

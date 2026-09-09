@@ -211,12 +211,13 @@ import pandas as pd
 
 sys.path.insert(0, "scripts")
 from sft_data_gate import validate_mask_fraction
-from rst_common.tokenization import resolve_mask_type, validate_tokenized_parquet
-from transformers import AutoTokenizer
+from rst_common.tokenization import (
+    load_verl_training_tokenizer, resolve_mask_type, validate_tokenized_parquet,
+)
 
 path, max_len, release_manifest = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 mask_type = resolve_mask_type(sys.argv[4], sys.argv[5])
-tokenizer = AutoTokenizer.from_pretrained(sys.argv[4])
+tokenizer = load_verl_training_tokenizer(sys.argv[4])
 validate_tokenized_parquet(path, tokenizer, mask_type)
 df = pd.read_parquet(path)
 for col in ("input_ids", "loss_mask"):

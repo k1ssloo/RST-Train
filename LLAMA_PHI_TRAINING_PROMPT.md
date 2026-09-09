@@ -40,6 +40,51 @@ chat template 和 generation config；只有 tokenizer 的目录不能训练。
 `huggingface_hub.snapshot_download`。Llama 需要当前 HF 账户具备 gated model 访问权。
 若无权限，记录 Llama 阻塞并先做 Phi，不更换模型或借用不明权重。
 
+### 2.1 在预分词前固定 padding（BUG-28）
+
+官方 Llama-3.2 tokenizer 未配置 `pad_token`，verl 会在加载时补为 EOS，
+使 `special_tokens_map` 与普通加载不同。保留严格指纹校验；按方案 A 在本地
+checkpoint 中保存统一配置。先完成本节，再启动数据导出或训练，避免同一模型目录
+被运行中的进程继续使用旧配置。使用完整的独立 `--local-dir` 副本，不直接修改 HF
+共享缓存或已归档 checkpoint。基础模型 revision 与本地 padding 补丁分别记账。
+
+在**实际训练的 Python/verl 环境**先检查 Phi，再准备 Llama：
+
+```bash
+mkdir -p "$BASE_FOLDER/tokenizer-preparation"
+python scripts/14_prepare_tokenizer.py \
+  --model "$BASE_FOLDER/Phi-4-mini-instruct" --verify-verl \
+  --report "$BASE_FOLDER/tokenizer-preparation/phi4-mini.json"
+
+python scripts/14_prepare_tokenizer.py \
+  --model "$BASE_FOLDER/Llama-3.2-3B-Instruct" \
+  --pad-token '<|finetune_right_pad_id|>' --apply --verify-verl \
+  --report "$BASE_FOLDER/tokenizer-preparation/llama3.2-3b.json"
+```
+
+脚本只选用**现有词表中的单个 token**，校验 ID 在模型词表范围内，不增加词表或
+resize embeddings。Llama 的预期 pad ID 是 `128004`，以该 checkpoint 的实际映射
+为准；不匹配时核查模型来源，不手填 ID。现有 EOS、chat template 和编码规则不变。
+脚本同步 tokenizer/model/generation 的 padding 元数据，保存原文件备份与前后哈希，
+并检查保存、重载和实际 verl 加载后的指纹。没有 `--apply` 时只检查；需修改返回 1，
+验证失败返回 2，不允许忽略退出码继续排队。重复执行已准备好的配置不改文件。
+
+本地核验的官方 Phi revision `cfbefac…` 已有
+`pad_token=eos_token=<|endoftext|>`、ID `199999`。若远端也通过普通/verl 加载与已有
+parquet 的指纹检查，保留其配置和数据，无须随 Llama 重导。若不同，核对实际 revision
+和本地改动后再处理。仓库按位置生成 attention/loss mask，共用 EOS/pad ID 本身不会
+屏蔽真实 EOS；不要改成按 token ID 一律去除 EOS。
+
+Llama 配置固定后，按第 3 节从 messages **重导七组数据的 train 与 holdout**，包括
+尚未完成的 Nemotron。下文为 Llama 使用新的 `pad-v1/` 子目录；保留旧文件与 manifest
+以便追溯。Phi 可沿用通过检查的现有目录。不要只改旧 parquet 的指纹来通过校验。
+已生成的 Llama DPO pairs/reference cache 若绑定旧指纹，也必须重建并重新打分。
+SFT 导出的 HF checkpoint 应继承准备后的 tokenizer；DPO 前对实际 `POLICY` 再运行
+只读检查。`30_run_sft_verl.sh` 现在会在启动训练前比较普通与实际 verl loader。
+这些步骤不改变保存计划：仍每 **200 个 optimizer/global steps** 保存，并额外保存 final。
+
+### 2.2 固定数据版本
+
 数据固定在以下版本。路径均相对于 HF dataset repo，数量是重新分词前的历史数量。
 
 | DATA_KEY | HF dataset repo | messages 文件 | train / holdout | epochs |
@@ -79,7 +124,8 @@ HF。不要将任何 token 写进代码、Markdown、命令行参数、模型卡
 $BASE_FOLDER/data/<DATA_KEY>/rst_sft_train.parquet
 $BASE_FOLDER/data/<DATA_KEY>/rst_sft_holdout.parquet
 $BASE_FOLDER/data/<DATA_KEY>/source_metadata/
-$BASE_FOLDER/data/<DATA_KEY>/<MODEL_KEY>/pretokenized_{train,holdout}.parquet
+$BASE_FOLDER/data/<DATA_KEY>/llama3.2-3b/pad-v1/pretokenized_{train,holdout}.parquet
+$BASE_FOLDER/data/<DATA_KEY>/phi4-mini/pretokenized_{train,holdout}.parquet
 ```
 
 文件名统一只是为复用启动器，原始 messages、身份字段和奖励 metadata 不变。
@@ -89,11 +135,15 @@ $BASE_FOLDER/data/<DATA_KEY>/<MODEL_KEY>/pretokenized_{train,holdout}.parquet
 ```bash
 # MODEL_KEY、MODEL_PATH、DATA_KEY 已按上述矩阵设置。
 export DATA_DIR="$BASE_FOLDER/data/$DATA_KEY"
+export PRETOK_DIR="$DATA_DIR/$MODEL_KEY"
+if [[ "$MODEL_KEY" == llama3.2-3b ]]; then
+  export PRETOK_DIR="$PRETOK_DIR/pad-v1"
+fi
 for split in train holdout; do
   python scripts/15_export_pretokenized.py \
     --parquet "$DATA_DIR/rst_sft_${split}.parquet" \
     --tokenizer "$MODEL_PATH" --loss-mask-type auto \
-    --out "$DATA_DIR/$MODEL_KEY/pretokenized_${split}.parquet" \
+    --out "$PRETOK_DIR/pretokenized_${split}.parquet" \
     --max-seq-len 32768 --strict
 done
 ```
@@ -134,9 +184,11 @@ GPU 型号/显存、驱动、拓扑和空闲资源。CPU 兼容性检查使用�
 Torch/FLA，也不要启动 Megatron/slime 或在线 RL。
 
 可先运行 `python -m pytest tests/ -q`，明确报告 optional dependency 的 skip。
-当前本地记录为 476 passed、1 skipped（缺 Harbor），没有全尺寸 GPU 训练结论。
+当前本地记录为 484 passed、1 skipped（缺 Harbor），没有全尺寸 GPU 训练结论。
 Phi 官方 tokenizer 对七组历史数据各抽查 10 条均通过；Nemotron 抽的是 holdout，
 不是全语料验收。Llama 官方 tokenizer 仍需服务器在有权限时验证。
+Phi padding 检查另见 `reports/tokenizer_padding_check_20260909.json`；该报告只运行了
+下载的上游 verl tokenizer helper，不代表已验证远端安装的 verl/FSDP 训练环境。
 
 每个模型先在隔离目录完成真实 forward/backward、一次参数更新、保存、重载和多卡
 短训练。可以先用 `scripts/16_smoke_forward_backward.py --model <dir>
@@ -185,7 +237,11 @@ export MODEL_PATH="$BASE_FOLDER/Llama-3.2-3B-Instruct"
 export DATA_KEY=rst-cap10
 EPOCHS=1
 export DATA_DIR="$BASE_FOLDER/data/$DATA_KEY"
-export PRETOK="$DATA_DIR/$MODEL_KEY/pretokenized_train.parquet"
+export PRETOK_DIR="$DATA_DIR/$MODEL_KEY"
+if [[ "$MODEL_KEY" == llama3.2-3b ]]; then
+  export PRETOK_DIR="$PRETOK_DIR/pad-v1"
+fi
+export PRETOK="$PRETOK_DIR/pretokenized_train.parquet"
 export RUN_NAME="${MODEL_KEY}-${DATA_KEY}-sft-v1"
 export NNODES=1 NGPUS="${RST_TRAIN_GPUS:?set allocated GPU count}"
 export NODE_RANK=0 MASTER_ADDR=127.0.0.1
@@ -239,7 +295,7 @@ bash scripts/08_prepare_eval_ckpt.sh \
 python scripts/06b_eval_offline.py \
   --model-path "$BASE_FOLDER/exports/$RUN_NAME/step-${STEP}" \
   --base-model "$MODEL_PATH" \
-  --holdout "$DATA_DIR/$MODEL_KEY/pretokenized_holdout.parquet" \
+  --holdout "$PRETOK_DIR/pretokenized_holdout.parquet" \
   --out "$BASE_FOLDER/eval/$RUN_NAME/step-${STEP}" \
   --max-rows 0 --max-seq-len 32768 --max-actions 0
 ```

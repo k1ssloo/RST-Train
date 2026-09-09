@@ -42,6 +42,35 @@ def resolve_mask_type(model_path: str | Path, requested: str = "auto") -> str:
     return inferred
 
 
+def load_training_tokenizer(model_path: str | Path):
+    """Require persisted padding before producing data or loading weights (BUG-28)."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
+    if tokenizer.pad_token_id is None:
+        raise ValueError(
+            f"{model_path}: tokenizer has no persisted pad_token; verl would add EOS "
+            "and change the fingerprint. Run scripts/14_prepare_tokenizer.py "
+            "--model <checkpoint> --apply before exporting SFT/DPO data."
+        )
+    return tokenizer
+
+
+def load_verl_training_tokenizer(model_path: str | Path):
+    """Check the installed verl loader, including any framework corrections."""
+    from verl.utils import hf_tokenizer
+
+    plain = load_training_tokenizer(model_path)
+    actual = hf_tokenizer(str(model_path), local_files_only=True)
+    mask_type = mask_type_for_model(model_path)
+    if tokenization_identity(plain, mask_type) != tokenization_identity(actual, mask_type):
+        raise ValueError(
+            f"{model_path}: plain/verl tokenizer fingerprint mismatch; persist a common "
+            "tokenizer configuration before re-exporting messages."
+        )
+    return actual
+
+
 def template_options(mask_type: str) -> dict:
     if mask_type == "smollm3":
         return {"enable_thinking": False, "template_date": TEMPLATE_DATE}
@@ -118,10 +147,8 @@ def validate_tokenized_parquet(path: str | Path, tokenizer, mask_type: str) -> d
 
 def validate_training_data(paths: list[Path], model_path: str | Path) -> str:
     """Used by both DPO entry points, before loading weights or resuming scores."""
-    from transformers import AutoTokenizer
-
     mask_type = mask_type_for_model(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    tokenizer = load_training_tokenizer(model_path)
     for path in paths:
         validate_tokenized_parquet(path, tokenizer, mask_type)
     return mask_type
