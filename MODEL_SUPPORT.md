@@ -1,6 +1,6 @@
 # 多模型 SFT 与 DPO
 
-本轮扩展的是 **文本轨迹的 SFT（verl/FSDP2）与离线 DPO**。原有 Qwen3.5 路径保留；新增模型默认使用原生 Transformers forward、padding、8K 序列，关闭 Qwen 专用 fused kernels、Liger 和 Ulysses SP。这些配置不是全尺寸 GPU 性能承诺。
+本轮扩展的是 **文本轨迹的 SFT（verl/FSDP2）与离线 DPO**。原有 Qwen3.5 路径保留；新增模型默认 8K 序列、每个 micro-batch 一条完整轨迹，关闭 Liger 和 Ulysses SP。共享输入/输出 embedding 的 Llama/Phi（包括本轮 Llama-3.2、Phi-4-mini）使用原生 decoder + verl Torch 分块输出头；其余 checkpoint 保留原生输出头。这些配置不是全尺寸 GPU 性能承诺。
 
 Llama-3.2-3B-Instruct / Phi-4-mini-instruct 在七组历史数据上的完整执行矩阵见
 [`LLAMA_PHI_TRAINING_PROMPT.md`](LLAMA_PHI_TRAINING_PROMPT.md)：14 次独立 SFT +
@@ -46,6 +46,20 @@ NNODES=1 NGPUS=2 MAX_SEQ_LEN=8192 bash scripts/30_run_sft_verl.sh
 
 `NGPUS=2` 仅是调用示例，实际配置须通过启动器的显存检查和短 GPU smoke。未提供 `PRETOK` 时，新模型自动使用 `DATA_DIR/MODEL_KEY/`；若文件不存在，启动器会从 messages 重新导出。Qwen 沿用原来的数据路径。序列超长会被计数并丢弃，不会悄悄截断。
 
+### 长序列内存与组批
+
+本轮 Llama-3.2/Phi-4-mini 使用 `FUSED_KERNELS=1 FUSED_KERNEL_BACKEND=torch`，避免保留整个
+`sequence × vocabulary` logits（BUG-29）。`data.pad_mode=no_padding` 是数据的变长
+接口；`model.use_remove_padding=False` 保持普通单序列 attention。新增家族均默认
+`data.use_dynamic_bsz=False data.micro_batch_size_per_gpu=1`，全局 batch size 通过
+梯度累积保持不变。无需下调 MAX_SEQ_LEN，也无需为此重新导出已验收的 token 数据。
+选择分块输出头时会检查实际 `tie_word_embeddings`：未共享的 head 可能被 verl 单独
+分片，而 `dense_common` 直接读取权重会绕过其 all-gather hook，因此暂保留原生 head。
+
+启动器对 Llama/Phi 运行真实 verl CPU 数值检查，并检查最终 Hydra 配置，防止旧 wrapper
+重新关闭分块计算或开启动态组批。恢复训练与日志要求见远端指令第 4.1 节。
+tiny 模型的数值/显存测试不能替代完整模型在目标设备上 32K 样本的准入测试。
+
 ### 固定 tokenizer padding
 
 导出前须在 checkpoint 中明确保存 `pad_token`（BUG-28）。否则 verl 自动补 EOS，
@@ -85,7 +99,11 @@ NNODES=1 NGPUS=2 MAX_SEQ_LEN=8192 bash scripts/33_run_dpo.sh
 - CPU 测试涵盖各家族的原生 SFT loss、分块 DPO logprob/梯度、Gemma soft-capping、共享 embedding 分组、DPO 单步训练/保存和失败路径。真实官方 tokenizer 另做本地检查；Llama 受访问许可限制，模板单测使用合成 tokenizer。
 - **尚未验证全尺寸 GPU/多卡训练与质量收益**。新增家族的 Megatron/slime 与在线 RL 会明确拒绝；本轮不宣称支持。
 
-本次全量 CPU 检查为 **484 passed、1 skipped**；跳过项需要未安装的 Harbor。
+本次全量 CPU 检查为 **488 passed、5 skipped**：3 项需要 verl、1 项需要显式开启
+GPU probe、1 项需要 Harbor。另在真实 verl 环境通过 7 项回归，并在 H100 上完成
+tiny Llama/Phi 的 FP32/BF16 FSDP2 反向传播、参数更新和峰值显存比较。
+这些是小模型检查，全尺寸 32K/多卡结论仍须实测；结果见
+`reports/dense_sft_oom_validation_20260909.json`。
 最后的参考缓存兼容性修改另通过相关回归。四个开放访问的官方 tokenizer 均通过整段渲染、
 观察文本排除和屏蔽指定 assistant 回合的检查；检查记录位于
 `reports/model_tokenizer_compatibility_20260909.json`。

@@ -97,7 +97,9 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         mem_class = fallback
     p = dict(par[mem_class])
     if generic:
-        # Unpacked text training: one whole sequence per microbatch budget.
+        # Keep a whole-sequence budget for preflight/legacy diagnostics. Generic
+        # SFT now uses static, single-sequence microbatches, so verl does not use
+        # this value to group samples (BUG-29).
         p["max_tokens_per_gpu"] = max_seq_len
 
     tp, pp, cp = p["tp"], p["pp"], p["cp"]

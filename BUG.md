@@ -985,6 +985,37 @@ Phi-style EOS-as-pad retains supervision on real EOS and excludes only appended
 padding. Unit tests model the verl fallback; deployment must additionally run
 `--verify-verl` with its installed version. Full-size GPU training is separate.
 
+## BUG-29 — long Llama/Phi SFT materializes full logits and overgroups padded rows
+
+**Evidence.** The generic launcher forced fused kernels off, so the HF LM head
+materialized `[batch, sequence, vocabulary]` logits; verl then creates additional
+logit/log-probability intermediates. At 32K, one Llama/Phi row alone has roughly
+7.8/12.2 GiB of bf16 logits. The dynamic token budget determines a number of
+micro-batches, not a hard padded-shape bound. It must also cover the longest
+sequence, so lowering it is not a full-context solution. `data.pad_mode=padding`
+was invalid in the checked verl 0.9.0 collator; data layout and model-side padding
+had incorrectly been treated as the same setting. The screenshot's Nemotron
+early exit has no traceback and is not established as this OOM.
+
+**Fix.** Tied-embedding Llama/Phi checkpoints (including this Llama-3.2/Phi-4-mini
+matrix) use verl's Torch chunked LM head. Untied checkpoints keep the native head
+because verl may shard that module separately and a direct `.weight` read would
+bypass its all-gather hook. New families use the valid
+`no_padding` data interface with `model.use_remove_padding=False` and static
+one-sequence micro-batches. Full context, global batch size, assistant masks,
+optimizer schedule and tokenizer identity are unchanged. Other families retain
+their existing heads, including Gemma soft-capping. Final composed config checks
+reject stale overrides; a CPU check of the installed verl verifies collator,
+micro-batches, engine inputs/outputs, native loss and all parameter gradients
+before full weights load. No PyTorch allocator setting is presented as a root fix.
+
+**Regression tests.** `tests/test_dense_sft.py` checks launch behavior, invalid
+overrides, real Llama/Phi backend gradients and absence of retained full logits
+across multiple chunks. `tests/test_dense_sft_cuda.py` is an explicit opt-in tiny
+CUDA/FSDP2 memory/gradient probe with a per-process memory limit. Optional backend
+and GPU checks must be reported separately from the ordinary CPU suite. Full-size
+32K/multi-rank acceptance remains a deployment check.
+
 ---
 
 # Open — not fixed, needs the cluster

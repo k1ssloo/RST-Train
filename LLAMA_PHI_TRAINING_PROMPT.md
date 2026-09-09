@@ -184,7 +184,10 @@ GPU 型号/显存、驱动、拓扑和空闲资源。CPU 兼容性检查使用�
 Torch/FLA，也不要启动 Megatron/slime 或在线 RL。
 
 可先运行 `python -m pytest tests/ -q`，明确报告 optional dependency 的 skip。
-当前本地记录为 484 passed、1 skipped（缺 Harbor），没有全尺寸 GPU 训练结论。
+当前本地 CPU 套件为 488 passed、5 skipped：3 项缺 verl、1 项 GPU 显式 opt-in、
+1 项缺 Harbor。另在真实 verl 环境通过 7 项回归；H100 上 tiny 模型的 FP32/BF16
+FSDP2 检查也通过，没有全尺寸 GPU 训练结论。详细记录见
+`reports/dense_sft_oom_validation_20260909.json`。
 Phi 官方 tokenizer 对七组历史数据各抽查 10 条均通过；Nemotron 抽的是 holdout，
 不是全语料验收。Llama 官方 tokenizer 仍需服务器在有权限时验证。
 Phi padding 检查另见 `reports/tokenizer_padding_check_20260909.json`；该报告只运行了
@@ -197,10 +200,39 @@ Phi padding 检查另见 `reports/tokenizer_padding_check_20260909.json`；该�
 对接近 32768 tokens 的真实样本测显存和吞吐，再准入生产。
 smoke 的样本/输出目录及短训练 schedule 必须与正式 run 分开。
 
-默认 `ULYSSES_SP=1`、padding、原生 HF forward、关闭 Liger/fused kernels/remove-padding，
-启用 gradient checkpointing。长序列 logits 和激活仍可能很大，不能按 3B 权重大小
-推断单卡必然能训练。OOM 时先核对分片、micro-batch 和 attention 实现，再验证
+Llama/Phi 现在默认 `ULYSSES_SP=1`，使用原生 HF decoder + verl Torch 分块输出头，
+`FUSED_KERNELS=1 FUSED_KERNEL_BACKEND=torch`，关闭 Liger/remove-padding，启用 gradient
+checkpointing。数据使用 `data.pad_mode=no_padding` 的变长接口；这不代表拼接文档做
+attention。模型侧 `model.use_remove_padding=False`，由 engine 还原正常输入。
+`data.use_dynamic_bsz=False data.micro_batch_size_per_gpu=1` 保证每个 micro-batch
+只有一条完整轨迹；GBS=128 通过原有梯度累积实现。不要降低正式 MAX_SEQ_LEN。
+长序列 decoder 激活仍可能很大，不能按 3B 权重大小推断单卡必然能训练。
+OOM 时先核对分片、实际 traceback 和 attention 实现，再验证
 更多已分配 GPU 或 CPU offload；不要以截短正式数据来掩盖问题。
+
+### 4.1 恢复 Llama/Phi 长序列 OOM 任务（BUG-29）
+
+旧配置强制关闭分块输出头，会物化整个 `[batch, sequence, vocabulary]` logits，
+后续还可能产生 FP32 副本。动态组批的有效 token 预算也不能限制 padding 后的形状。
+“reserved but unallocated” 不能直接等同于碎片根因；不要只改 allocator 环境变量。
+
+更新代码和远端队列 wrapper，清理旧的 `FUSED_KERNELS=0`、
+`model.use_fused_kernels=False`、`data.pad_mode=padding`、`data.use_dynamic_bsz=True`
+覆盖。使用第 5 节的新模板；启动器会对最终 Hydra 配置做检查，拒绝覆盖回旧路径。
+它还自动运行 `python -m verl_backend.dense_sft --model "$MODEL_PATH"`：只在 CPU
+加载 tiny 模型，验证当前安装的 verl 组批、输入/输出、原生 loss 与梯度的一致性。
+日志必须出现 `[rst-dense-sft]`，并在实际训练 rank 的日志中确认
+`Using Torch backend for fused kernels`；只有 CPU probe 的打印不算训练路径证据。
+CPU gate 不替代目标 GPU 上接近 32K 的真实样本短训练。
+
+保留已经完成的模型和运行中的独立任务。只对失败项检查并恢复：有完整 checkpoint
+时沿用同一数据、GBS、epoch/LR schedule 和 `trainer.resume_mode=auto`；没有时从原
+Instruct checkpoint 重启。保存旧错误日志及修复前后配置，不删除 resume 保护文件。
+这次修复不改变 tokenizer 或训练目标，**已经通过指纹校验的数据无需重新分词**。
+确认恢复后完成一个真实 optimizer step，再继续完整队列；仍每 200 步保存并保留 final。
+
+Nemotron 在十几秒内退出不能据此判为 OOM。单独读取第一次异常的完整 traceback，
+检查输入文件、指纹、配置和依赖；若原因不同，单独记录并处理，不冒报为本修复已解决。
 
 只使用调度器分配或已确认空闲的 GPU；不要 `pkill` 他人进程，不停止已有 rollout、
 TerminalEvo 或代理服务。单节点 8×A100 80GB 可作为待测配置，实际数量以分配和 smoke
@@ -247,7 +279,7 @@ export NNODES=1 NGPUS="${RST_TRAIN_GPUS:?set allocated GPU count}"
 export NODE_RANK=0 MASTER_ADDR=127.0.0.1
 export MASTER_PORT=29500  # 并发作业须分配独立端口
 export FSDP_SIZE=-1 ULYSSES_SP=1 MAX_SEQ_LEN=32768 SAVE_HF_MODEL=1
-export FUSED_KERNELS=0 WANDB_MODE=offline
+export FUSED_KERNELS=1 FUSED_KERNEL_BACKEND=torch WANDB_MODE=offline
 unset SFT_DATA_MANIFEST
 mkdir -p "$BASE_FOLDER/$RUN_NAME/logs"
 

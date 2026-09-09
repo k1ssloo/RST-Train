@@ -1,0 +1,92 @@
+{
+  "checked_at_utc": "2026-09-09",
+  "bug": "BUG-29",
+  "cpu_suite": {
+    "passed": 488,
+    "skipped": 5,
+    "skip_reasons": {
+      "verl_not_installed": 3,
+      "cuda_opt_in": 1,
+      "harbor_not_installed": 1
+    }
+  },
+  "real_verl_cpu_regressions": {
+    "passed": 7,
+    "skipped": 0,
+    "module": "tests/test_dense_sft.py"
+  },
+  "standalone_runner": "passed for dense SFT and launcher regressions; optional skips reported separately",
+  "backend_environment": {
+    "python": "3.13.15 (isolated interpreter with existing backend packages)",
+    "torch": "2.11.0+cu128",
+    "transformers": "5.15.0",
+    "verl": "0.9.0",
+    "tensordict": "0.14.0",
+    "flash_attn": "not installed; Torch CE fallback used"
+  },
+  "gpu_probe": {
+    "scope": "tiny 2-layer fp32/bf16, tied embeddings, gradient checkpointing, single-rank FSDP2",
+    "seq_len": 2049,
+    "vocab_size": 8192,
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "models": [
+      {
+        "model_type": "llama",
+        "native_loss": 9.023172378540039,
+        "parameter_dtype": "torch.float32",
+        "chunked_loss": 9.023173332214355,
+        "max_grad_abs_error": 5.587935447692871e-09,
+        "native_peak_bytes": 414343680,
+        "chunked_peak_bytes": 347219456
+      },
+      {
+        "model_type": "llama",
+        "native_loss": 9.023188591003418,
+        "parameter_dtype": "torch.bfloat16",
+        "chunked_loss": 9.023188591003418,
+        "max_grad_abs_error": 3.0517578125e-05,
+        "native_peak_bytes": 307334144,
+        "chunked_peak_bytes": 158688768
+      },
+      {
+        "model_type": "phi3",
+        "native_loss": 9.023616790771484,
+        "parameter_dtype": "torch.float32",
+        "chunked_loss": 9.023616790771484,
+        "max_grad_abs_error": 4.190951585769653e-09,
+        "native_peak_bytes": 414343680,
+        "chunked_peak_bytes": 347219456
+      },
+      {
+        "model_type": "phi3",
+        "native_loss": 9.023626327514648,
+        "parameter_dtype": "torch.bfloat16",
+        "chunked_loss": 9.023625373840332,
+        "max_grad_abs_error": 3.0517578125e-05,
+        "native_peak_bytes": 307334144,
+        "chunked_peak_bytes": 158688768
+      }
+    ]
+  },
+  "gpu_measurement": "torch.cuda.max_memory_allocated over forward/backward; not total process/device memory",
+  "invariants": [
+    "same full input IDs and masks",
+    "same global supervised-token normalization",
+    "native loss and all parameter gradients compared",
+    "tied embeddings",
+    "gradient checkpointing",
+    "successful parameter updates"
+  ],
+  "limits": [
+    "Synthetic tiny models: 2 layers, hidden_size=64; not official full checkpoints.",
+    "Single-rank FSDP2; no multi-rank numerical or 32K full-model memory result.",
+    "Remote Nemotron early-exit traceback was not available; cause remains unclassified.",
+    "GPU flash-attn CE path was not exercised."
+  ],
+  "backend_source_sha256": {
+    "models/transformers/dense_common.py": "40d57b22dcb44b7db95395e92e3d79c8ef7843cd7c51753536cb4184c115ce08",
+    "utils/experimental/torch_functional.py": "ddfa9be0bc6bfd9292376ef2a2b68f9c4b4ffb040e0efd2fd72552bdc4390413",
+    "workers/engine/fsdp/transformer_impl.py": "0a3c894d8129f77a28ecf74ebdd7921e0974053b1fa72ac294cedde4e7fce4f9",
+    "utils/dataset/dataset_utils.py": "da10fe0552ec17af1e3a44ba53cfdb1f02103c786257222fc1b4a8de34e95913"
+  }
+}

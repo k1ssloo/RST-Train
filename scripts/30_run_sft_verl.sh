@@ -80,13 +80,19 @@ REGISTRY_CONFIG=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-clas
 eval "$REGISTRY_CONFIG"
 MODEL_PATH="${MODEL_PATH:-$BASE_FOLDER/$MODEL_DIR_NAME}"
 SFT_LAYOUT_ARGS=(data.pad_mode=no_padding model.use_liger=True)
+SFT_BATCH_ARGS=(data.use_dynamic_bsz=True)
+SFT_DENSE_CHUNKED=0
 if [[ "$SFT_GENERIC" == "1" ]]; then
-  # Conservative Transformers forward; no Qwen packing/FLA/fused-forward assumptions.
-  SFT_LAYOUT_ARGS=(data.pad_mode=padding model.use_remove_padding=False
-                   model.use_liger=False model.use_fused_kernels=False)
-  FUSED_KERNELS="${FUSED_KERNELS:-0}"
-  if [[ "$FUSED_KERNELS" != "0" ]]; then
-    echo "Generic model profiles require FUSED_KERNELS=0; validate a model-specific kernel before enabling it." >&2
+  # BUG-29: no_padding describes the DATA collator, not model-side packing.
+  # The engine reconstructs ordinary padded inputs with use_remove_padding=False.
+  # One complete sequence per micro-batch bounds activations independently of
+  # verl's dynamic budget (which counts real tokens, not B * padded length).
+  SFT_LAYOUT_ARGS=(data.pad_mode=no_padding model.use_remove_padding=False model.use_liger=False)
+  SFT_BATCH_ARGS=(data.use_dynamic_bsz=False data.micro_batch_size_per_gpu=1)
+  SFT_DENSE_CHUNKED=$(python -c 'import sys; from verl_backend.dense_sft import supports_chunked_head; print(int(supports_chunked_head(sys.argv[1])))' "$MODEL_PATH") || exit 2
+  FUSED_KERNELS="${FUSED_KERNELS:-$SFT_DENSE_CHUNKED}"
+  if [[ "$FUSED_KERNELS" != "$SFT_DENSE_CHUNKED" ]]; then
+    echo "For $MODEL_KEY set FUSED_KERNELS=$SFT_DENSE_CHUNKED. Llama/Phi with tied embeddings use the verified Torch chunked head; other checkpoints retain native heads." >&2
     exit 2
   fi
 fi
@@ -330,6 +336,10 @@ FUSED_KERNELS="${FUSED_KERNELS:-1}"
 FUSED_KERNEL_BACKEND="${FUSED_KERNEL_BACKEND:-torch}"
 FUSED_ARGS=()
 if [[ "$FUSED_KERNELS" == "1" ]]; then
+  if [[ "$SFT_DENSE_CHUNKED" == "1" && "$FUSED_KERNEL_BACKEND" != "torch" ]]; then
+    echo "Llama/Phi SFT requires FUSED_KERNEL_BACKEND=torch (BUG-29)." >&2
+    exit 2
+  fi
   case "$FUSED_KERNEL_BACKEND" in
     torch|triton) ;;
     *) echo "FUSED_KERNEL_BACKEND must be 'torch' or 'triton', got '$FUSED_KERNEL_BACKEND'" >&2
@@ -339,6 +349,12 @@ if [[ "$FUSED_KERNELS" == "1" ]]; then
   # verl without these config keys (hydra aborts at launch), and a verl without a
   # qwen3_5 fused forward (it would silently fall back to dense_common's, which
   # does not know this architecture's packed-sequence arguments).
+  if [[ "$SFT_DENSE_CHUNKED" == "1" ]]; then
+    # Check the installed verl/Transformers combination on CPU before loading
+    # full model weights. Includes native-loss/gradient equivalence and the
+    # real collator -> microbatch -> engine input/output -> SFT loss path.
+    python -m verl_backend.dense_sft --model "$MODEL_PATH" || exit 2
+  else
   python - <<'EOF_PY' || exit 2
 import importlib.util as u
 import pathlib
@@ -370,6 +386,7 @@ if not found:
              "not take this architecture's cu_seqlens arguments. Upgrade verl.")
 print("[gate] verl fused kernels available (model.use_fused_kernels + qwen3_5 forward)")
 EOF_PY
+  fi
   FUSED_ARGS+=(model.use_fused_kernels=True
                "model.fused_kernel_options.impl_backend=$FUSED_KERNEL_BACKEND")
 else
@@ -506,7 +523,8 @@ if allow:
     raise SystemExit(0)
 print("Fix: pip install --no-deps 'flash-linear-attention @ "
       "git+https://github.com/fla-org/flash-linear-attention' and pin "
-      "transformers>=5.11,<5.15. Or set data.pad_mode=padding (slower, no packing), "
+      "transformers>=5.11,<5.15. A non-packed alternative needs a separately validated "
+      "model.use_remove_padding=False setup; this engine still needs data.pad_mode=no_padding. "
       "or ALLOW_UNSAFE_PACKING=1 to accept the contamination knowingly.", file=sys.stderr)
 raise SystemExit(2)
 EOF_PY
@@ -563,7 +581,7 @@ VERL_ARGS=(
   data.custom_cls.path="$REPO_DIR/verl_backend/rst_sft_dataset.py"
   data.custom_cls.name=RSTPretokenizedSFTDataset
   "${SFT_LAYOUT_ARGS[@]}"
-  data.use_dynamic_bsz=True
+  "${SFT_BATCH_ARGS[@]}"
   data.max_length="${MAX_SEQ_LEN:-32768}"
   data.max_token_len_per_gpu="$MAX_TOKENS_PER_GPU"
   data.train_batch_size="$GLOBAL_BATCH_SIZE"
@@ -643,6 +661,15 @@ if whole:
              f"  is load-bearing (the fused-kernel and gradient-checkpointing ones are).")
 print(f"[gate] {len(overrides)} hydra overrides all exist in this verl"
       + (f" ({len(passthrough)} flag(s) passed through unchecked)" if passthrough else ""))
+# Validate the FINAL composed values, so stale wrapper/CLI overrides cannot
+# silently restore the OOM configuration after the defaults above (BUG-29).
+GlobalHydra.instance().clear()
+with initialize_config_module(config_module="verl.trainer.config", version_base=None):
+    resolved = compose(config_name="sft_trainer_engine", overrides=overrides)
+from rst_common.tokenization import mask_type_for_model
+from verl_backend.dense_sft import supports_chunked_head, validate_config
+validate_config(resolved, mask_type_for_model(resolved.model.path),
+                chunked_head=supports_chunked_head(resolved.model.path))
 EOF_PY
 
 # ---- resume schedule gate ---------------------------------------------------
