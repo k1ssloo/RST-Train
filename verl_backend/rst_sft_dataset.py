@@ -56,6 +56,8 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import fsdp2_grad_accum  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rst_common.tokenization import mask_type_for_model, validate_tokenized_parquet  # noqa: E402
 
 fsdp2_grad_accum.apply()
 
@@ -136,6 +138,12 @@ class RSTPretokenizedSFTDataset(Dataset):
 
         if isinstance(parquet_files, str):
             parquet_files = [parquet_files]
+        # Real training tokenizers identify their checkpoint directory. Minimal
+        # tokenizer stubs retain legacy Qwen behavior for the torch-free tests.
+        model_path = getattr(tokenizer, "name_or_path", None)
+        mask_type = mask_type_for_model(model_path) if model_path else "qwen3_5"
+        for path in parquet_files:
+            validate_tokenized_parquet(path, tokenizer, mask_type)
         frames = [pd.read_parquet(p) for p in parquet_files]
         self.frame = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
 

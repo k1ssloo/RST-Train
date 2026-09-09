@@ -31,6 +31,31 @@ from _util import ROOT, load_script  # noqa: E402
 reg = load_script("model_registry")
 
 
+def test_new_families_resolve_sft_and_dpo_without_a_megatron_spec():
+    # BUG-27: a family name in the registry is not a Megatron implementation.
+    for key, row in reg.load()["models"].items():
+        if row["loss_mask_type"] == "qwen3_5":
+            continue
+        for phase in ("sft", "dpo"):
+            cfg = resolve(key=key, backend="verl", phase=phase, gpus=2, max_seq_len=0)
+            assert cfg["MAX_SEQ_LEN"] == 8192
+            assert cfg["MAX_TOKENS_PER_GPU"] == 8192
+            assert cfg["SFT_GENERIC"] == 1 and cfg["SLIME_SPEC"] == ""
+            assert cfg["DP"] == 2 and cfg["TP"] == cfg["PP"] == cfg["CP"] == 1
+        for overrides, message in (({"backend": "megatron"}, "backend"),
+                                   ({"phase": "rl"}, "phase"),
+                                   ({"ulysses_sp": 2}, "ULYSSES_SP=1"),
+                                   ({"max_seq_len": 1000000}, "context window")):
+            kw = dict(key=key, backend="verl", gpus=2)
+            kw.update(overrides)
+            try:
+                resolve(**kw)
+            except SystemExit as exc:
+                assert message in str(exc), str(exc)
+            else:
+                raise AssertionError(f"unsupported config accepted: {kw}")
+
+
 def resolve(**kw):
     args = dict(key="qwen3.5-27b", mem_class="80GB", gpus=32, gpus_per_node=8,
                 max_seq_len=32768, phase="sft", backend="megatron")

@@ -103,6 +103,8 @@ from dpo_common import (  # noqa: E402
     dpo_loss,
     load_model,
     masked_logprob_sum,
+    validate_pair_tokenization,
+    pair_data_fingerprints,
     noise_floor_warning,
     read_ref_logps,
 )
@@ -255,7 +257,14 @@ def shard_model(model, *, param_dtype, world_size: int):
                          "the LM head by hand and needs it to be an FSDP entry point")
     for layer in layers:
         fully_shard(layer, mp_policy=policy)
-    fully_shard(head, mp_policy=policy, reshard_after_forward=False)
+    embedding = decoder.get_input_embeddings() if hasattr(decoder, "get_input_embeddings") else None
+    if embedding is not None and getattr(embedding, "weight", None) is getattr(head, "weight", None):
+        # Llama 3.2 / SmolLM / Gemma tie input and output embeddings. A head-only
+        # shard leaves embedding lookup holding a DTensor before the head is ever
+        # called. Both entry points must own ONE group for that shared parameter.
+        fully_shard([embedding, head], mp_policy=policy, reshard_after_forward=False)
+    else:
+        fully_shard(head, mp_policy=policy, reshard_after_forward=False)
     fully_shard(decoder, mp_policy=policy)
 
     # Anything outside decoder/lm_head is unreachable from masked_logprob_sum, so it is
@@ -298,7 +307,8 @@ def save_hf(model, tokenizer_src: Path, out: Path, *, rank: int, world_size: int
         state = {k: (v.to(torch.bfloat16) if v.is_floating_point() else v)
                  for k, v in state.items()}
         model.save_pretrained(str(out), state_dict=state, safe_serialization=True)
-        for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
+        for name in ("tokenizer.json", "tokenizer.model", "spiece.model",
+                     "tokenizer_config.json", "vocab.json", "merges.txt",
                      "special_tokens_map.json", "chat_template.jinja", "generation_config.json"):
             src = tokenizer_src / name
             if src.is_file():
@@ -381,11 +391,23 @@ def main() -> int:
     torch.manual_seed(args.seed)
 
     # ---- data + the three gates -------------------------------------------
+    mask_type = validate_pair_tokenization(args.pairs, args.model_path)
     train = load_split(args.pairs, "train")
     if train is None:
         sys.exit(f"no dpo_train.parquet under {args.pairs}")
     holdout = load_split(args.pairs, "holdout")
     ref_table, ref_manifests = read_ref_logps(args.ref_logps)
+    if mask_type != "qwen3_5" and (not ref_manifests or any(
+        not manifest.get("pairs_sha256") for manifest in ref_manifests
+    )):
+        sys.exit("new model families require reference manifests with dataset fingerprints; "
+                 "recompute with 18_dpo_ref_logprobs.py")
+    pair_hashes = pair_data_fingerprints(args.pairs)
+    for manifest in ref_manifests:
+        recorded = manifest.get("pairs_sha256")
+        if recorded is not None and recorded != pair_hashes:
+            sys.exit("GATE FAILED (dataset fingerprint): preference data changed after reference "
+                     "scoring; use a new reference directory and recompute logprobs")
 
     fingerprint = checkpoint_fingerprint(args.model_path)
     ref_fingerprints = {m.get("checkpoint_fingerprint") for m in ref_manifests}

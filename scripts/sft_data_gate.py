@@ -19,12 +19,15 @@ def validate_mask_fraction(
     total_tokens: int,
     trained_tokens: int,
     manifest: str | Path | None = None,
+    legacy_band: bool = True,
 ) -> str:
     """Return a gate description, or raise ValueError without weakening the checks."""
     if rows <= 0 or not 0 < trained_tokens < total_tokens:
         raise ValueError("empty data or invalid supervised-token totals")
     fraction = trained_tokens / total_tokens
     if not manifest:
+        if not legacy_band:
+            return f"target-tokenizer export; measured trained fraction {fraction:.2%} (no Qwen-specific band)"
         if not 0.25 <= fraction <= 0.45:
             raise ValueError(
                 f"trained fraction {fraction:.2%} is outside the legacy RST 0.25-0.45 "

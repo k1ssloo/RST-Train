@@ -57,42 +57,26 @@ fi
 NNODES="${NNODES:-1}"; NGPUS="${NGPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 NGPUS="${NGPUS:-1}"; (( NGPUS > 0 )) || NGPUS=1
 
-# Resolve the model, but do not let the registry's parallelism arithmetic gate this
-# path. 19_train_dpo.py is FSDP2-only -- no TP, PP or CP -- so a GPU count the
-# registry rejects for SFT (tp*pp*cp must divide the world) is perfectly runnable
-# here, and refusing to start would be a false negative. All this needs from the
-# registry is the checkpoint directory name.
-#
-# --backend verl is the honest shape for an FSDP2 trainer, so the fallback below now
-# fires only for a genuinely unknown key rather than for every odd GPU count.
-if REGISTRY=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
-                --backend verl \
+# Resolve SFT/DPO capabilities before choosing model-specific data paths.
+REGISTRY=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+                --backend verl --phase dpo \
                 --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
-                --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell 2>/dev/null); then
-  eval "$REGISTRY"
-else
-  MODEL_DIR_NAME=$(python - "$MODEL_KEY" <<'EOF_PY'
-import json, sys
-models = json.load(open("configs/models.json"))["models"]
-key = sys.argv[1]
-if key not in models:
-    sys.exit(f"unknown MODEL_KEY {key!r}; python scripts/model_registry.py --list")
-print(models[key].get("model_dir_name") or models[key]["hf_repo"].split("/")[-1])
-EOF_PY
-) || exit 1
-  echo "note: the registry could not place $MODEL_KEY on $(( NNODES * NGPUS )) GPUs with its"
-  echo "      TP/PP/CP plan. DPO does not use any of those, so continuing with"
-  echo "      MODEL_DIR_NAME=$MODEL_DIR_NAME. (SFT on this GPU count would still be blocked.)"
-  MAX_SEQ_LEN="${MAX_SEQ_LEN:-32768}"
+                --max-seq-len "${MAX_SEQ_LEN:-0}" --shell) || exit 2
+eval "$REGISTRY"
+if [[ "$SFT_GENERIC" == "1" ]]; then
+  PAIRS_DIR="${PAIRS_DIR:-$BASE_FOLDER/dpo-$MODEL_KEY}"
+  POLICY="${POLICY:-$BASE_FOLDER/${MODEL_KEY}-sft-hf}"
+  OUT_DIR="${OUT_DIR:-$BASE_FOLDER/${MODEL_KEY}-dpo}"
+  DPO_FETCH_HF="${DPO_FETCH_HF:-0}"
 fi
 
 PAIRS_DIR="${PAIRS_DIR:-$BASE_FOLDER/dpo-v2}"
 REF_DIR="${REF_DIR:-$PAIRS_DIR/ref}"
 TRAJ_ROOT="${TRAJ_ROOT:-$BASE_FOLDER/rst-trajectories}"
-TOKENIZER="${TOKENIZER:-$BASE_FOLDER/$MODEL_DIR_NAME}"
 # The policy AND the reference. They are the same checkpoint by construction: DPO
 # starts from the SFT model and measures divergence from it.
 POLICY="${POLICY:-$BASE_FOLDER/out-hf-full}"
+TOKENIZER="${TOKENIZER:-$POLICY}"
 OUT_DIR="${OUT_DIR:-$BASE_FOLDER/out-dpo}"
 DPO_SEQ_LEN="${DPO_SEQ_LEN:-${MAX_SEQ_LEN:-32768}}"
 PER_SIDE="${PER_SIDE:-14}"
@@ -213,7 +197,7 @@ if [[ ! -f "$PAIRS_DIR/dpo_train.parquet" ]]; then
   fi
   python scripts/17_build_dpo_data.py \
     --traj-root "$TRAJ_ROOT" \
-    --tokenizer "$TOKENIZER" \
+    --tokenizer "$TOKENIZER" --loss-mask-type "$LOSS_MASK_TYPE" \
     --out-dir "$PAIRS_DIR" \
     --per-side "$PER_SIDE" \
     --max-seq-len "$DPO_SEQ_LEN" \

@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rst_common.tokenization import validate_training_data  # noqa: E402
 
 FINGERPRINT_HEAD_BYTES = 1 << 20  # 1 MiB per weight file
 
@@ -51,10 +55,12 @@ def checkpoint_fingerprint(model_path: str | Path) -> str:
     return digest.hexdigest()
 
 
-AUTO_CLASSES = ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModel")
+AUTO_CLASSES = ("AutoModelForCausalLM", "AutoModelForImageTextToText",
+                "AutoModelForMultimodalLM")
 
 
-def load_model(model_path: str | Path, *, dtype, device_map: str | None = None):
+def load_model(model_path: str | Path, *, dtype, device_map: str | None = None,
+               attn_implementation: str | None = None):
     """Load whatever kind of checkpoint this is, and say which auto class worked.
 
     Same probe as `06b_eval_offline.py`: the Qwen3.5 checkpoints declare
@@ -63,8 +69,15 @@ def load_model(model_path: str | Path, *, dtype, device_map: str | None = None):
     """
     import transformers
 
+    config = transformers.AutoConfig.from_pretrained(str(model_path), trust_remote_code=True)
+    conditional = hasattr(config, "text_config") or any(
+        "ForConditionalGeneration" in name for name in (config.architectures or [])
+    )
+    # AutoModelForCausalLM can extract a text submodel in new Transformers.
+    # Retain the original multimodal wrapper and its checkpoint layout on save.
+    classes = AUTO_CLASSES[1:] if conditional else AUTO_CLASSES
     errors: list[str] = []
-    for name in AUTO_CLASSES:
+    for name in classes:
         cls = getattr(transformers, name, None)
         if cls is None:
             continue
@@ -72,10 +85,13 @@ def load_model(model_path: str | Path, *, dtype, device_map: str | None = None):
             kwargs: dict[str, Any] = {"dtype": dtype, "trust_remote_code": True}
             if device_map:
                 kwargs["device_map"] = device_map
+            if attn_implementation:
+                kwargs["attn_implementation"] = attn_implementation
             model = cls.from_pretrained(str(model_path), **kwargs)
         except Exception as exc:  # noqa: BLE001 - probing which class fits
             errors.append(f"{name}: {type(exc).__name__}: {exc}"[:300])
             continue
+        decoder_and_head(model)
         return model, name
     raise SystemExit("could not load the checkpoint with any auto class:\n  "
                      + "\n  ".join(errors))
@@ -122,7 +138,14 @@ def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
     import torch
     from torch.utils.checkpoint import checkpoint
 
+    if chunk <= 0 or len(ids) != len(mask) or len(ids) < 2:
+        raise ValueError("need positive chunk size and aligned, nonempty ids/mask")
+    if any(flag not in (0, 1) for flag in mask) or mask[0] != 0:
+        raise ValueError("loss mask must be binary with an unsupervised first token")
     decoder, head = decoder_and_head(model)
+    config = getattr(model, "config", None)
+    text_config = config.get_text_config() if hasattr(config, "get_text_config") else config
+    softcap = getattr(text_config, "final_logit_softcapping", None)
     device = next(model.parameters()).device
     input_ids = torch.tensor([ids], dtype=torch.long, device=device)
     targets = torch.tensor(ids, dtype=torch.long, device=device)
@@ -139,7 +162,13 @@ def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
             # fp32 for the softmax: bf16 logsumexp over a 248,320-way vocab loses
             # enough precision to move a whole-sequence logprob sum by nats, and DPO
             # compares two such sums against a frozen reference.
-            logits = head(states).float()
+            logits = head(states)
+            # Gemma applies this AFTER the LM head and BEFORE fp32 loss/logsoftmax.
+            # Omitting it gives policy/reference internally consistent but wrong
+            # log probabilities, which the step-zero calibration cannot detect.
+            if softcap is not None:
+                logits = (logits / softcap).tanh() * softcap
+            logits = logits.float()
             return torch.nn.functional.cross_entropy(logits, gold, reduction="sum")
 
         # fp64 accumulator. The per-chunk cross-entropy is fp32, but the running total
@@ -159,6 +188,29 @@ def masked_logprob_sum(model, ids: list[int], mask: list[int], *, chunk: int,
             total = total + part.double()
         logp = -total
     return logp, n
+
+
+def validate_pair_tokenization(pairs: Path, model_path: Path) -> str:
+    paths = [pairs] if pairs.is_file() else [
+        path for path in (pairs / "dpo_train.parquet", pairs / "dpo_holdout.parquet")
+        if path.is_file()
+    ]
+    if not paths:
+        raise ValueError(f"no preference parquet under {pairs}")
+    return validate_training_data(paths, model_path)
+
+
+def pair_data_fingerprints(pairs: Path) -> dict[str, str]:
+    """Bind cached probabilities to dataset bytes, even when pair IDs are unchanged."""
+    paths = [pairs] if pairs.is_file() else sorted(pairs.glob("dpo_*.parquet"))
+    result = {}
+    for path in paths:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(block)
+        result[path.name] = digest.hexdigest()
+    return result
 
 
 def as_f64(value):

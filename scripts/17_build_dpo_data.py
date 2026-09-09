@@ -118,6 +118,10 @@ sys.path.insert(0, str(HERE))
 # the mask MUST be the one that pretokenized it -- so both are loaded from their
 # scripts rather than copied. See scripts/siblings.py.
 from siblings import load_script as _load_sibling  # noqa: E402
+sys.path.insert(0, str(HERE.parent))
+from rst_common.tokenization import (  # noqa: E402
+    MASK_TYPES, resolve_mask_type, tokenization_identity, write_tokenized_parquet,
+)
 
 
 def _order_key(seed: int, trajectory_id: str) -> str:
@@ -279,6 +283,7 @@ def main() -> int:
     ap.add_argument("--traj-root", type=Path, required=True,
                     help="dir containing data/*.tar and metadata/trajectories.parquet")
     ap.add_argument("--tokenizer", type=Path, required=True)
+    ap.add_argument("--loss-mask-type", choices=("auto", *MASK_TYPES), default="auto")
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--per-side", type=int, default=4,
                     help="candidates per (group, model) per side before pairing")
@@ -444,13 +449,17 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
     if not tokenizer.is_fast:
         sys.exit("a fast tokenizer is required (the mask needs offset mapping)")
+    mask_type = resolve_mask_type(args.tokenizer, args.loss_mask_type)
+    identity = tokenization_identity(tokenizer, mask_type)
 
     dropped = Counter()
     rows: list[dict] = []
     for chosen, rejected in candidate_pairs:
         try:
-            c_ids, c_mask = exporter.qwen3_5_mask(tokenizer, [dict(m) for m in chosen["messages"]])
-            r_ids, r_mask = exporter.qwen3_5_mask(tokenizer, [dict(m) for m in rejected["messages"]])
+            c_ids, c_mask = exporter.tokenize_messages(
+                tokenizer, [dict(m) for m in chosen["messages"]], mask_type)
+            r_ids, r_mask = exporter.tokenize_messages(
+                tokenizer, [dict(m) for m in rejected["messages"]], mask_type)
         except ValueError:
             dropped["contract_mismatch"] += 1
             continue
@@ -538,7 +547,7 @@ def main() -> int:
 
     def write(subset: list[dict], name: str) -> Path:
         path = args.out_dir / name
-        pd.DataFrame(subset).to_parquet(path, index=False)
+        write_tokenized_parquet(pd.DataFrame(subset, columns=list(rows[0])), path, identity)
         return path
 
     train_path = write(train, "dpo_train.parquet")
@@ -565,6 +574,8 @@ def main() -> int:
     manifest = {
         "source_dataset": "Zhongzhi1228/Recursive-Task-Synthesis-Trajectories",
         "tokenizer": str(args.tokenizer),
+        "loss_mask_type": mask_type,
+        "tokenization": identity,
         "clean_trajectories": int(len(clean)),
         "groups_with_any_clean_data": int(len(stats)),
         "groups_with_both_outcomes": int(len(paired_groups)),
@@ -609,8 +620,7 @@ def main() -> int:
         "length_bias_warning": warning,
         "model_mix_chosen": dict(Counter(r["chosen_model"] for r in rows)),
         "model_mix_rejected": dict(Counter(r["rejected_model"] for r in rows)),
-        "mask_source": "slime/utils/mask_utils.py::gen_multi_turn_loss_mask_qwen3_5 "
-                       "(via scripts/15_export_pretokenized.py)",
+        "mask_source": f"scripts/15_export_pretokenized.py::tokenize_messages ({mask_type})",
         "schema": {
             "chosen_input_ids/rejected_input_ids": "list[int], whole-conversation render",
             "chosen_loss_mask/rejected_loss_mask":

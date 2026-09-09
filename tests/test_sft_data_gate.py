@@ -46,6 +46,15 @@ def test_legacy_band_still_refuses_unreviewed_native_masks():
             "unused", rows=1, total_tokens=100, trained_tokens=trained), "legacy RST")
 
 
+def test_verified_target_tokenizer_does_not_inherit_qwen_fraction_band():
+    # BUG-27: byte/BPE vocabularies and native template lengths change this ratio.
+    assert "60.00%" in validate_mask_fraction(
+        "unused", rows=1, total_tokens=100, trained_tokens=60, legacy_band=False)
+    _refuses(lambda: validate_mask_fraction(
+        "unused", rows=1, total_tokens=100, trained_tokens=100, legacy_band=False),
+        "invalid supervised-token totals")
+
+
 def test_verified_seta_fraction_passes_without_changing_masks():
     with tempfile.TemporaryDirectory() as tmp:
         parquet, manifest = _release(tmp)

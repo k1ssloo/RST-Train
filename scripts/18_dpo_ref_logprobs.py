@@ -60,7 +60,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from dpo_common import checkpoint_fingerprint, load_model, masked_logprob_sum  # noqa: E402
+from dpo_common import (  # noqa: E402
+    checkpoint_fingerprint, load_model, masked_logprob_sum, validate_pair_tokenization,
+    pair_data_fingerprints,
+)
 
 DTYPES = {"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}
 
@@ -122,6 +125,7 @@ def main() -> int:
     import pandas as pd
     import torch
 
+    mask_type = validate_pair_tokenization(args.pairs, args.model_path)
     frame = load_pairs(args.pairs, args.split)
     long_rows = int(((frame.chosen_n_tokens > args.max_seq_len)
                      | (frame.rejected_n_tokens > args.max_seq_len)).sum())
@@ -153,6 +157,7 @@ def main() -> int:
     # out-hf-full underneath it, second attempt with a different --dtype).
     identity = {
         "pairs_source": str(args.pairs),
+        "pairs_sha256": pair_data_fingerprints(args.pairs),
         "split": args.split,
         "checkpoint_fingerprint": fingerprint,
         "dtype": args.dtype,
@@ -185,6 +190,16 @@ def main() -> int:
         if prior_identity is not None:
             drift = {k: (prior_identity.get(k), v) for k, v in identity.items()
                      if prior_identity.get(k) != v}
+            if mask_type == "qwen3_5" and prior_identity.get("pairs_sha256") is None:
+                # Older Qwen releases used the existing count/calibration gates.
+                # Do not invalidate a long partial reference pass solely because
+                # this version adds a field; other identity changes still fail.
+                drift.pop("pairs_sha256", None)
+                # Do not retroactively attest bytes for rows scored before this
+                # hash existed. Preserve that absence in the rewritten sidecars.
+                identity["pairs_sha256"] = None
+                print("[resume] legacy Qwen reference has no dataset hash; retaining legacy checks",
+                      flush=True)
             if drift:
                 lines = "\n".join(f"    {k}: was {old!r}, now {new!r}"
                                   for k, (old, new) in sorted(drift.items()))
@@ -226,7 +241,7 @@ def main() -> int:
     else:
         model, auto_class = load_model(args.model_path,
                                        dtype=getattr(torch, DTYPES[args.dtype]),
-                                       device_map="cuda")
+                                       device_map="cuda" if torch.cuda.is_available() else None)
         model.eval()
         model.config.use_cache = False
         print(f"[model] loaded with {auto_class}", flush=True)
@@ -302,6 +317,7 @@ def main() -> int:
 
     manifest = {
         "pairs_source": str(args.pairs),
+        "pairs_sha256": identity["pairs_sha256"],
         "split": args.split,
         "model_path": str(args.model_path),
         "checkpoint_fingerprint": fingerprint,

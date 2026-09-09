@@ -3,6 +3,13 @@
 SFT (then RL) of **Qwen3.5-27B** on the *Recursive Synthesis for Long-Horizon
 Terminal Tasks* release, targeting **4 nodes × 8 A100 = 32 GPUs**.
 
+For **text SFT + DPO beyond Qwen** (Llama, Phi, SmolLM3, OLMo 3, Gemma 4), see
+[`MODEL_SUPPORT.md`](MODEL_SUPPORT.md). It covers model selection, per-model
+tokenization, launch commands, and the boundary between CPU validation and GPU measurements.
+[`LLAMA_PHI_TRAINING_PROMPT.md`](LLAMA_PHI_TRAINING_PROMPT.md) is the remote operator
+prompt for Llama-3.2-3B-Instruct and Phi-4-mini-instruct: seven historical SFT datasets
+per model, followed by one RST DPO run per model (16 runs total).
+
 **Read [`PLAN.md`](PLAN.md) first** — it is the executable spec, written for the
 operator LLM on the cluster. [`OPERATOR_PROMPT.md`](OPERATOR_PROMPT.md) is the
 copy-paste kickoff message for that LLM. This file is just the map.
@@ -19,7 +26,7 @@ copy-paste kickoff message for that LLM. This file is just the map.
 | 32-GPU SFT launch | ⏳ written, needs cluster |
 | Eval harness (`06_eval.py`, 3 runs, mean±std, infra-separated) | ⏳ written, needs cluster |
 | Report generator + anomaly checks | ✅ **tested** on synthetic healthy/faulty runs |
-| Multi-model registry (5 models) | ✅ **tested**: all rows resolve, 4 negative tests reject |
+| Multi-model registry (13 checkpoints) | ✅ CPU-tested; new families cover text SFT + DPO, GPU runs pending |
 | Pre-tokenized export (backend-agnostic) | ✅ **run**: 10,578 rows, 0 drops, 32.42 % trained |
 | verl+FSDP SFT path (**primary**) | ⚠️ dataset core unit-tested; launcher not executed |
 | Rootless-podman sandbox (no Docker needed) | ✅ **verified**: build 26.6 s, run/exec/tmux/no-net all OK |

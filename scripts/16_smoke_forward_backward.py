@@ -68,7 +68,9 @@ def main() -> int:
 
     import pandas as pd
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoTokenizer
+    from dpo_common import load_model as load_checkpoint
+    from rst_common.tokenization import mask_type_for_model, validate_tokenized_parquet
 
     results: dict = {"checks": {}, "model": args.model, "seq_len": args.seq_len}
 
@@ -97,6 +99,8 @@ def main() -> int:
     # shows up as a device-side assert inside the loss, not as a message about the
     # vocabulary.
     tokenizer = AutoTokenizer.from_pretrained(args.model)
+    mask_type = mask_type_for_model(args.model)
+    validate_tokenized_parquet(args.parquet, tokenizer, mask_type)
     results["tokenizer_vocab_size"] = len(tokenizer)
     head_vocab = results["vocab_size"]
     if isinstance(head_vocab, int) and len(tokenizer) > head_vocab:
@@ -129,9 +133,9 @@ def main() -> int:
     def load_model(use_liger: bool):
         if use_liger:
             from liger_kernel.transformers import _apply_liger_kernel_to_instance
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, dtype=torch.bfloat16, attn_implementation=args.attn,
-        ).cuda()
+        model, _ = load_checkpoint(args.model, dtype=torch.bfloat16,
+                                    attn_implementation=args.attn)
+        model = model.cuda()
         if use_liger:
             _apply_liger_kernel_to_instance(model=model)
         model.gradient_checkpointing_enable()
@@ -234,7 +238,7 @@ def main() -> int:
     # train time is the tight one, and a mask bug fails both.
     frac = float(sum(int(sum(list(r.loss_mask)[: args.seq_len])) for r in frame.itertuples()) /
                  max(1, sum(len(list(r.input_ids)[: args.seq_len]) for r in frame.itertuples())))
-    check("trained-token fraction in the expected band", 0.15 <= frac <= 0.55,
+    check("trained-token fraction", (0.15 <= frac <= 0.55) if mask_type == "qwen3_5" else (0 < frac < 1),
           f"{frac:.2%} of tokens carry a label at seq_len={args.seq_len}")
     results["trained_fraction_at_seqlen"] = round(frac, 4)
 

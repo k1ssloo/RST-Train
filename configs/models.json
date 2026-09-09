@@ -9,7 +9,7 @@
     "    (sha256 4b565170da5bed0e), so ONE dataset serves all of them. No re-tokenization.",
     "  - The TRAINING chat-template render is byte-identical too, so",
     "    --loss-mask-type qwen3_5 and the published cap10/cap8 datasets are valid",
-    "    unchanged for every entry here.",
+    "    unchanged for those five Qwen entries only.",
     "  - Qwen3.5-0.8B's chat template differs from the rest in ONE way: it defaults",
     "    thinking OFF, so its *generation* prompt already closes the think block",
     "    ('<think>\\n\\n</think>\\n\\n') while 4B/9B/27B/35B end at '<think>\\n'. Training",
@@ -17,7 +17,10 @@
     "    serve_enable_thinking=true for 0.8B only -- otherwise the block is doubled at",
     "    serving time and eval silently degrades.",
     "  - Param counts are from each repo's safetensors index total_size / 2 (bf16).",
-    "  - first_batch=true marks the models authorized for the initial SFT+RL run (27B and 9B). Others are SFT-only until the first batch lands in range."
+    "  - first_batch=true marks the models authorized for the initial SFT+RL run (27B and 9B). Others are SFT-only until the first batch lands in range.",
+    "Non-Qwen entries require fresh tokenization from messages. Only SFT (verl/FSDP) and DPO are enabled.",
+    "New entries use padded, unfused text training at 8K by default. Memory figures are estimates; no full-size GPU run has been measured.",
+    "Gemma 4 E2B/E4B names describe effective compute, not total parameter memory."
   ],
   "defaults": {
     "max_seq_len": 32768,
@@ -238,6 +241,334 @@
           "pp": 1,
           "cp": 4,
           "ep": 4,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "llama3.2-1b": {
+      "hf_repo": "meta-llama/Llama-3.2-1B-Instruct",
+      "model_type": "llama",
+      "loss_mask_type": "llama3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 1.236,
+      "bf16_gib": 2.3,
+      "n_layers": 16,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "llama3.2",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "llama3.2-3b": {
+      "hf_repo": "meta-llama/Llama-3.2-3B-Instruct",
+      "model_type": "llama",
+      "loss_mask_type": "llama3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 3.213,
+      "bf16_gib": 6.0,
+      "n_layers": 28,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "llama3.2",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "llama3.1-8b": {
+      "hf_repo": "meta-llama/Llama-3.1-8B-Instruct",
+      "model_type": "llama",
+      "loss_mask_type": "llama3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 8.03,
+      "bf16_gib": 15.0,
+      "n_layers": 32,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "llama3.1",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "phi4-mini": {
+      "hf_repo": "microsoft/Phi-4-mini-instruct",
+      "model_type": "phi3",
+      "loss_mask_type": "phi3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 3.836,
+      "bf16_gib": 7.1,
+      "n_layers": 32,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "mit",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "smollm3-3b": {
+      "hf_repo": "HuggingFaceTB/SmolLM3-3B",
+      "model_type": "smollm3",
+      "loss_mask_type": "smollm3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 3.075,
+      "bf16_gib": 5.7,
+      "n_layers": 36,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 65536,
+      "context_length": 65536,
+      "default_max_seq_len": 8192,
+      "license": "apache-2.0",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "olmo3-7b": {
+      "hf_repo": "allenai/Olmo-3-7B-Instruct",
+      "model_type": "olmo3",
+      "loss_mask_type": "olmo3",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 7.298,
+      "bf16_gib": 13.6,
+      "n_layers": 32,
+      "has_vision": false,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 65536,
+      "context_length": 65536,
+      "default_max_seq_len": 8192,
+      "license": "apache-2.0",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "gemma4-e2b": {
+      "hf_repo": "google/gemma-4-E2B-it",
+      "model_type": "gemma4",
+      "loss_mask_type": "gemma4",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 5.123,
+      "bf16_gib": 9.5,
+      "n_layers": 35,
+      "has_vision": true,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "apache-2.0",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        }
+      }
+    },
+    "gemma4-e4b": {
+      "hf_repo": "google/gemma-4-E4B-it",
+      "model_type": "gemma4",
+      "loss_mask_type": "gemma4",
+      "supported_backends": [
+        "verl"
+      ],
+      "supported_phases": [
+        "sft",
+        "dpo"
+      ],
+      "params_b": 7.996,
+      "bf16_gib": 14.9,
+      "n_layers": 42,
+      "has_vision": true,
+      "hybrid_attention": false,
+      "moe": false,
+      "serve_tp": 1,
+      "serve_enable_thinking": false,
+      "serve_context_length": 131072,
+      "context_length": 131072,
+      "default_max_seq_len": 8192,
+      "license": "apache-2.0",
+      "paper_reference": null,
+      "role": "cross-family text SFT + DPO comparison",
+      "unvalidated": "CPU compatibility checks only; full-size GPU memory, throughput and quality require measurement.",
+      "parallelism": {
+        "80GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
+          "max_tokens_per_gpu": 8192
+        },
+        "40GB": {
+          "tp": 1,
+          "pp": 1,
+          "cp": 1,
           "max_tokens_per_gpu": 8192
         }
       }

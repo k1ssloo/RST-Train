@@ -1,0 +1,272 @@
+{
+  "checked_at_utc": "2026-09-09",
+  "kind": "official-tokenizer-only; no model weights or GPU training",
+  "models": [
+    {
+      "repository": "microsoft/Phi-4-mini-instruct",
+      "revision": "cfbefacb99257ffa30c83adab238a50856ac3083",
+      "profile": "phi3",
+      "tokens": 45,
+      "supervised_tokens": 15,
+      "render_contract": true,
+      "masked_turn_excluded": true,
+      "observation_excluded": true,
+      "identity": {
+        "schema": "rst-tokenization-v1",
+        "loss_mask_type": "phi3",
+        "tokenizer_sha256": "fcca7ba9426a0b6bde9dbc6c13e0efba6c8ad858466c136d1d4e8f00e681df1a",
+        "special_tokens": {
+          "bos_token": "<|endoftext|>",
+          "eos_token": "<|endoftext|>",
+          "unk_token": "<|endoftext|>",
+          "pad_token": "<|endoftext|>"
+        },
+        "chat_template_sha256": "7329549bd965083583b7be7c26d182fc1208060ec88767cf43cc6ec61478b8ef",
+        "chat_template_options": {},
+        "fingerprint": "a27b5b93270b31565d4ef2044239dde2cabc142989496b258ca5dc6df8311e57"
+      }
+    },
+    {
+      "repository": "HuggingFaceTB/SmolLM3-3B",
+      "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+      "profile": "smollm3",
+      "tokens": 101,
+      "supervised_tokens": 16,
+      "render_contract": true,
+      "masked_turn_excluded": true,
+      "observation_excluded": true,
+      "identity": {
+        "schema": "rst-tokenization-v1",
+        "loss_mask_type": "smollm3",
+        "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+        "special_tokens": {
+          "eos_token": "<|im_end|>",
+          "pad_token": "<|im_end|>"
+        },
+        "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+        "chat_template_options": {
+          "enable_thinking": false,
+          "template_date": "2026-09-09"
+        },
+        "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+      }
+    },
+    {
+      "repository": "allenai/Olmo-3-7B-Instruct",
+      "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc",
+      "profile": "olmo3",
+      "tokens": 58,
+      "supervised_tokens": 15,
+      "render_contract": true,
+      "masked_turn_excluded": true,
+      "observation_excluded": true,
+      "identity": {
+        "schema": "rst-tokenization-v1",
+        "loss_mask_type": "olmo3",
+        "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+        "special_tokens": {
+          "bos_token": "<|endoftext|>",
+          "eos_token": "<|endoftext|>",
+          "unk_token": "<|endoftext|>",
+          "pad_token": "<|pad|>"
+        },
+        "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+        "chat_template_options": {},
+        "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+      }
+    },
+    {
+      "repository": "google/gemma-4-E2B-it",
+      "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+      "profile": "gemma4",
+      "tokens": 61,
+      "supervised_tokens": 16,
+      "render_contract": true,
+      "masked_turn_excluded": true,
+      "observation_excluded": true,
+      "identity": {
+        "schema": "rst-tokenization-v1",
+        "loss_mask_type": "gemma4",
+        "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+        "special_tokens": {
+          "bos_token": "<bos>",
+          "eos_token": "<eos>",
+          "unk_token": "<unk>",
+          "pad_token": "<pad>",
+          "mask_token": "<mask>",
+          "audio_token": "<|audio|>",
+          "boa_token": "<|audio>",
+          "boi_token": "<|image>",
+          "eoa_token": "<audio|>",
+          "eoc_token": "<channel|>",
+          "eoi_token": "<image|>",
+          "eot_token": "<turn|>",
+          "escape_token": "<|\"|>",
+          "etc_token": "<tool_call|>",
+          "etd_token": "<tool|>",
+          "etr_token": "<tool_response|>",
+          "image_token": "<|image|>",
+          "soc_token": "<|channel>",
+          "sot_token": "<|turn>",
+          "stc_token": "<|tool_call>",
+          "std_token": "<|tool>",
+          "str_token": "<|tool_response>",
+          "think_token": "<|think|>"
+        },
+        "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+        "chat_template_options": {
+          "enable_thinking": false
+        },
+        "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+      }
+    }
+  ],
+  "llama_note": "Official tokenizer files require gated access; offline tests use synthetic tokenizers.",
+  "phi_historical_dataset_samples": {
+    "repository": "microsoft/Phi-4-mini-instruct",
+    "revision": "cfbefacb99257ffa30c83adab238a50856ac3083",
+    "selection": "First 10 rows of each local published messages dataset; Nemotron uses holdout, others train.",
+    "checks": [
+      "whole-conversation native template contract",
+      "input_ids and loss_mask aligned",
+      "nonzero supervised tokens",
+      "first token unsupervised"
+    ],
+    "scope": "CPU tokenizer-only sample, not full-corpus acceptance or model training.",
+    "datasets": [
+      {
+        "dataset": "rst-cap10",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          12792,
+          3744,
+          11247,
+          10228,
+          4128,
+          8136,
+          5787,
+          5409,
+          6195,
+          5975
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "ota",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          3392,
+          2698,
+          16027,
+          2865,
+          1994,
+          3279,
+          4110,
+          7701,
+          1981,
+          2102
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "nemo-holdout",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          14371,
+          16588,
+          3740,
+          8553,
+          12882,
+          28332,
+          4445,
+          14279,
+          14889,
+          23630
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "tmax",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          3124,
+          3559,
+          3809,
+          3430,
+          3816,
+          3861,
+          3951,
+          3927,
+          3511,
+          5350
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "seta",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          6872,
+          16162,
+          9177,
+          19187,
+          8211,
+          9855,
+          11932,
+          11437,
+          13744,
+          8700
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "terminal-lego-deepseek",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          8114,
+          4828,
+          3819,
+          4868,
+          10611,
+          8778,
+          3859,
+          3889,
+          9091,
+          4142
+        ],
+        "errors": {}
+      },
+      {
+        "dataset": "terminal-lego-opus-unscored",
+        "sample_rows": 10,
+        "valid": 10,
+        "over_32768": 0,
+        "lengths": [
+          1954,
+          3486,
+          2102,
+          2426,
+          2031,
+          1900,
+          2487,
+          2725,
+          2099,
+          5373
+        ],
+        "errors": {}
+      }
+    ]
+  }
+}

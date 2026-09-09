@@ -237,15 +237,18 @@ def check_config(findings: Findings, config: dict | None) -> None:
                      "no run config supplied; cannot verify the load-bearing flags")
         return
     lm = config.get("loss_mask_type")
-    if lm != "qwen3_5":
+    registry = json.loads((Path(__file__).resolve().parent.parent / "configs/models.json").read_text())
+    model_key = config.get("model_key")
+    expected = registry["models"].get(model_key, {}).get("loss_mask_type", "qwen3_5")
+    if lm != expected:
         findings.add(FAIL, "config", "loss mask",
-                     f"loss_mask_type={lm!r}, must be 'qwen3_5'. Anything else mis-segments the "
-                     f"Qwen3.5 template and trains on terminal output -- results are invalid.")
+                     f"loss_mask_type={lm!r}, expected {expected!r} for {model_key or 'legacy Qwen'}. "
+                     "Re-export messages with the target model's tokenizer and mask profile.")
     else:
-        findings.add(OK, "config", "loss mask", "qwen3_5")
+        findings.add(OK, "config", "loss mask", lm)
 
     cc, gdn = config.get("compute_cap"), config.get("gdn_backend")
-    if str(cc) == "8.0" and gdn != "fla":
+    if expected == "qwen3_5" and str(cc) == "8.0" and gdn != "fla":
         findings.add(FAIL, "config", "GDN backend",
                      f"compute_cap 8.0 (A100) with gdn_backend={gdn!r}; FlashQLA needs SM90+")
     elif gdn:

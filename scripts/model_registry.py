@@ -59,6 +59,21 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
     if key not in models:
         sys.exit(f"unknown model key {key!r}. Known: {', '.join(sorted(models))}")
     m = models[key]
+    if backend == "slime":
+        backend = "megatron"
+    if backend not in m.get("supported_backends", ["megatron", "verl"]):
+        sys.exit(f"{key} does not support backend {backend}; use verl for SFT + DPO")
+    if phase not in m.get("supported_phases", ["sft", "rl", "dpo"]):
+        sys.exit(f"{key} does not support phase {phase}; this adapter covers SFT + DPO only")
+    if gpus < 1 or gpus_per_node < 1 or ulysses_sp < 1:
+        sys.exit("GPU counts and --ulysses-sp must be positive")
+    if not max_seq_len:
+        max_seq_len = m.get("default_max_seq_len", defaults.get("max_seq_len", 32768))
+    if max_seq_len < 1 or max_seq_len > m.get("context_length", 262144):
+        sys.exit(f"invalid max_seq_len={max_seq_len} for {key}'s context window")
+    generic = m["loss_mask_type"] != "qwen3_5"
+    if generic and ulysses_sp != 1:
+        sys.exit(f"{key}: generic padded SFT requires ULYSSES_SP=1; packed kernels are not enabled")
 
     # RL colocates the rollout engine with the actor, so it gets its own rows when
     # present. Falling back to the SFT rows is allowed but flagged: it has not been
@@ -81,6 +96,9 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         print(f"# note: no '{mem_class}' row for {key}; using '{fallback}'", file=sys.stderr)
         mem_class = fallback
     p = dict(par[mem_class])
+    if generic:
+        # Unpacked text training: one whole sequence per microbatch budget.
+        p["max_tokens_per_gpu"] = max_seq_len
 
     tp, pp, cp = p["tp"], p["pp"], p["cp"]
     mtpg = p["max_tokens_per_gpu"]
@@ -190,8 +208,9 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "MODEL_KEY": key,
         "HF_REPO": m["hf_repo"],
         "MODEL_DIR_NAME": m["hf_repo"].split("/")[-1],
-        "SLIME_SPEC": m["slime_spec"],
+        "SLIME_SPEC": m.get("slime_spec", ""),
         "LOSS_MASK_TYPE": m["loss_mask_type"],
+        "SFT_GENERIC": int(generic),
         "PARAMS_B": m["params_b"],
         "N_LAYERS": m["n_layers"],
         "HAS_VISION": int(bool(m.get("has_vision"))),
@@ -208,7 +227,7 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "TOTAL_GPUS": gpus,
         "SERVE_TP": m.get("serve_tp", row_tp),
         "SERVE_ENABLE_THINKING": int(bool(m.get("serve_enable_thinking"))),
-        "SERVE_CONTEXT_LENGTH": defaults.get("serve_context_length", 65536),
+        "SERVE_CONTEXT_LENGTH": m.get("serve_context_length", defaults.get("serve_context_length", 65536)),
         "GLOBAL_BATCH_SIZE": defaults.get("global_batch_size", 128),
         "NUM_EPOCH": defaults.get("num_epoch", 1),
         "LR": defaults.get("lr", "3e-6"),
@@ -217,7 +236,7 @@ def resolve(key: str, mem_class: str, gpus: int, gpus_per_node: int, max_seq_len
         "EST_EPOCH_MINUTES": m.get("est_epoch_minutes", 0),
         "REFERENCE_CHECKPOINT": m.get("reference_checkpoint", ""),
         "DECODER_LAST_PP_LAYERS": m.get("decoder_last_pipeline_num_layers", 0),
-        "MIN_GPUS": m.get("min_gpus", gpus),
+        "MIN_GPUS": m.get("min_gpus", 0),
         "SERVE_CHAT_TEMPLATE_REPO": m.get("serve_chat_template_repo", ""),
         "FIRST_BATCH": int(bool(m.get("first_batch"))),
         "ROLLOUT_GPUS_PER_ENGINE": p.get("rollout_gpus_per_engine", 2),
@@ -261,8 +280,8 @@ def main() -> int:
     ap.add_argument("--mem-class", default="80GB")
     ap.add_argument("--gpus", type=int, default=32)
     ap.add_argument("--gpus-per-node", type=int, default=8)
-    ap.add_argument("--max-seq-len", type=int, default=32768)
-    ap.add_argument("--phase", default="sft", choices=["sft", "rl"])
+    ap.add_argument("--max-seq-len", type=int, default=0, help="0 = per-model default")
+    ap.add_argument("--phase", default="sft", choices=["sft", "rl", "dpo"])
     # `slime` is spelled out because 20_run_all.sh's BACKEND is verl|slime and passes it
     # straight through; slime IS the Megatron shape.
     ap.add_argument("--backend", default="megatron", choices=["megatron", "slime", "verl"],
@@ -282,11 +301,13 @@ def main() -> int:
         print(f"{'key':20s} {'params':>8s} {'bf16':>8s} {'layers':>7s} {'moe':>4s} "
               f"{'min_gpus':>9s} {'~min/epoch':>11s}  role")
         for k, m in reg["models"].items():
+            minimum = str(m["min_gpus"]) if "min_gpus" in m else "unmeasured"
             print(f"{k:20s} {m['params_b']:7.2f}B {m['bf16_gib']:6.1f}GiB {m['n_layers']:7d} "
-                  f"{'yes' if m.get('moe') else 'no':>4s} {m.get('min_gpus',32):9d} "
+                  f"{'yes' if m.get('moe') else 'no':>4s} {minimum:>9s} "
                   f"{m.get('est_epoch_minutes',0):11d}  {m.get('role','')[:52]}")
-        print("\nAll entries share one tokenizer and one training-render, so the published")
-        print("cap10/cap8 datasets and --loss-mask-type qwen3_5 apply unchanged to all of them.")
+        print("\nThe original five Qwen3.5 entries share the audited cap10/cap8 tokenization.")
+        print("Other families: re-export messages with the target tokenizer; SFT + DPO only,")
+        print("using --backend verl. New GPU memory/throughput estimates are unmeasured.")
         return 0
 
     if not args.key:

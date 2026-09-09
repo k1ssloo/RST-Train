@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Export pre-tokenized SFT data: `input_ids` + `loss_mask`, backend-agnostic.
 
+Selects a native mask profile from the target checkpoint's config.json. Qwen's
+audited mask is retained; other families use rst_common.tokenization. Every new
+export embeds its tokenizer/template/mask identity in the parquet itself.
+
     python scripts/15_export_pretokenized.py \
         --parquet   $BASE_FOLDER/sft-v1-cap10/rst_sft_train.parquet \
         --tokenizer $BASE_FOLDER/Qwen3.5-27B \
@@ -30,7 +34,7 @@ escape hatch is `ignore_input_ids_mismatch: True`, which silences the check
 rather than fixing the sequence. Feeding pre-tokenized data through verl's
 `data.custom_cls` avoids the whole problem.
 
-The mask implementation here is a straight port of
+The qwen3_5_mask implementation here is a straight port of
 `slime/utils/mask_utils.py::gen_multi_turn_loss_mask_qwen3_5`, and the script
 re-asserts slime's own contract (render-then-tokenize == tokenize-directly) on
 every row, so a divergence is a hard error rather than a silent difference.
@@ -42,6 +46,12 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from rst_common.tokenization import (  # noqa: E402
+    MASK_TYPES, resolve_mask_type, template_loss_mask, tokenization_identity,
+    write_tokenized_parquet,
+)
 
 ASSISTANT_HEADER = "<|im_start|>assistant\n"
 THINK_PREFIX = "<think>\n"
@@ -95,12 +105,21 @@ def qwen3_5_mask(tokenizer, messages: list[dict]) -> tuple[list[int], list[int]]
     return token_ids, loss_mask
 
 
+def tokenize_messages(tokenizer, messages: list[dict], mask_type: str) -> tuple[list[int], list[int]]:
+    """Preserve the audited Qwen mask; use native turn boundaries for other families."""
+    if mask_type == "qwen3_5":
+        return qwen3_5_mask(tokenizer, messages)
+    return template_loss_mask(tokenizer, messages, mask_type)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parquet", type=Path, required=True, help="messages parquet from 03_build_sft_data.py")
     ap.add_argument("--tokenizer", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--max-seq-len", type=int, default=32768)
+    ap.add_argument("--loss-mask-type", choices=("auto", *MASK_TYPES), default="auto",
+                    help="auto reads the target checkpoint's config.json")
     ap.add_argument("--strict", action="store_true",
                     help="abort on the first bad row instead of dropping it")
     args = ap.parse_args()
@@ -111,6 +130,8 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(str(args.tokenizer))
     if not tokenizer.is_fast:
         sys.exit("a fast tokenizer is required (offset mapping)")
+    mask_type = resolve_mask_type(args.tokenizer, args.loss_mask_type)
+    identity = tokenization_identity(tokenizer, mask_type)
     frame = pd.read_parquet(args.parquet)
     print(f"[in] {args.parquet}  rows={len(frame)}")
 
@@ -125,7 +146,7 @@ def main() -> int:
     for i, row in enumerate(frame.itertuples()):
         messages = [dict(m) for m in row.messages]
         try:
-            ids, mask = qwen3_5_mask(tokenizer, messages)
+            ids, mask = tokenize_messages(tokenizer, messages, mask_type)
         except ValueError as exc:
             dropped["contract" if "contract" in str(exc) else "error"] += 1
             if args.strict:
@@ -160,6 +181,8 @@ def main() -> int:
         trained_total += sum(mask)
         token_total += len(ids)
 
+    if not keep_idx:
+        sys.exit(f"no usable rows; nothing written. dropped={dropped}")
     kept = frame.iloc[keep_idx].reset_index(drop=True)
     out = pd.DataFrame(
         {
@@ -173,7 +196,7 @@ def main() -> int:
         }
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    out.to_parquet(args.out, index=False)
+    write_tokenized_parquet(out, args.out, identity)
 
     manifest = {
         "source_parquet": str(args.parquet),
@@ -185,7 +208,10 @@ def main() -> int:
         "trained_tokens": int(trained_total),
         "trained_fraction": round(trained_total / max(1, token_total), 4),
         "max_seq_len": args.max_seq_len,
-        "mask_source": "slime/utils/mask_utils.py::gen_multi_turn_loss_mask_qwen3_5 (ported)",
+        "loss_mask_type": mask_type,
+        "tokenization": identity,
+        "mask_source": ("slime/utils/mask_utils.py::gen_multi_turn_loss_mask_qwen3_5 (ported)"
+                        if mask_type == "qwen3_5" else "rst_common.tokenization.template_loss_mask"),
         "schema": {
             "input_ids": "list[int] — the exact tokens, whole-conversation render",
             "loss_mask": "list[int] — 1 = train on this token, 0 = context only",

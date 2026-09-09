@@ -73,10 +73,23 @@ NNODES="${NNODES:-4}"; NGPUS="${NGPUS:-8}"
 # the unit that holds a whole sequence under Ulysses is the SP GROUP, not one GPU. Omit it
 # and you launch with engine.ulysses_sequence_parallel_size=8 while still asking each GPU
 # for a whole 32K sequence's activations -- see the ULYSSES_SP block further down.
-eval "$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
+REGISTRY_CONFIG=$(python scripts/model_registry.py --key "$MODEL_KEY" --mem-class "$MEM_CLASS" \
           --backend verl --ulysses-sp "${ULYSSES_SP:-1}" \
           --gpus "$(( NNODES * NGPUS ))" --gpus-per-node "$NGPUS" \
-          --max-seq-len "${MAX_SEQ_LEN:-32768}" --shell)"
+          --max-seq-len "${MAX_SEQ_LEN:-0}" --shell) || exit 2
+eval "$REGISTRY_CONFIG"
+MODEL_PATH="${MODEL_PATH:-$BASE_FOLDER/$MODEL_DIR_NAME}"
+SFT_LAYOUT_ARGS=(data.pad_mode=no_padding model.use_liger=True)
+if [[ "$SFT_GENERIC" == "1" ]]; then
+  # Conservative Transformers forward; no Qwen packing/FLA/fused-forward assumptions.
+  SFT_LAYOUT_ARGS=(data.pad_mode=padding model.use_remove_padding=False
+                   model.use_liger=False model.use_fused_kernels=False)
+  FUSED_KERNELS="${FUSED_KERNELS:-0}"
+  if [[ "$FUSED_KERNELS" != "0" ]]; then
+    echo "Generic model profiles require FUSED_KERNELS=0; validate a model-specific kernel before enabling it." >&2
+    exit 2
+  fi
+fi
 
 # ---- multi-node rendezvous gate ---------------------------------------------
 # torchrun's defaults below are MASTER_ADDR=127.0.0.1 NODE_RANK=0, which is right for
@@ -168,7 +181,11 @@ if gib > 0.55 * card and not force:
 EOF_PY
 
 DATA_DIR="${DATA_DIR:-$BASE_FOLDER/sft-v1-cap10}"
-PRETOK="$DATA_DIR/pretokenized_train.parquet"
+if [[ "$SFT_GENERIC" == "1" ]]; then
+  PRETOK="${PRETOK:-$DATA_DIR/$MODEL_KEY/pretokenized_train.parquet}"
+else
+  PRETOK="${PRETOK:-$DATA_DIR/pretokenized_train.parquet}"
+fi
 RUN_NAME="${RUN_NAME:-${MODEL_KEY}-rst-sft-verl}"
 
 # The pre-tokenized file is what makes this path safe. verl's own multi-turn
@@ -179,7 +196,7 @@ if [[ ! -f "$PRETOK" ]]; then
   echo "building $PRETOK"
   python scripts/15_export_pretokenized.py \
     --parquet "$DATA_DIR/rst_sft_train.parquet" \
-    --tokenizer "$BASE_FOLDER/$MODEL_DIR_NAME" \
+    --tokenizer "$MODEL_PATH" --loss-mask-type "$LOSS_MASK_TYPE" \
     --out "$PRETOK" --max-seq-len "${MAX_SEQ_LEN:-32768}"
 fi
 
@@ -187,14 +204,20 @@ fi
 # may have been downloaded (HF ships its manifest under a different name) or copied,
 # and a manifest can be stale while the data is not. Checking the actual tensors is
 # both stronger and provenance-independent.
-python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" "${SFT_DATA_MANIFEST:-}" <<'EOF_PY'
+python - "$PRETOK" "${MAX_SEQ_LEN:-32768}" "${SFT_DATA_MANIFEST:-}" \
+         "$MODEL_PATH" "$LOSS_MASK_TYPE" <<'EOF_PY'
 import sys
 import pandas as pd
 
 sys.path.insert(0, "scripts")
 from sft_data_gate import validate_mask_fraction
+from rst_common.tokenization import resolve_mask_type, validate_tokenized_parquet
+from transformers import AutoTokenizer
 
 path, max_len, release_manifest = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+mask_type = resolve_mask_type(sys.argv[4], sys.argv[5])
+tokenizer = AutoTokenizer.from_pretrained(sys.argv[4])
+validate_tokenized_parquet(path, tokenizer, mask_type)
 df = pd.read_parquet(path)
 for col in ("input_ids", "loss_mask"):
     if col not in df.columns:
@@ -239,6 +262,7 @@ try:
     checked = validate_mask_fraction(
         path, rows=len(df), total_tokens=total, trained_tokens=trained,
         manifest=release_manifest or None,
+        legacy_band=mask_type == "qwen3_5",
     )
 except ValueError as exc:
     sys.exit(f"REFUSING TO TRAIN: {exc}")
@@ -385,7 +409,8 @@ fi
 # The PyPI wheel `flash-linear-attention` ships only fla/layers and fla/models -- no
 # fla/ops -- so `pip install flash-linear-attention` is NOT enough. Install from git:
 #   pip install --no-deps "flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention"
-python - "${ULYSSES_SP:-1}" "$BASE_FOLDER/$MODEL_DIR_NAME" "${ALLOW_UNSAFE_PACKING:-0}" "$*" \
+if [[ "$SFT_GENERIC" == "0" ]]; then
+python - "${ULYSSES_SP:-1}" "$MODEL_PATH" "${ALLOW_UNSAFE_PACKING:-0}" "$*" \
         <<'EOF_PY' || exit 2
 import inspect
 import json
@@ -484,6 +509,7 @@ print("Fix: pip install --no-deps 'flash-linear-attention @ "
       "or ALLOW_UNSAFE_PACKING=1 to accept the contamination knowingly.", file=sys.stderr)
 raise SystemExit(2)
 EOF_PY
+fi
 
 # `ulysses` is verl's sequence-parallel knob and the closest analogue to Megatron CP
 # if you do need to shard the sequence. verl 0.9.0 DOES implement it for this
@@ -535,16 +561,15 @@ VERL_ARGS=(
   data.train_files="$PRETOK"
   data.custom_cls.path="$REPO_DIR/verl_backend/rst_sft_dataset.py"
   data.custom_cls.name=RSTPretokenizedSFTDataset
-  data.pad_mode=no_padding
+  "${SFT_LAYOUT_ARGS[@]}"
   data.use_dynamic_bsz=True
   data.max_length="${MAX_SEQ_LEN:-32768}"
   data.max_token_len_per_gpu="$MAX_TOKENS_PER_GPU"
   data.train_batch_size="$GLOBAL_BATCH_SIZE"
   data.truncation=error
-  model.path="$BASE_FOLDER/$MODEL_DIR_NAME"
+  model.path="$MODEL_PATH"
   # model.use_liger=True stays: swiglu and rms_norm are still real savings. It is just
   # not what fuses the cross-entropy here -- FUSED_ARGS is.
-  model.use_liger=True
   "${FUSED_ARGS[@]+"${FUSED_ARGS[@]}"}"
   model.enable_gradient_checkpointing=True
   engine.strategy=fsdp2
@@ -558,7 +583,7 @@ VERL_ARGS=(
   optim.weight_decay=0.1
   optim.betas="[0.9,0.98]"
   trainer.total_epochs="$NUM_EPOCH"
-  trainer.project_name="${WANDB_PROJECT:-rst-qwen35-verl}"
+  trainer.project_name="${WANDB_PROJECT:-rst-verl}"
   trainer.experiment_name="$RUN_NAME"
   trainer.default_local_dir="$BASE_FOLDER/$RUN_NAME"
   trainer.logger="['console','wandb']"

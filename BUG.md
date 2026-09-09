@@ -940,6 +940,26 @@ unchanged DeepSeek filtering, full Opus fixture conversion, deterministic splits
 nullable parquet fields and complete rejection accounting. Full-source conversion
 and validation results are recorded in `TERMINAL_LEGO_TRAJECTORIES.md`.
 
+## BUG-27 — Qwen tokenization and kernels silently constrain other model families
+
+**Problem:** both SFT and DPO used the Qwen3.5 mask unconditionally. Switching
+checkpoints could reuse Qwen token IDs, require unrelated FLA kernels, or score
+the wrong distribution. Gemma's native forward soft-caps logits; DPO previously
+applied its LM head directly. Tied input/output embeddings also cannot be sharded
+as a head-only FSDP group before the decoder's embedding lookup.
+
+**Fix:** native whole-conversation text mask profiles, parquet-embedded tokenizer
+and template identity, backend capability checks, isolated per-model data paths,
+and conservative padded SFT defaults. DPO preserves conditional-generation model
+wrappers, includes soft-capping, groups both tied-weight entry points, and binds
+new reference caches to dataset hashes. Original Qwen mask behavior remains.
+
+**Regression tests:** `tests/test_model_tokenization.py`,
+`tests/test_multimodel_training.py`, `tests/test_model_registry.py`, and
+`tests/test_sft_data_gate.py`. Native tiny HF models check SFT loss and DPO
+gradients; the reference/training/save flow is exercised on CPU. Full-size GPU
+and distributed numerical validation remain separate. See `MODEL_SUPPORT.md`.
+
 ---
 
 # Open — not fixed, needs the cluster
