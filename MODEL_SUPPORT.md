@@ -6,7 +6,23 @@ Llama-3.2-3B-Instruct / Phi-4-mini-instruct 在七组历史数据上的完整执
 [`LLAMA_PHI_TRAINING_PROMPT.md`](LLAMA_PHI_TRAINING_PROMPT.md)：14 次独立 SFT +
 2 次 RST DPO，按历史实验明确覆盖为 32K，并要求先完成实际 GPU smoke。
 
+SmolLM3-3B / OLMo-3-7B-Instruct / Gemma-4-E2B-it 的远端执行指令见
+[`SMOLLM_OLMO_GEMMA_TRAINING_PROMPT.md`](SMOLLM_OLMO_GEMMA_TRAINING_PROMPT.md)：
+七组历史主数据集共 21 次独立 SFT + 3 次 RST DPO，单次训练始终单节点，
+每 200 个 optimizer steps 保存并额外保存 final；服务器历史正式矩阵有追加版本时补齐。
+
 ## 实验模型选择
+
+2026-09-10 的[本地全量验证报告](reports/cross_family_validation_20260910.md)覆盖
+SmolLM3、OLMo3、Gemma 4 E2B/E4B：437,581 行消息、三版共 4,019 个偏好对，
+并完成官方完整权重的 CPU 短窗口 SFT/DPO 检查。七组历史训练集均无模板或掩码错误；
+额外 Nemotron adapters 的 13 条保留标记样本须按报告中的逐模型清单排除。
+默认 8K 只能保留 Nemotron 约 7%–11% 的完整轨迹；复现实验应核对 32K 的保留量与显存。
+
+本次修复 **OLMo3 FSDP2 对 FP32 旋转位置编码输入的错误降精度（BUG-30）**，
+同时覆盖 SFT 与 DPO。真实 verl 回归和单 rank 小配置 GPU 检查通过；完整模型的
+32K GPU、多卡训练与质量收益仍待实测。SFT 使用本仓库 dataset 时自动安装精度修复，
+训练日志会输出 `[rst-fsdp2] OLMo3: preserve FP32 rotary inputs`。
 
 | MODEL_KEY | 官方 checkpoint | 参数量 / 代际 | 建议用途 |
 | --- | --- | --- | --- |
@@ -99,7 +115,7 @@ NNODES=1 NGPUS=2 MAX_SEQ_LEN=8192 bash scripts/33_run_dpo.sh
 - CPU 测试涵盖各家族的原生 SFT loss、分块 DPO logprob/梯度、Gemma soft-capping、共享 embedding 分组、DPO 单步训练/保存和失败路径。真实官方 tokenizer 另做本地检查；Llama 受访问许可限制，模板单测使用合成 tokenizer。
 - **尚未验证全尺寸 GPU/多卡训练与质量收益**。新增家族的 Megatron/slime 与在线 RL 会明确拒绝；本轮不宣称支持。
 
-本次全量 CPU 检查为 **488 passed、5 skipped**：3 项需要 verl、1 项需要显式开启
+2026-09-09 的全量 CPU 检查为 **488 passed、5 skipped**：3 项需要 verl、1 项需要显式开启
 GPU probe、1 项需要 Harbor。另在真实 verl 环境通过 7 项回归，并在 H100 上完成
 tiny Llama/Phi 的 FP32/BF16 FSDP2 反向传播、参数更新和峰值显存比较。
 这些是小模型检查，全尺寸 32K/多卡结论仍须实测；结果见
