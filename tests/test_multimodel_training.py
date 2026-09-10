@@ -114,7 +114,7 @@ def test_gemma_conditional_generation_loader_and_text_decoder_match():
         torch.testing.assert_close(actual, logp)
 
 
-def test_real_dpo_reference_training_save_and_stale_dataset_rejection():
+def check_dpo_reference_training_save_and_stale_dataset(family, profile):
     pd = need("pandas")
     need("pyarrow")
     need("torch")
@@ -122,8 +122,8 @@ def test_real_dpo_reference_training_save_and_stale_dataset_rejection():
 
     reference = load_script("18_dpo_ref_logprobs")
     train = load_script("19_train_dpo")
-    model = tiny_model("Llama")
-    tok = tokenizer()
+    model = tiny_model(family)
+    tok = tokenizer(profile)
     model.resize_token_embeddings(len(tok))
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -140,7 +140,7 @@ def test_real_dpo_reference_training_save_and_stale_dataset_rejection():
                          "chosen_n_tokens": 4, "rejected_n_tokens": 4,
                          "chosen_n_trained": 2, "rejected_n_trained": 2})
         path = pairs / "dpo_train.parquet"
-        identity = TOK.tokenization_identity(tok, "llama3")
+        identity = TOK.tokenization_identity(tok, profile)
         TOK.write_tokenized_parquet(pd.DataFrame(rows), path, identity)
         base_args = ["--pairs", str(pairs), "--model-path", str(checkpoint),
                      "--max-seq-len", "64", "--logit-chunk", "2"]
@@ -175,6 +175,22 @@ def test_real_dpo_reference_training_save_and_stale_dataset_rejection():
                 assert "pairs_sha256" in str(exc), str(exc)
             else:
                 raise AssertionError("stale reference logprobs were resumed")
+
+
+def test_real_dpo_reference_training_save_and_stale_dataset_rejection():
+    check_dpo_reference_training_save_and_stale_dataset("Llama", "llama3")
+
+
+def test_smollm_dpo_reference_training_save_and_stale_dataset_rejection():
+    check_dpo_reference_training_save_and_stale_dataset("SmolLM3", "smollm3")
+
+
+def test_olmo_dpo_reference_training_save_and_stale_dataset_rejection():
+    check_dpo_reference_training_save_and_stale_dataset("Olmo3", "olmo3")
+
+
+def test_gemma_dpo_reference_training_save_and_stale_dataset_rejection():
+    check_dpo_reference_training_save_and_stale_dataset("Gemma4", "gemma4")
 
 
 def test_tied_embeddings_share_one_fsdp_group_with_both_forward_entry_points():

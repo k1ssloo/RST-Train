@@ -1,0 +1,5118 @@
+{
+  "date": "2026-09-10",
+  "baseline_commit": "6890368",
+  "models": {
+    "smollm3-3b": {
+      "repository": "HuggingFaceTB/SmolLM3-3B",
+      "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/smollm3-3b",
+      "files": {
+        "tokenizer_config.json": "59a64b39f05ee0acf7479bbccf99a44d9e481c1a4a494eb03838ae3c35eb29be",
+        "config.json": "c72b1031274ff4626e434d0019e88e95a767460135db9ee492eb80652b786af1",
+        "special_tokens_map.json": "12403efb970f069ba62ddf3b66166a27254be4a198166b61ad1ee604bd3a4515",
+        "tokenizer.json": "7b6a500b662a34eb3f0374db856ba4ad7de4c81040571d78dc0d357238930005",
+        "chat_template.jinja": "3e0e275a527f249670056e0078e474eadbdd007c134b4fdfae5a7b3089702814",
+        "generation_config.json": "3458d62b3f9654f4bbe285223b0f4e5a1e67cae61c92bb6aeaadf04468bf9e01"
+      }
+    },
+    "olmo3-7b": {
+      "repository": "allenai/Olmo-3-7B-Instruct",
+      "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc",
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/olmo3-7b",
+      "files": {
+        "tokenizer_config.json": "f7a2753a4ff30657e452c8fef02b9a99a3b900ceb4c65a1e3fbea6a3bfab07a6",
+        "config.json": "6282ae812f9e494bd212e9a3233d68dc4d5f1e2569642423d2b79a3e80373ef8",
+        "special_tokens_map.json": "78afb564e81264029b25f9caf24bda2521d5bdaeff5cd3fdbc01d3da2e8ce2f2",
+        "tokenizer.json": "7738a25c46a6043a0e2e605138851baa450269ce9d800af6ca9bf6192e45510c",
+        "chat_template.jinja": "f5186d42d99c8a0445d37fd8a6c7ccf07fe3e24a29ce622d8bd245da9507b12b",
+        "generation_config.json": "745e78c16cc40cbb08827f7b7c9d5a888f7cb908236d4ca0443ff47f43a9d5af"
+      }
+    },
+    "gemma4-e2b": {
+      "repository": "google/gemma-4-E2B-it",
+      "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/gemma4-e2b",
+      "files": {
+        "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+        "config.json": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+        "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+        "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de"
+      }
+    },
+    "gemma4-e4b": {
+      "repository": "google/gemma-4-E4B-it",
+      "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/gemma4-e4b",
+      "files": {
+        "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+        "config.json": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+        "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+        "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+        "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de"
+      }
+    }
+  },
+  "messages_rows_checked_per_model": 437581,
+  "files_checked": 26,
+  "scope": {
+    "tokenization": "every row, no truncation; three distinct tokenizer fingerprints cover four registered checkpoints",
+    "sft_full_weights": "84 complete-row strict exports/dataset loads; full-weight CPU BF16 forward/backward on 64-token windows",
+    "dpo_full_weights": "12 genuine preference pairs, full-weight CPU BF16 forward/backward on 64-token windows; eight optimizer probes including SFT supplement",
+    "dpo_corpus": "4019 existing pairs/version memberships; both sides retokenized; reference scores not computed for the entire corpus",
+    "not_measured": [
+      "full-size 8K/32K GPU steps",
+      "multi-rank training/communication",
+      "complete epochs",
+      "quality gain or throughput"
+    ]
+  },
+  "datasets": [
+    {
+      "key": "rst-cap10",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/sft-v1-cap10/rst_sft_holdout.parquet",
+      "sha256": "09012a7884ed7b8953053e9741934a5cc4d5348b0d1a096d6cc882e5759f0cbc",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 118,
+          "usable_32768": 200,
+          "total_tokens": 1673372,
+          "trained_tokens": 543341,
+          "max_tokens": 27999,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 120,
+          "usable_32768": 200,
+          "total_tokens": 1659912,
+          "trained_tokens": 543333,
+          "max_tokens": 27890,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 97,
+          "usable_32768": 199,
+          "total_tokens": 1957551,
+          "trained_tokens": 621875,
+          "max_tokens": 32864,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 97,
+          "usable_32768": 199,
+          "total_tokens": 1957551,
+          "trained_tokens": 621875,
+          "max_tokens": 32864,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "rst-cap10",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/sft-v1-cap10/rst_sft_train.parquet",
+      "sha256": "1ba0cffab498483a86b12ba707a3fd37c5549e5270ac3960d0f135119659c39c",
+      "rows": 10578,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 10578,
+          "status": {
+            "ok": 10578
+          },
+          "errors": {},
+          "usable_8192": 6153,
+          "usable_32768": 10578,
+          "total_tokens": 90507503,
+          "trained_tokens": 30382400,
+          "max_tokens": 30099,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 10578,
+          "status": {
+            "ok": 10578
+          },
+          "errors": {},
+          "usable_8192": 6201,
+          "usable_32768": 10578,
+          "total_tokens": 89801232,
+          "trained_tokens": 30380078,
+          "max_tokens": 29890,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 10578,
+          "status": {
+            "ok": 10578
+          },
+          "errors": {},
+          "usable_8192": 5057,
+          "usable_32768": 10543,
+          "total_tokens": 105755970,
+          "trained_tokens": 34772235,
+          "max_tokens": 35429,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 10578,
+          "status": {
+            "ok": 10578
+          },
+          "errors": {},
+          "usable_8192": 5057,
+          "usable_32768": 10543,
+          "total_tokens": 105755970,
+          "trained_tokens": 34772235,
+          "max_tokens": 35429,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "ota",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/openthoughts-agent-v1/ota_sft_holdout.parquet",
+      "sha256": "ae5d05bac2055ebfd3a9f6d7bc99a3b0032aee22699829fcd570ea7c61aef3b9",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 119,
+          "usable_32768": 200,
+          "total_tokens": 1495294,
+          "trained_tokens": 469763,
+          "max_tokens": 27764,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 120,
+          "usable_32768": 200,
+          "total_tokens": 1485322,
+          "trained_tokens": 470157,
+          "max_tokens": 27679,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 104,
+          "usable_32768": 199,
+          "total_tokens": 1733544,
+          "trained_tokens": 531323,
+          "max_tokens": 33077,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 104,
+          "usable_32768": 199,
+          "total_tokens": 1733544,
+          "trained_tokens": 531323,
+          "max_tokens": 33077,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "ota",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/openthoughts-agent-v1/ota_sft_train.parquet",
+      "sha256": "ee2bb12d0e579d659d7fc34d3df0af4c94ce78a577230190f77a31e1d95040a8",
+      "rows": 14112,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 14112,
+          "status": {
+            "ok": 14112
+          },
+          "errors": {},
+          "usable_8192": 9489,
+          "usable_32768": 14112,
+          "total_tokens": 91200499,
+          "trained_tokens": 29512905,
+          "max_tokens": 30049,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 14112,
+          "status": {
+            "ok": 14112
+          },
+          "errors": {},
+          "usable_8192": 9559,
+          "usable_32768": 14112,
+          "total_tokens": 90438992,
+          "trained_tokens": 29515278,
+          "max_tokens": 30159,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 14112,
+          "status": {
+            "ok": 14112
+          },
+          "errors": {},
+          "usable_8192": 8434,
+          "usable_32768": 14086,
+          "total_tokens": 105452000,
+          "trained_tokens": 33424817,
+          "max_tokens": 35500,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 14112,
+          "status": {
+            "ok": 14112
+          },
+          "errors": {},
+          "usable_8192": 8434,
+          "usable_32768": 14086,
+          "total_tokens": 105452000,
+          "trained_tokens": 33424817,
+          "max_tokens": 35500,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "tmax",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/tmax-sft/tmax_sft_holdout.parquet",
+      "sha256": "ecb9545bca890d8c690d0918988427d282120ae6f9a29954b1fea17fef89d3f5",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 164,
+          "usable_32768": 200,
+          "total_tokens": 1301656,
+          "trained_tokens": 603935,
+          "max_tokens": 25790,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 163,
+          "usable_32768": 200,
+          "total_tokens": 1318204,
+          "trained_tokens": 622841,
+          "max_tokens": 26276,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 145,
+          "usable_32768": 200,
+          "total_tokens": 1565589,
+          "trained_tokens": 734786,
+          "max_tokens": 32046,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 145,
+          "usable_32768": 200,
+          "total_tokens": 1565589,
+          "trained_tokens": 734786,
+          "max_tokens": 32046,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "tmax",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/tmax-sft/tmax_sft_train.parquet",
+      "sha256": "50e4065a55fb9364c8346329037571f88bb5c258a82d6f064ff2b5b2ce91519f",
+      "rows": 5445,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 5445,
+          "status": {
+            "ok": 5445
+          },
+          "errors": {},
+          "usable_8192": 4181,
+          "usable_32768": 5445,
+          "total_tokens": 37670698,
+          "trained_tokens": 17318956,
+          "max_tokens": 28939,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 5445,
+          "status": {
+            "ok": 5445
+          },
+          "errors": {},
+          "usable_8192": 4137,
+          "usable_32768": 5445,
+          "total_tokens": 38181547,
+          "trained_tokens": 17840131,
+          "max_tokens": 29411,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 5445,
+          "status": {
+            "ok": 5445
+          },
+          "errors": {},
+          "usable_8192": 3613,
+          "usable_32768": 5425,
+          "total_tokens": 45538352,
+          "trained_tokens": 21125487,
+          "max_tokens": 36162,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 5445,
+          "status": {
+            "ok": 5445
+          },
+          "errors": {},
+          "usable_8192": 3613,
+          "usable_32768": 5425,
+          "total_tokens": 45538352,
+          "trained_tokens": 21125487,
+          "max_tokens": 36162,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "seta",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/seta-sft/sft-v1/seta_sft_holdout.parquet",
+      "sha256": "cd04b5ad3eeb00b0b2ec7b0d322989e9739082123b81d5704703f1a378450ce1",
+      "rows": 100,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 100,
+          "status": {
+            "ok": 100
+          },
+          "errors": {},
+          "usable_8192": 48,
+          "usable_32768": 100,
+          "total_tokens": 962408,
+          "trained_tokens": 494171,
+          "max_tokens": 22030,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 100,
+          "status": {
+            "ok": 100
+          },
+          "errors": {},
+          "usable_8192": 47,
+          "usable_32768": 100,
+          "total_tokens": 980782,
+          "trained_tokens": 511617,
+          "max_tokens": 22699,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 100,
+          "status": {
+            "ok": 100
+          },
+          "errors": {},
+          "usable_8192": 34,
+          "usable_32768": 100,
+          "total_tokens": 1184621,
+          "trained_tokens": 614457,
+          "max_tokens": 27254,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 100,
+          "status": {
+            "ok": 100
+          },
+          "errors": {},
+          "usable_8192": 34,
+          "usable_32768": 100,
+          "total_tokens": 1184621,
+          "trained_tokens": 614457,
+          "max_tokens": 27254,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "seta",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/seta-sft/sft-v1/seta_sft_train.parquet",
+      "sha256": "79c22879248575dafe9c8eebfd3010bff34ddec2224a2de1e35c2ad0e96be467",
+      "rows": 976,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 976,
+          "status": {
+            "ok": 976
+          },
+          "errors": {},
+          "usable_8192": 493,
+          "usable_32768": 976,
+          "total_tokens": 8955120,
+          "trained_tokens": 4522306,
+          "max_tokens": 24110,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 976,
+          "status": {
+            "ok": 976
+          },
+          "errors": {},
+          "usable_8192": 484,
+          "usable_32768": 976,
+          "total_tokens": 9124612,
+          "trained_tokens": 4684113,
+          "max_tokens": 24714,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 976,
+          "status": {
+            "ok": 976
+          },
+          "errors": {},
+          "usable_8192": 352,
+          "usable_32768": 976,
+          "total_tokens": 11005978,
+          "trained_tokens": 5605447,
+          "max_tokens": 29519,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 976,
+          "status": {
+            "ok": 976
+          },
+          "errors": {},
+          "usable_8192": 352,
+          "usable_32768": 976,
+          "total_tokens": 11005978,
+          "trained_tokens": 5605447,
+          "max_tokens": 29519,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "terminal-lego-deepseek",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/terminal-lego-trajectories/deepseek-sft-v1/terminal_lego_sft_holdout.parquet",
+      "sha256": "28e59f6cdbdd31f1929e90ded442cbdf4fe0a42fde27af1af80baabe429a88e6",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 130,
+          "usable_32768": 200,
+          "total_tokens": 1639589,
+          "trained_tokens": 662302,
+          "max_tokens": 29854,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 132,
+          "usable_32768": 200,
+          "total_tokens": 1628256,
+          "trained_tokens": 662211,
+          "max_tokens": 29778,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 111,
+          "usable_32768": 198,
+          "total_tokens": 1889228,
+          "trained_tokens": 750456,
+          "max_tokens": 35700,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 111,
+          "usable_32768": 198,
+          "total_tokens": 1889228,
+          "trained_tokens": 750456,
+          "max_tokens": 35700,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "terminal-lego-deepseek",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/terminal-lego-trajectories/deepseek-sft-v1/terminal_lego_sft_train.parquet",
+      "sha256": "1211b9eb483c1a725c37e2e63fafb0c804bd649c4f47d0e21bbc88a0aa528394",
+      "rows": 11938,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 11938,
+          "status": {
+            "ok": 11938
+          },
+          "errors": {},
+          "usable_8192": 7537,
+          "usable_32768": 11938,
+          "total_tokens": 98352939,
+          "trained_tokens": 40796443,
+          "max_tokens": 31183,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 11938,
+          "status": {
+            "ok": 11938
+          },
+          "errors": {},
+          "usable_8192": 7594,
+          "usable_32768": 11938,
+          "total_tokens": 97668555,
+          "trained_tokens": 40787224,
+          "max_tokens": 31103,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 11938,
+          "status": {
+            "ok": 11938
+          },
+          "errors": {},
+          "usable_8192": 6492,
+          "usable_32768": 11878,
+          "total_tokens": 113086358,
+          "trained_tokens": 46209477,
+          "max_tokens": 37219,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 11938,
+          "status": {
+            "ok": 11938
+          },
+          "errors": {},
+          "usable_8192": 6492,
+          "usable_32768": 11878,
+          "total_tokens": 113086358,
+          "trained_tokens": 46209477,
+          "max_tokens": 37219,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "terminal-lego-opus-unscored",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/terminal-lego-trajectories/opus-unscored-sft-v1/terminal_lego_sft_holdout.parquet",
+      "sha256": "d5280a1cf77fbce5eb94e3437b0aa6879f8f580d00ceb7bc21b3e6cf4fb5ee72",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 178,
+          "usable_32768": 200,
+          "total_tokens": 918025,
+          "trained_tokens": 317849,
+          "max_tokens": 19424,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 179,
+          "usable_32768": 200,
+          "total_tokens": 909480,
+          "trained_tokens": 317695,
+          "max_tokens": 19365,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 167,
+          "usable_32768": 200,
+          "total_tokens": 1043396,
+          "trained_tokens": 366566,
+          "max_tokens": 21550,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 167,
+          "usable_32768": 200,
+          "total_tokens": 1043396,
+          "trained_tokens": 366566,
+          "max_tokens": 21550,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "terminal-lego-opus-unscored",
+      "category": "historical_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/terminal-lego-trajectories/opus-unscored-sft-v1/terminal_lego_sft_train.parquet",
+      "sha256": "de1398241d02e3e33a4c4863c1507f9b2c22ef0d37fa2bfd008c82c6264117c6",
+      "rows": 8066,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 8066,
+          "status": {
+            "ok": 8066
+          },
+          "errors": {},
+          "usable_8192": 7059,
+          "usable_32768": 8066,
+          "total_tokens": 39296274,
+          "trained_tokens": 14182686,
+          "max_tokens": 30319,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 8066,
+          "status": {
+            "ok": 8066
+          },
+          "errors": {},
+          "usable_8192": 7070,
+          "usable_32768": 8066,
+          "total_tokens": 38950599,
+          "trained_tokens": 14176375,
+          "max_tokens": 30210,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 8066,
+          "status": {
+            "ok": 8066
+          },
+          "errors": {},
+          "usable_8192": 6652,
+          "usable_32768": 8063,
+          "total_tokens": 44832246,
+          "trained_tokens": 16375640,
+          "max_tokens": 34970,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 8066,
+          "status": {
+            "ok": 8066
+          },
+          "errors": {},
+          "usable_8192": 6652,
+          "usable_32768": 8063,
+          "total_tokens": 44832246,
+          "trained_tokens": 16375640,
+          "max_tokens": 34970,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "rst-v1",
+      "category": "additional_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/sft-v1/rst_sft_holdout.parquet",
+      "sha256": "55c37aa94c4d6ecf0dfd03f1b944a3e3a9d165be9ed62d84117aa127f12776f1",
+      "rows": 200,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 124,
+          "usable_32768": 200,
+          "total_tokens": 1645298,
+          "trained_tokens": 554680,
+          "max_tokens": 26811,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 125,
+          "usable_32768": 200,
+          "total_tokens": 1630502,
+          "trained_tokens": 554510,
+          "max_tokens": 26642,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 104,
+          "usable_32768": 200,
+          "total_tokens": 1921008,
+          "trained_tokens": 634112,
+          "max_tokens": 31437,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 200,
+          "status": {
+            "ok": 200
+          },
+          "errors": {},
+          "usable_8192": 104,
+          "usable_32768": 200,
+          "total_tokens": 1921008,
+          "trained_tokens": 634112,
+          "max_tokens": 31437,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "rst-v1",
+      "category": "additional_sft",
+      "split": "train",
+      "path": "/home/lys/Desktop/RST-Train/data/sft-v1/rst_sft_train.parquet",
+      "sha256": "7fb3ab41d2a8a2c93a51c485e89020b1d5aacd0f30871754223e95dde6a0b2af",
+      "rows": 8686,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 8686,
+          "status": {
+            "ok": 8686
+          },
+          "errors": {},
+          "usable_8192": 5012,
+          "usable_32768": 8686,
+          "total_tokens": 74644380,
+          "trained_tokens": 25069534,
+          "max_tokens": 30099,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 8686,
+          "status": {
+            "ok": 8686
+          },
+          "errors": {},
+          "usable_8192": 5051,
+          "usable_32768": 8686,
+          "total_tokens": 74067101,
+          "trained_tokens": 25067936,
+          "max_tokens": 29890,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 8686,
+          "status": {
+            "ok": 8686
+          },
+          "errors": {},
+          "usable_8192": 4125,
+          "usable_32768": 8656,
+          "total_tokens": 87233639,
+          "trained_tokens": 28696161,
+          "max_tokens": 35421,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 8686,
+          "status": {
+            "ok": 8686
+          },
+          "errors": {},
+          "usable_8192": 4125,
+          "usable_32768": 8656,
+          "total_tokens": 87233639,
+          "trained_tokens": 28696161,
+          "max_tokens": 35421,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "terminalevo-audit-v18",
+      "category": "unreleased_audit_pool",
+      "split": "audit",
+      "path": "/home/lys/Desktop/RST-Train/outputs/trajectory-evolution-v1/global-audit-v18/rollout_sft_audit.parquet",
+      "sha256": "176262372e7e8df7e2387ef68cd3255199257b1e4e955e87e37b702a2ff23842",
+      "rows": 526,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 526,
+          "status": {
+            "ok": 526
+          },
+          "errors": {},
+          "usable_8192": 514,
+          "usable_32768": 526,
+          "total_tokens": 2244417,
+          "trained_tokens": 773544,
+          "max_tokens": 10677,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 526,
+          "status": {
+            "ok": 526
+          },
+          "errors": {},
+          "usable_8192": 514,
+          "usable_32768": 526,
+          "total_tokens": 2219475,
+          "trained_tokens": 773074,
+          "max_tokens": 10626,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 526,
+          "status": {
+            "ok": 526
+          },
+          "errors": {},
+          "usable_8192": 505,
+          "usable_32768": 526,
+          "total_tokens": 2539568,
+          "trained_tokens": 881758,
+          "max_tokens": 11834,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 526,
+          "status": {
+            "ok": 526
+          },
+          "errors": {},
+          "usable_8192": 505,
+          "usable_32768": 526,
+          "total_tokens": 2539568,
+          "trained_tokens": 881758,
+          "max_tokens": 11834,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "swegym-raw",
+      "category": "raw_not_training_release",
+      "split": "shard0",
+      "path": "/home/lys/Desktop/RST-Train/data/swegym/rollouts/shard0.parquet",
+      "sha256": "29d038b0c34eb0e50a19730f3cf3daa5a156c2d7e9c871c01b568acbab6aae07",
+      "rows": 2019,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 2019,
+          "status": {
+            "error": 2019
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2019
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "olmo3-7b": {
+          "rows_checked": 2019,
+          "status": {
+            "error": 2019
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2019
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e2b": {
+          "rows_checked": 2019,
+          "status": {
+            "error": 2019
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2019
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e4b": {
+          "rows_checked": 2019,
+          "status": {
+            "error": 2019
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2019
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        }
+      }
+    },
+    {
+      "key": "swegym-raw",
+      "category": "raw_not_training_release",
+      "split": "shard1",
+      "path": "/home/lys/Desktop/RST-Train/data/swegym/rollouts/shard1.parquet",
+      "sha256": "64a5d435b777a47e2544de1cc3bf61e5452bab1237fc43e70220e13f2f901516",
+      "rows": 2018,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "olmo3-7b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e2b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e4b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        }
+      }
+    },
+    {
+      "key": "swegym-raw",
+      "category": "raw_not_training_release",
+      "split": "shard2",
+      "path": "/home/lys/Desktop/RST-Train/data/swegym/rollouts/shard2.parquet",
+      "sha256": "1e388384f0dbf65421b53ef37d4f92c10e1e458f597bf61326fa047b8e21b597",
+      "rows": 2018,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "olmo3-7b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e2b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e4b": {
+          "rows_checked": 2018,
+          "status": {
+            "error": 2018
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 2018
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        }
+      }
+    },
+    {
+      "key": "termigen-raw",
+      "category": "raw_not_training_release",
+      "split": "source-train",
+      "path": "/home/lys/Desktop/RST-Train/data/termigen/source-train.parquet",
+      "sha256": "ab33b4db8c16c5b5d54f649d5286b81a8916228c7a17e4cc4cdd9cc5436b70f4",
+      "rows": 3556,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 3556,
+          "status": {
+            "no_trained_tokens": 3556
+          },
+          "errors": {},
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 4092093,
+          "trained_tokens": 0,
+          "max_tokens": 10464,
+          "first_usable_row": null,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 3556,
+          "status": {
+            "no_trained_tokens": 3556
+          },
+          "errors": {},
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 3971359,
+          "trained_tokens": 0,
+          "max_tokens": 10432,
+          "first_usable_row": null,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 3556,
+          "status": {
+            "no_trained_tokens": 3556
+          },
+          "errors": {},
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 4312970,
+          "trained_tokens": 0,
+          "max_tokens": 8233,
+          "first_usable_row": null,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 3556,
+          "status": {
+            "no_trained_tokens": 3556
+          },
+          "errors": {},
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 4312970,
+          "trained_tokens": 0,
+          "max_tokens": 8233,
+          "first_usable_row": null,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "tmax-raw",
+      "category": "raw_not_training_release",
+      "split": "source-only-success",
+      "path": "/home/lys/Desktop/RST-Train/data/tmax-sft/source-only-success.parquet",
+      "sha256": "7507b499a0e9289086bb4befa4344f81c5d2ca91698e2ea22b81cc60834e38a5",
+      "rows": 5795,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 5795,
+          "status": {
+            "error": 5795
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 5795
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "olmo3-7b": {
+          "rows_checked": 5795,
+          "status": {
+            "error": 5795
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 5795
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e2b": {
+          "rows_checked": 5795,
+          "status": {
+            "error": 5795
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 5795
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        },
+        "gemma4-e4b": {
+          "rows_checked": 5795,
+          "status": {
+            "error": 5795
+          },
+          "errors": {
+            "ValueError: native tools/reasoning fields require an explicit conversion to text": 5795
+          },
+          "usable_8192": 0,
+          "usable_32768": 0,
+          "total_tokens": 0,
+          "trained_tokens": 0,
+          "max_tokens": 0,
+          "first_usable_row": null,
+          "first_error_row": 0
+        }
+      }
+    },
+    {
+      "key": "nemo",
+      "category": "historical_sft",
+      "split": "holdout",
+      "path": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_holdout.parquet",
+      "sha256": "95ce745cf9cd18a192eaeb72b5dfa3d281c0d64334369057815a7f7ae211ff07",
+      "rows": 401,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 401,
+          "status": {
+            "ok": 401
+          },
+          "errors": {},
+          "usable_8192": 110,
+          "usable_32768": 391,
+          "total_tokens": 5566639,
+          "trained_tokens": 3404919,
+          "max_tokens": 40884,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 401,
+          "status": {
+            "ok": 401
+          },
+          "errors": {},
+          "usable_8192": 112,
+          "usable_32768": 391,
+          "total_tokens": 5554843,
+          "trained_tokens": 3412861,
+          "max_tokens": 40821,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 401,
+          "status": {
+            "ok": 401
+          },
+          "errors": {},
+          "usable_8192": 83,
+          "usable_32768": 383,
+          "total_tokens": 6297267,
+          "trained_tokens": 3772493,
+          "max_tokens": 49576,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 401,
+          "status": {
+            "ok": 401
+          },
+          "errors": {},
+          "usable_8192": 83,
+          "usable_32768": 383,
+          "total_tokens": 6297267,
+          "trained_tokens": 3772493,
+          "max_tokens": 49576,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "nemo",
+      "category": "historical_sft",
+      "split": "train_skill_based_easy",
+      "path": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_train_skill_based_easy.parquet",
+      "sha256": "fd50d877a4438baa5c2a2f39cc0066c4eaf6721724042f92721aee12c471027e",
+      "rows": 44692,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 44692,
+          "status": {
+            "ok": 44692
+          },
+          "errors": {},
+          "usable_8192": 11268,
+          "usable_32768": 44494,
+          "total_tokens": 530752053,
+          "trained_tokens": 290788047,
+          "max_tokens": 47669,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 44692,
+          "status": {
+            "ok": 44692
+          },
+          "errors": {},
+          "usable_8192": 11405,
+          "usable_32768": 44493,
+          "total_tokens": 529561238,
+          "trained_tokens": 291431959,
+          "max_tokens": 47674,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 44692,
+          "status": {
+            "ok": 44692
+          },
+          "errors": {},
+          "usable_8192": 7470,
+          "usable_32768": 44304,
+          "total_tokens": 604727250,
+          "trained_tokens": 325492700,
+          "max_tokens": 52315,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 44692,
+          "status": {
+            "ok": 44692
+          },
+          "errors": {},
+          "usable_8192": 7470,
+          "usable_32768": 44304,
+          "total_tokens": 604727250,
+          "trained_tokens": 325492700,
+          "max_tokens": 52315,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "nemo",
+      "category": "historical_sft",
+      "split": "train_skill_based_medium",
+      "path": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_train_skill_based_medium.parquet",
+      "sha256": "e1af86c2e59cbbc76d25c7420c1c0376d61ca905fff2255de9f40b1b379324b8",
+      "rows": 88912,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 88912,
+          "status": {
+            "ok": 88912
+          },
+          "errors": {},
+          "usable_8192": 2827,
+          "usable_32768": 88718,
+          "total_tokens": 1515082001,
+          "trained_tokens": 818760249,
+          "max_tokens": 42185,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 88912,
+          "status": {
+            "ok": 88912
+          },
+          "errors": {},
+          "usable_8192": 2868,
+          "usable_32768": 88721,
+          "total_tokens": 1512108302,
+          "trained_tokens": 820107821,
+          "max_tokens": 42129,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 88912,
+          "status": {
+            "ok": 88912
+          },
+          "errors": {},
+          "usable_8192": 2003,
+          "usable_32768": 86174,
+          "total_tokens": 1747498353,
+          "trained_tokens": 924620947,
+          "max_tokens": 48066,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 88912,
+          "status": {
+            "ok": 88912
+          },
+          "errors": {},
+          "usable_8192": 2003,
+          "usable_32768": 86174,
+          "total_tokens": 1747498353,
+          "trained_tokens": 924620947,
+          "max_tokens": 48066,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "nemo",
+      "category": "historical_sft",
+      "split": "train_skill_based_mixed",
+      "path": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_train_skill_based_mixed.parquet",
+      "sha256": "27ffb03db0b633f1dbbcb437f17cb5e59c8e0e38842c9c3333340111c60de8e6",
+      "rows": 5671,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 5671,
+          "status": {
+            "ok": 5671
+          },
+          "errors": {},
+          "usable_8192": 843,
+          "usable_32768": 5671,
+          "total_tokens": 67657449,
+          "trained_tokens": 35701986,
+          "max_tokens": 25885,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 5671,
+          "status": {
+            "ok": 5671
+          },
+          "errors": {},
+          "usable_8192": 860,
+          "usable_32768": 5671,
+          "total_tokens": 67475884,
+          "trained_tokens": 35765490,
+          "max_tokens": 25878,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 5671,
+          "status": {
+            "ok": 5671
+          },
+          "errors": {},
+          "usable_8192": 541,
+          "usable_32768": 5671,
+          "total_tokens": 77749236,
+          "trained_tokens": 40356777,
+          "max_tokens": 29838,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 5671,
+          "status": {
+            "ok": 5671
+          },
+          "errors": {},
+          "usable_8192": 541,
+          "usable_32768": 5671,
+          "total_tokens": 77749236,
+          "trained_tokens": 40356777,
+          "max_tokens": 29838,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    },
+    {
+      "key": "nemo-adapters",
+      "category": "additional_sft",
+      "split": "train_dataset_adapters",
+      "path": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_train_dataset_adapters.parquet",
+      "sha256": "86e5a1057b201cb1dec6e6e938badec1d6ad16cfc136e6b879a36e1ff8b820a6",
+      "rows": 220381,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 220381,
+          "status": {
+            "ok": 220380,
+            "error": 1
+          },
+          "errors": {
+            "ValueError: reserved chat marker inside message content": 1
+          },
+          "usable_8192": 79324,
+          "usable_32768": 208275,
+          "total_tokens": 3044997010,
+          "trained_tokens": 2029070836,
+          "max_tokens": 74999,
+          "first_usable_row": 0,
+          "first_error_row": 209817
+        },
+        "olmo3-7b": {
+          "rows_checked": 220381,
+          "status": {
+            "ok": 220379,
+            "error": 2
+          },
+          "errors": {
+            "ValueError: reserved chat marker inside message content": 2
+          },
+          "usable_8192": 79578,
+          "usable_32768": 208321,
+          "total_tokens": 3039576544,
+          "trained_tokens": 2034962627,
+          "max_tokens": 74909,
+          "first_usable_row": 0,
+          "first_error_row": 193057
+        },
+        "gemma4-e2b": {
+          "rows_checked": 220381,
+          "status": {
+            "ok": 220370,
+            "error": 11
+          },
+          "errors": {
+            "ValueError: reserved chat marker inside message content": 11
+          },
+          "usable_8192": 70122,
+          "usable_32768": 201100,
+          "total_tokens": 3401147527,
+          "trained_tokens": 2223433759,
+          "max_tokens": 83760,
+          "first_usable_row": 0,
+          "first_error_row": 191299
+        },
+        "gemma4-e4b": {
+          "rows_checked": 220381,
+          "status": {
+            "ok": 220370,
+            "error": 11
+          },
+          "errors": {
+            "ValueError: reserved chat marker inside message content": 11
+          },
+          "usable_8192": 70122,
+          "usable_32768": 201100,
+          "total_tokens": 3401147527,
+          "trained_tokens": 2223433759,
+          "max_tokens": 83760,
+          "first_usable_row": 0,
+          "first_error_row": 191299
+        }
+      }
+    },
+    {
+      "key": "swegym-sft-source",
+      "category": "raw_not_training_release",
+      "split": "train",
+      "path": "/home/lys/.cache/huggingface/hub/datasets--SWE-Gym--OpenHands-SFT-Trajectories/snapshots/4aaa5a4a4b5861f4799d2336908760c190ac3b17/data/train.success.oss-00000-of-00001.parquet",
+      "sha256": "ea4bf37de020e165c5210bedddeef523d8834a89a35a8c65fec24f76f0eae4f1",
+      "rows": 491,
+      "models": {
+        "smollm3-3b": {
+          "rows_checked": 491,
+          "status": {
+            "ok": 491
+          },
+          "errors": {},
+          "usable_8192": 57,
+          "usable_32768": 458,
+          "total_tokens": 8570656,
+          "trained_tokens": 1278223,
+          "max_tokens": 71496,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "olmo3-7b": {
+          "rows_checked": 491,
+          "status": {
+            "ok": 491
+          },
+          "errors": {},
+          "usable_8192": 58,
+          "usable_32768": 458,
+          "total_tokens": 8516526,
+          "trained_tokens": 1277815,
+          "max_tokens": 71261,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e2b": {
+          "rows_checked": 491,
+          "status": {
+            "ok": 491
+          },
+          "errors": {},
+          "usable_8192": 35,
+          "usable_32768": 425,
+          "total_tokens": 10554349,
+          "trained_tokens": 1484358,
+          "max_tokens": 92085,
+          "first_usable_row": 0,
+          "first_error_row": null
+        },
+        "gemma4-e4b": {
+          "rows_checked": 491,
+          "status": {
+            "ok": 491
+          },
+          "errors": {},
+          "usable_8192": 35,
+          "usable_32768": 425,
+          "total_tokens": 10554349,
+          "trained_tokens": 1484358,
+          "max_tokens": 92085,
+          "first_usable_row": 0,
+          "first_error_row": null
+        }
+      }
+    }
+  ],
+  "dpo": {
+    "scope": "every existing preference pair, both sides; re-encoded from original messages; no synthetic pairs",
+    "models": {
+      "smollm3-3b": {
+        "repository": "HuggingFaceTB/SmolLM3-3B",
+        "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+        "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/smollm3-3b",
+        "files": {
+          "tokenizer_config.json": "59a64b39f05ee0acf7479bbccf99a44d9e481c1a4a494eb03838ae3c35eb29be",
+          "config.json": "c72b1031274ff4626e434d0019e88e95a767460135db9ee492eb80652b786af1",
+          "special_tokens_map.json": "12403efb970f069ba62ddf3b66166a27254be4a198166b61ad1ee604bd3a4515",
+          "tokenizer.json": "7b6a500b662a34eb3f0374db856ba4ad7de4c81040571d78dc0d357238930005",
+          "chat_template.jinja": "3e0e275a527f249670056e0078e474eadbdd007c134b4fdfae5a7b3089702814",
+          "generation_config.json": "3458d62b3f9654f4bbe285223b0f4e5a1e67cae61c92bb6aeaadf04468bf9e01"
+        }
+      },
+      "olmo3-7b": {
+        "repository": "allenai/Olmo-3-7B-Instruct",
+        "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc",
+        "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/olmo3-7b",
+        "files": {
+          "tokenizer_config.json": "f7a2753a4ff30657e452c8fef02b9a99a3b900ceb4c65a1e3fbea6a3bfab07a6",
+          "config.json": "6282ae812f9e494bd212e9a3233d68dc4d5f1e2569642423d2b79a3e80373ef8",
+          "special_tokens_map.json": "78afb564e81264029b25f9caf24bda2521d5bdaeff5cd3fdbc01d3da2e8ce2f2",
+          "tokenizer.json": "7738a25c46a6043a0e2e605138851baa450269ce9d800af6ca9bf6192e45510c",
+          "chat_template.jinja": "f5186d42d99c8a0445d37fd8a6c7ccf07fe3e24a29ce622d8bd245da9507b12b",
+          "generation_config.json": "745e78c16cc40cbb08827f7b7c9d5a888f7cb908236d4ca0443ff47f43a9d5af"
+        }
+      },
+      "gemma4-e2b": {
+        "repository": "google/gemma-4-E2B-it",
+        "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+        "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/gemma4-e2b",
+        "files": {
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+          "config.json": "1b28f3d2c3100f6c594754b81107428bd7b822a7f48272ca681dae9d2ec38330",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de"
+        }
+      },
+      "gemma4-e4b": {
+        "repository": "google/gemma-4-E4B-it",
+        "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+        "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/models/gemma4-e4b",
+        "files": {
+          "tokenizer_config.json": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+          "config.json": "33b10c02df3c2e8536cf323d29d53262aaa2f4d11dbe19bc729373fbe90295d4",
+          "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+          "chat_template.jinja": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+          "generation_config.json": "d4226bbe3117d2d253ba4609720ba82c6c4ce4627a9a6ae05387c78983ac03de"
+        }
+      }
+    },
+    "gemma4-e4b_alias": "gemma4-e2b (identical verified tokenization fingerprint)",
+    "results": [
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-smoke",
+        "split": "holdout",
+        "rows_in": 4,
+        "status": {
+          "usable_32768": 4
+        },
+        "usable_8192": 4,
+        "source_sha256": "3fe38ef537842872bb5946e4473893977dc583403d8b3c174bc9f9de11a39db1",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-smoke/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-smoke",
+        "split": "train",
+        "rows_in": 12,
+        "status": {
+          "usable_32768": 12
+        },
+        "usable_8192": 12,
+        "source_sha256": "ea77b67e977903eb617552b1c2137ed967da7f4a65bc08c7c5467c69827baff3",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-smoke/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-v1",
+        "split": "holdout",
+        "rows_in": 102,
+        "status": {
+          "usable_32768": 102
+        },
+        "usable_8192": 54,
+        "source_sha256": "f77575387c01d33e1ebf69aa6070b89a27725459c3375a331beff053e2d4ef87",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-v1/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-v1",
+        "split": "train",
+        "rows_in": 1228,
+        "status": {
+          "usable_32768": 1228
+        },
+        "usable_8192": 591,
+        "source_sha256": "f03f0cc601478d12c6d20c581090776892479721e9c6f7f4fa77253dc9de2dcd",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-v1/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-v2",
+        "split": "holdout",
+        "rows_in": 225,
+        "status": {
+          "usable_32768": 225
+        },
+        "usable_8192": 121,
+        "source_sha256": "423607d3b27c87e0b1d7ce9aec7fcabe3a7319e8df65998e476b3dd371395360",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-v2/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "smollm3-3b",
+        "dataset": "dpo-v2",
+        "split": "train",
+        "rows_in": 2448,
+        "status": {
+          "usable_32768": 2448
+        },
+        "usable_8192": 1236,
+        "source_sha256": "adfc4484c6d17d398c7fb5b877f1a6eb73418fed1e9ad620c8840aca335c4e31",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "smollm3",
+          "tokenizer_sha256": "0ebf36a60c244c7784d675917c357e6cb64d00c807075cf6edcd89607da5a8bf",
+          "special_tokens": {
+            "eos_token": "<|im_end|>",
+            "pad_token": "<|im_end|>"
+          },
+          "chat_template_sha256": "b7c4e4cac854a329634dc25d8104006d1982292ad0da4a4bb69a640026ad5071",
+          "chat_template_options": {
+            "enable_thinking": false,
+            "template_date": "2026-09-09"
+          },
+          "fingerprint": "f05976867a93e16c6811e4d2065d455042b0c83d1a1ff428515a033db0ebb5a9"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/smollm3-3b/dpo-v2/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-smoke",
+        "split": "holdout",
+        "rows_in": 4,
+        "status": {
+          "usable_32768": 4
+        },
+        "usable_8192": 4,
+        "source_sha256": "3fe38ef537842872bb5946e4473893977dc583403d8b3c174bc9f9de11a39db1",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-smoke/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-smoke",
+        "split": "train",
+        "rows_in": 12,
+        "status": {
+          "usable_32768": 12
+        },
+        "usable_8192": 12,
+        "source_sha256": "ea77b67e977903eb617552b1c2137ed967da7f4a65bc08c7c5467c69827baff3",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-smoke/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-v1",
+        "split": "holdout",
+        "rows_in": 102,
+        "status": {
+          "usable_32768": 102
+        },
+        "usable_8192": 55,
+        "source_sha256": "f77575387c01d33e1ebf69aa6070b89a27725459c3375a331beff053e2d4ef87",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-v1/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-v1",
+        "split": "train",
+        "rows_in": 1228,
+        "status": {
+          "usable_32768": 1228
+        },
+        "usable_8192": 598,
+        "source_sha256": "f03f0cc601478d12c6d20c581090776892479721e9c6f7f4fa77253dc9de2dcd",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-v1/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-v2",
+        "split": "holdout",
+        "rows_in": 225,
+        "status": {
+          "usable_32768": 225
+        },
+        "usable_8192": 122,
+        "source_sha256": "423607d3b27c87e0b1d7ce9aec7fcabe3a7319e8df65998e476b3dd371395360",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-v2/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "olmo3-7b",
+        "dataset": "dpo-v2",
+        "split": "train",
+        "rows_in": 2448,
+        "status": {
+          "usable_32768": 2448
+        },
+        "usable_8192": 1251,
+        "source_sha256": "adfc4484c6d17d398c7fb5b877f1a6eb73418fed1e9ad620c8840aca335c4e31",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "olmo3",
+          "tokenizer_sha256": "07c623e045674b8f66955eb57cda283b7a044399e022baf4307a70f08d276117",
+          "special_tokens": {
+            "bos_token": "<|endoftext|>",
+            "eos_token": "<|endoftext|>",
+            "unk_token": "<|endoftext|>",
+            "pad_token": "<|pad|>"
+          },
+          "chat_template_sha256": "5234e79cda390e4fb2d7a5a9f071699308edfda329b71eb6cee6cf596918ef84",
+          "chat_template_options": {},
+          "fingerprint": "5492c5271218328dc42f4f6b90e5d96fd7c1eb1b8fb9e1d365907638c17f98c1"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/olmo3-7b/dpo-v2/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-smoke",
+        "split": "holdout",
+        "rows_in": 4,
+        "status": {
+          "usable_32768": 4
+        },
+        "usable_8192": 4,
+        "source_sha256": "3fe38ef537842872bb5946e4473893977dc583403d8b3c174bc9f9de11a39db1",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-smoke/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-smoke",
+        "split": "train",
+        "rows_in": 12,
+        "status": {
+          "usable_32768": 12
+        },
+        "usable_8192": 12,
+        "source_sha256": "ea77b67e977903eb617552b1c2137ed967da7f4a65bc08c7c5467c69827baff3",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-smoke/dpo_train.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-v1",
+        "split": "holdout",
+        "rows_in": 102,
+        "status": {
+          "usable_32768": 102
+        },
+        "usable_8192": 42,
+        "source_sha256": "f77575387c01d33e1ebf69aa6070b89a27725459c3375a331beff053e2d4ef87",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-v1/dpo_holdout.parquet",
+        "failures": [],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-v1",
+        "split": "train",
+        "rows_in": 1228,
+        "status": {
+          "usable_32768": 1215,
+          "too_long_32768": 13
+        },
+        "usable_8192": 468,
+        "source_sha256": "f03f0cc601478d12c6d20c581090776892479721e9c6f7f4fa77253dc9de2dcd",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-v1/dpo_train.parquet",
+        "failures": [
+          {
+            "row": 6,
+            "pair_id": "018b6d1878c05228454854a6e6de1f1624228e7f0f3f43e14360345aebe01a78",
+            "status": "too_long_32768",
+            "lengths": [
+              33365,
+              30992
+            ]
+          },
+          {
+            "row": 87,
+            "pair_id": "1679c8aaa57d57ea1863e274ec6eb52bab8bbfef929fa316c900cdcf6d342ab1",
+            "status": "too_long_32768",
+            "lengths": [
+              20648,
+              34486
+            ]
+          },
+          {
+            "row": 401,
+            "pair_id": "57789c26df9a9246267db33114971673aca2cf6ae3a8f55c36b9892c82d39b93",
+            "status": "too_long_32768",
+            "lengths": [
+              35921,
+              26365
+            ]
+          },
+          {
+            "row": 443,
+            "pair_id": "60af3a6ac97f209a047fb0d047071acd82c9435ae47452bfbbc92873201372b4",
+            "status": "too_long_32768",
+            "lengths": [
+              32903,
+              33761
+            ]
+          },
+          {
+            "row": 576,
+            "pair_id": "7ab2ac406bbdf9b22859d54fc65daa4ab42835f4108cc6b8faa181e5b65e421c",
+            "status": "too_long_32768",
+            "lengths": [
+              33416,
+              33506
+            ]
+          },
+          {
+            "row": 779,
+            "pair_id": "a3450aa5112b53456a6694b5cb4c13a311608242457a98201b8ee2010f0ca20a",
+            "status": "too_long_32768",
+            "lengths": [
+              33705,
+              19660
+            ]
+          },
+          {
+            "row": 811,
+            "pair_id": "ab177429e84dc68f20bcfc6da445c953bb14f19b6a333b5287f36734c4dc6908",
+            "status": "too_long_32768",
+            "lengths": [
+              32816,
+              30264
+            ]
+          },
+          {
+            "row": 862,
+            "pair_id": "b1e663011045368a713ef2d6fd2372ee47ffc03b4118903d6a1f0adeda26ebae",
+            "status": "too_long_32768",
+            "lengths": [
+              25846,
+              34380
+            ]
+          },
+          {
+            "row": 955,
+            "pair_id": "c439cb524964f60e09c7708f2fe1b6ececf3cdd60f9cccce4ce489aaa9878cae",
+            "status": "too_long_32768",
+            "lengths": [
+              8708,
+              34144
+            ]
+          },
+          {
+            "row": 1040,
+            "pair_id": "d6616c45f6eaff54bbf26b4a926562cfc2b8a14cb5d163e3b3c52719736a1086",
+            "status": "too_long_32768",
+            "lengths": [
+              34185,
+              21187
+            ]
+          },
+          {
+            "row": 1175,
+            "pair_id": "f199e0641ad537db221590497f225f16b4d518ed51840be9d203ac6713d03c64",
+            "status": "too_long_32768",
+            "lengths": [
+              33327,
+              15568
+            ]
+          },
+          {
+            "row": 1194,
+            "pair_id": "f7259832d888ce0b2e1a0b6a5cc060327cd4eb2d295aa6919a6dbc8f481c34f8",
+            "status": "too_long_32768",
+            "lengths": [
+              32847,
+              19057
+            ]
+          },
+          {
+            "row": 1212,
+            "pair_id": "fa83be7d07ead7fed15a866035668dc7fa39e7880ef5e39a26f0aae63a4bdf62",
+            "status": "too_long_32768",
+            "lengths": [
+              34729,
+              18586
+            ]
+          }
+        ],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-v2",
+        "split": "holdout",
+        "rows_in": 225,
+        "status": {
+          "usable_32768": 222,
+          "too_long_32768": 3
+        },
+        "usable_8192": 99,
+        "source_sha256": "423607d3b27c87e0b1d7ce9aec7fcabe3a7319e8df65998e476b3dd371395360",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-v2/dpo_holdout.parquet",
+        "failures": [
+          {
+            "row": 37,
+            "pair_id": "211400e35faf82d331e8133b28d0fd50e66ca6740751b8ee4ed5cdc08890bc75",
+            "status": "too_long_32768",
+            "lengths": [
+              33703,
+              27117
+            ]
+          },
+          {
+            "row": 206,
+            "pair_id": "ec8acd297ec79163002c4b7454f23063cd2b28ad274df072c2c73b67f9fc3a95",
+            "status": "too_long_32768",
+            "lengths": [
+              34725,
+              21461
+            ]
+          },
+          {
+            "row": 217,
+            "pair_id": "fb356091b0fbb54c31976292d6334b8eeecc487e62ef87357a19ef9cc76f8d56",
+            "status": "too_long_32768",
+            "lengths": [
+              32743,
+              33186
+            ]
+          }
+        ],
+        "original_membership_and_split_preserved": true
+      },
+      {
+        "model": "gemma4-e2b",
+        "dataset": "dpo-v2",
+        "split": "train",
+        "rows_in": 2448,
+        "status": {
+          "usable_32768": 2432,
+          "too_long_32768": 16
+        },
+        "usable_8192": 955,
+        "source_sha256": "adfc4484c6d17d398c7fb5b877f1a6eb73418fed1e9ad620c8840aca335c4e31",
+        "tokenization": {
+          "schema": "rst-tokenization-v1",
+          "loss_mask_type": "gemma4",
+          "tokenizer_sha256": "1e31c483598073ccd8ff2bc1beaf77cb83fb923968487f05a1877a9f6441c627",
+          "special_tokens": {
+            "bos_token": "<bos>",
+            "eos_token": "<eos>",
+            "unk_token": "<unk>",
+            "pad_token": "<pad>",
+            "mask_token": "<mask>",
+            "audio_token": "<|audio|>",
+            "boa_token": "<|audio>",
+            "boi_token": "<|image>",
+            "eoa_token": "<audio|>",
+            "eoc_token": "<channel|>",
+            "eoi_token": "<image|>",
+            "eot_token": "<turn|>",
+            "escape_token": "<|\"|>",
+            "etc_token": "<tool_call|>",
+            "etd_token": "<tool|>",
+            "etr_token": "<tool_response|>",
+            "image_token": "<|image|>",
+            "soc_token": "<|channel>",
+            "sot_token": "<|turn>",
+            "stc_token": "<|tool_call>",
+            "std_token": "<|tool>",
+            "str_token": "<|tool_response>",
+            "think_token": "<|think|>"
+          },
+          "chat_template_sha256": "734397deaf791f4736cbf05f47c43aef34d62a3270a2ad288f4999e6ec8e1367",
+          "chat_template_options": {
+            "enable_thinking": false
+          },
+          "fingerprint": "0e40c86060d65de9ed0a2d2892f452a1b2f8a1a3642b1c1e91fa46b63300ef9f"
+        },
+        "output": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-retokenized/gemma4-e2b/dpo-v2/dpo_train.parquet",
+        "failures": [
+          {
+            "row": 12,
+            "pair_id": "018b6d1878c05228454854a6e6de1f1624228e7f0f3f43e14360345aebe01a78",
+            "status": "too_long_32768",
+            "lengths": [
+              33365,
+              30992
+            ]
+          },
+          {
+            "row": 87,
+            "pair_id": "09bfc92341dc43a93697d23e71568badffd0492a2bafdf7a7d964d072f46a10e",
+            "status": "too_long_32768",
+            "lengths": [
+              34104,
+              9519
+            ]
+          },
+          {
+            "row": 150,
+            "pair_id": "0fa9cf7e950860940533c466c29b7cb664449ec1d70f172c2d294972767bfc12",
+            "status": "too_long_32768",
+            "lengths": [
+              10038,
+              34412
+            ]
+          },
+          {
+            "row": 223,
+            "pair_id": "15dcf2efe4a5e4fda12af40b46086bb24a392848bbc00f9b8d689aba09bb199e",
+            "status": "too_long_32768",
+            "lengths": [
+              33360,
+              28838
+            ]
+          },
+          {
+            "row": 592,
+            "pair_id": "3e40a16a783873ae83e334a412b1a31b3079f0f184f5987482b4b413ec879bd4",
+            "status": "too_long_32768",
+            "lengths": [
+              4573,
+              33568
+            ]
+          },
+          {
+            "row": 914,
+            "pair_id": "60af3a6ac97f209a047fb0d047071acd82c9435ae47452bfbbc92873201372b4",
+            "status": "too_long_32768",
+            "lengths": [
+              32903,
+              33761
+            ]
+          },
+          {
+            "row": 1188,
+            "pair_id": "7ab2ac406bbdf9b22859d54fc65daa4ab42835f4108cc6b8faa181e5b65e421c",
+            "status": "too_long_32768",
+            "lengths": [
+              33416,
+              33506
+            ]
+          },
+          {
+            "row": 1208,
+            "pair_id": "7c6a441cf3ac8e86691f856d8e1f56c1b5e16de70c300cf914ae38346ded77bd",
+            "status": "too_long_32768",
+            "lengths": [
+              32908,
+              31708
+            ]
+          },
+          {
+            "row": 1546,
+            "pair_id": "a1441869f918cc5ad77d2bf9f24a9052a54ac0ddfe41762b2d374582465f0dce",
+            "status": "too_long_32768",
+            "lengths": [
+              34635,
+              12295
+            ]
+          },
+          {
+            "row": 1556,
+            "pair_id": "a3450aa5112b53456a6694b5cb4c13a311608242457a98201b8ee2010f0ca20a",
+            "status": "too_long_32768",
+            "lengths": [
+              33705,
+              19660
+            ]
+          },
+          {
+            "row": 1660,
+            "pair_id": "ae0cc118d06a8a1825eaf1088ebb2f1f94993540d8a36d37534fe7b02400558f",
+            "status": "too_long_32768",
+            "lengths": [
+              19371,
+              33417
+            ]
+          },
+          {
+            "row": 1706,
+            "pair_id": "b1e663011045368a713ef2d6fd2372ee47ffc03b4118903d6a1f0adeda26ebae",
+            "status": "too_long_32768",
+            "lengths": [
+              25846,
+              34380
+            ]
+          },
+          {
+            "row": 1928,
+            "pair_id": "c95da4cf5c7f006cb88da6f96aa2db7fae6af344330042d996eab5ff3107b00e",
+            "status": "too_long_32768",
+            "lengths": [
+              33327,
+              15695
+            ]
+          },
+          {
+            "row": 2063,
+            "pair_id": "d873973065faea64b3290c5bce7f9b934d9df199e616591d2410cc0be82b4f64",
+            "status": "too_long_32768",
+            "lengths": [
+              32816,
+              30418
+            ]
+          },
+          {
+            "row": 2103,
+            "pair_id": "dc769ddfc4eb5a1621933a3ffc970bedbc2fc49a74b46277eccd64b815e638fd",
+            "status": "too_long_32768",
+            "lengths": [
+              35007,
+              26365
+            ]
+          },
+          {
+            "row": 2405,
+            "pair_id": "fa83be7d07ead7fed15a866035668dc7fa39e7880ef5e39a26f0aae63a4bdf62",
+            "status": "too_long_32768",
+            "lengths": [
+              34729,
+              18586
+            ]
+          }
+        ],
+        "original_membership_and_split_preserved": true
+      }
+    ]
+  },
+  "dpo_split_checks": [
+    {
+      "model": "smollm3-3b",
+      "dataset": "dpo-smoke",
+      "train": 12,
+      "holdout": 4,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "3cb1098f6f4188ec8220953674634d8910780127c15a9d7e47b7e399f5c023ef",
+        "holdout": "7ede6c63a9bf91c2715864eecfc4f683570acf21ff42a6b2b0bc324a6fc7780b"
+      }
+    },
+    {
+      "model": "smollm3-3b",
+      "dataset": "dpo-v1",
+      "train": 1228,
+      "holdout": 102,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "7b88be8456424519f26d6fb42d58fcab537da148e5e439b5f0fb13c21216f92b",
+        "holdout": "d1d24b1b4b747e8957f2972a87797db0f92e65a2e147268adc66d699bb966316"
+      }
+    },
+    {
+      "model": "smollm3-3b",
+      "dataset": "dpo-v2",
+      "train": 2448,
+      "holdout": 225,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "13eaa2840da253c2727ca8e34431539b08ae1cb58178e7aef10aba14cec0876f",
+        "holdout": "57de60f5197c9ba7260917365984dfcabc712ba2419c631773f31a587a5db11d"
+      }
+    },
+    {
+      "model": "olmo3-7b",
+      "dataset": "dpo-smoke",
+      "train": 12,
+      "holdout": 4,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "8cfcbf7de262c52a22abe1145ee515a8b23eed7d244a14ea46fe84806432ab73",
+        "holdout": "efa39c501b71c3577f62bc0a99b6d67bd58f1659562978e3af8875e9310dc03a"
+      }
+    },
+    {
+      "model": "olmo3-7b",
+      "dataset": "dpo-v1",
+      "train": 1228,
+      "holdout": 102,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "3b23f2bec92bf3cc49c9cee81d080279d1f1c75b48c55b440bc4d4d483d5e251",
+        "holdout": "bc8454277ef9be17d301ba528b2003c58f8460edc7ed44ea3a44dabbad331c8a"
+      }
+    },
+    {
+      "model": "olmo3-7b",
+      "dataset": "dpo-v2",
+      "train": 2448,
+      "holdout": 225,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "11489a581c0606d621a1c60acba6e2809f0fe0459644d0a2e3fcde3a59fb9e6e",
+        "holdout": "95136c0da88e2066a178210136dde587a27538bf12b0dc592e59c79b505a9b33"
+      }
+    },
+    {
+      "model": "gemma4-e2b",
+      "dataset": "dpo-smoke",
+      "train": 12,
+      "holdout": 4,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "8477254b38519b39f6999b49b08941aa07c16fefb28a4b118eddb11dd8b85328",
+        "holdout": "3d354d4ad19c0673a537cea6039defefabbad7e321a2500169dcaa18cf829b76"
+      }
+    },
+    {
+      "model": "gemma4-e2b",
+      "dataset": "dpo-v1",
+      "train": 1215,
+      "holdout": 102,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "94a09d0d1f6cb72d77d3925254a8bf2cc448c839b98f720c6cb1d1b659327bb8",
+        "holdout": "8cdc03b23d1c493399a2110c5c24949a65e29c9adc5455cdfd829ef9ed80cee0"
+      }
+    },
+    {
+      "model": "gemma4-e2b",
+      "dataset": "dpo-v2",
+      "train": 2432,
+      "holdout": 222,
+      "group_disjoint": true,
+      "pair_membership_preserved": true,
+      "parquet_sha256": {
+        "train": "648539371cf8dd136513064f7baeb3a0dded9f13cd3b1f1fec52ccececab3b64",
+        "holdout": "7609cdea5e0f40f19f2f3daaed8329fb7bbed2134634ead3affcda182cad8770"
+      }
+    }
+  ],
+  "input_exclusions": {
+    "source": "/home/lys/Desktop/RST-Train/data/nemotron-terminal/nemotron_sft_train_dataset_adapters.parquet",
+    "source_sha256": "86e5a1057b201cb1dec6e6e938badec1d6ad16cfc136e6b879a36e1ff8b820a6",
+    "rows_in": 220381,
+    "unique_rejected_rows": 13,
+    "indexing": "zero-based source row index",
+    "action": "filter only the named rows for the target model before strict export; preserve original source and record exclusions",
+    "excluded_rows": {
+      "smollm3-3b": [
+        209817
+      ],
+      "olmo3-7b": [
+        193057,
+        209817
+      ],
+      "gemma4-e2b": [
+        191299,
+        194551,
+        197449,
+        197837,
+        199883,
+        204514,
+        207886,
+        212137,
+        212707,
+        213189,
+        219215
+      ],
+      "gemma4-e4b": [
+        191299,
+        194551,
+        197449,
+        197837,
+        199883,
+        204514,
+        207886,
+        212137,
+        212707,
+        213189,
+        219215
+      ]
+    },
+    "failures": [
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 212137,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "pytorch__text-2195__hjbjh98",
+        "task_group_id": "pytorch__text-2195",
+        "matches": [
+          {
+            "message_index": 0,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 213189,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "d2l-ai__d2l-en-1435__saHLm4f",
+        "task_group_id": "d2l-ai__d2l-en-1435",
+        "matches": [
+          {
+            "message_index": 6,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 199883,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "mindee__doctr-107__QtYmT8m",
+        "task_group_id": "mindee__doctr-107",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 3,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 4,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 5,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 6,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 7,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 8,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 9,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 11,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 12,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 13,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 14,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 15,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 16,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 17,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 18,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 20,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "smollm3-3b",
+        "row": 209817,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "xorbitsai__inference-351__Zh86Euq",
+        "task_group_id": "xorbitsai__inference-351",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<|im_end|>"
+          },
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<|im_start|>"
+          },
+          {
+            "message_index": 18,
+            "role": "user",
+            "marker": "<|im_end|>"
+          },
+          {
+            "message_index": 18,
+            "role": "user",
+            "marker": "<|im_start|>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "olmo3-7b",
+        "row": 209817,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "xorbitsai__inference-351__Zh86Euq",
+        "task_group_id": "xorbitsai__inference-351",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<|im_end|>"
+          },
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<|im_start|>"
+          },
+          {
+            "message_index": 18,
+            "role": "user",
+            "marker": "<|im_end|>"
+          },
+          {
+            "message_index": 18,
+            "role": "user",
+            "marker": "<|im_start|>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 194551,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "facebookresearch__fairscale-218__pLPM5GV",
+        "task_group_id": "facebookresearch__fairscale-218",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 197837,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "dmlc__gluon-nlp-1103__B4REbkQ",
+        "task_group_id": "dmlc__gluon-nlp-1103",
+        "matches": [
+          {
+            "message_index": 7,
+            "role": "assistant",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 212707,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "huggingface__transformers-6929__69PJbxN",
+        "task_group_id": "huggingface__transformers-6929",
+        "matches": [
+          {
+            "message_index": 6,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 207886,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "flairnlp__flair-281__rffDKH6",
+        "task_group_id": "flairnlp__flair-281",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "olmo3-7b",
+        "row": 193057,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "deepset-ai__haystack-4220__nhZXNgs",
+        "task_group_id": "deepset-ai__haystack-4220",
+        "matches": [
+          {
+            "message_index": 8,
+            "role": "user",
+            "marker": "<|endoftext|>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 204514,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "huggingface__transformers-4924__R9ovUUr",
+        "task_group_id": "huggingface__transformers-4924",
+        "matches": [
+          {
+            "message_index": 6,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 219215,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "huggingface__transformers-23641__oYaxr9E",
+        "task_group_id": "huggingface__transformers-23641",
+        "matches": [
+          {
+            "message_index": 2,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 197449,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "pytorch__text-377__kiAhSxW",
+        "task_group_id": "pytorch__text-377",
+        "matches": [
+          {
+            "message_index": 0,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 19,
+            "role": "assistant",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 20,
+            "role": "user",
+            "marker": "<eos>"
+          }
+        ]
+      },
+      {
+        "dataset": "nemo-adapters",
+        "split": "train_dataset_adapters",
+        "model": "gemma4-e2b",
+        "row": 191299,
+        "status": "error",
+        "error": "ValueError: reserved chat marker inside message content",
+        "trajectory_id": "awslabs__sockeye-487__254ksza",
+        "task_group_id": "awslabs__sockeye-487",
+        "matches": [
+          {
+            "message_index": 12,
+            "role": "user",
+            "marker": "<eos>"
+          },
+          {
+            "message_index": 13,
+            "role": "assistant",
+            "marker": "<eos>"
+          }
+        ]
+      }
+    ]
+  },
+  "gemma_native_channel_content_check": [
+    {
+      "dataset": "rst-cap10",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "rst-cap10",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "ota",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "ota",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "tmax",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "tmax",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "seta",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "seta",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "terminal-lego-deepseek",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "terminal-lego-deepseek",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "terminal-lego-opus-unscored",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "terminal-lego-opus-unscored",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "rst-v1",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "rst-v1",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "terminalevo-audit-v18",
+      "split": "audit",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "swegym-raw",
+      "split": "shard0",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "swegym-raw",
+      "split": "shard1",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "swegym-raw",
+      "split": "shard2",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "termigen-raw",
+      "split": "source-train",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "tmax-raw",
+      "split": "source-only-success",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "nemo",
+      "split": "holdout",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "nemo",
+      "split": "train_skill_based_easy",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "nemo",
+      "split": "train_skill_based_medium",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "nemo",
+      "split": "train_skill_based_mixed",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "nemo-adapters",
+      "split": "train_dataset_adapters",
+      "gemma_channel_marker_messages": 0
+    },
+    {
+      "dataset": "swegym-sft-source",
+      "split": "train",
+      "gemma_channel_marker_messages": 0
+    }
+  ],
+  "full_weight_probes": [
+    {
+      "model": "smollm3-3b",
+      "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "rst-cap10",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 24641,
+          "window_start": 892,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.7649593353271484,
+          "native_bf16_ce_loss": 3.765625,
+          "verl_loss": 3.765625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0006656646728515625
+        },
+        {
+          "dataset": "rst-cap10",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 12841,
+          "window_start": 933,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.035778284072876,
+          "native_bf16_ce_loss": 3.046875,
+          "verl_loss": 3.046875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.011096715927124023
+        },
+        {
+          "dataset": "ota",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2651,
+          "window_start": 974,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.359095811843872,
+          "native_bf16_ce_loss": 3.359375,
+          "verl_loss": 3.359375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0002791881561279297
+        },
+        {
+          "dataset": "ota",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3487,
+          "window_start": 970,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.9843273162841797,
+          "native_bf16_ce_loss": 3.984375,
+          "verl_loss": 3.984375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 4.76837158203125e-05
+        },
+        {
+          "dataset": "tmax",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 10553,
+          "window_start": 1433,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.384488105773926,
+          "native_bf16_ce_loss": 4.375,
+          "verl_loss": 4.375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.009488105773925781
+        },
+        {
+          "dataset": "tmax",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3132,
+          "window_start": 1256,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.093722105026245,
+          "native_bf16_ce_loss": 3.078125,
+          "verl_loss": 3.078125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.015597105026245117
+        },
+        {
+          "dataset": "seta",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 4385,
+          "window_start": 709,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 2.8214223384857178,
+          "native_bf16_ce_loss": 2.8125,
+          "verl_loss": 2.8125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.008922338485717773
+        },
+        {
+          "dataset": "seta",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 6837,
+          "window_start": 644,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.529524564743042,
+          "native_bf16_ce_loss": 3.515625,
+          "verl_loss": 3.515625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.013899564743041992
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 16341,
+          "window_start": 1622,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.913262367248535,
+          "native_bf16_ce_loss": 3.921875,
+          "verl_loss": 3.921875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.008612632751464844
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 8239,
+          "window_start": 1345,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.454317808151245,
+          "native_bf16_ce_loss": 3.453125,
+          "verl_loss": 3.453125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0011928081512451172
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5181,
+          "window_start": 1436,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 2.9345085620880127,
+          "native_bf16_ce_loss": 2.9375,
+          "verl_loss": 2.9375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0029914379119873047
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 2010,
+          "window_start": 1197,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.075913429260254,
+          "native_bf16_ce_loss": 3.0625,
+          "verl_loss": 3.0625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.013413429260253906
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2763,
+          "window_start": 802,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 2.9778223037719727,
+          "native_bf16_ce_loss": 2.984375,
+          "verl_loss": 2.984375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.006552696228027344
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 16936,
+          "window_start": 875,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.10284423828125,
+          "native_bf16_ce_loss": 3.109375,
+          "verl_loss": 3.109375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.00653076171875
+        },
+        {
+          "dataset": "terminalevo-audit-v18",
+          "split": "audit",
+          "source_row": 0,
+          "full_tokens": 2416,
+          "window_start": 895,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.6374940872192383,
+          "native_bf16_ce_loss": 3.625,
+          "verl_loss": 3.625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.012494087219238281
+        },
+        {
+          "dataset": "nemo",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 14504,
+          "window_start": 1139,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.8601627349853516,
+          "native_bf16_ce_loss": 3.859375,
+          "verl_loss": 3.859375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0007877349853515625
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_easy",
+          "source_row": 0,
+          "full_tokens": 9456,
+          "window_start": 1458,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 2.8929319381713867,
+          "native_bf16_ce_loss": 2.890625,
+          "verl_loss": 2.890625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0023069381713867188
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_medium",
+          "source_row": 0,
+          "full_tokens": 9867,
+          "window_start": 1796,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.2090654373168945,
+          "native_bf16_ce_loss": 3.203125,
+          "verl_loss": 3.203125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.005940437316894531
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_mixed",
+          "source_row": 0,
+          "full_tokens": 9890,
+          "window_start": 1654,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.022838592529297,
+          "native_bf16_ce_loss": 3.015625,
+          "verl_loss": 3.015625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.007213592529296875
+        },
+        {
+          "dataset": "nemo-adapters",
+          "split": "train_dataset_adapters",
+          "source_row": 0,
+          "full_tokens": 9226,
+          "window_start": 1394,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.779020071029663,
+          "native_bf16_ce_loss": 3.765625,
+          "verl_loss": 3.765625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.013395071029663086
+        }
+      ],
+      "dpo": [
+        {
+          "dataset": "dpo-v1",
+          "pair_id": "009c2efc30a92a69da2cb5f77984fdbbe794f6f9a93271b60c72bb94a25ab83f",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-v2",
+          "pair_id": "003e7fbebb48d21c51720b2a14adc7e4f73cf1dedb208f326320b10e8028ce25",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-smoke",
+          "pair_id": "05c391ff5be14c09e055672866e5e652abf4843577cb6d41e3b6bf9180661546",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        }
+      ],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForCausalLM",
+      "parameters": 3075098624,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 309.70431083254516
+    },
+    {
+      "model": "olmo3-7b",
+      "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "rst-cap10",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 24530,
+          "window_start": 860,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.426046371459961,
+          "native_bf16_ce_loss": 4.40625,
+          "verl_loss": 4.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.019796371459960938
+        },
+        {
+          "dataset": "rst-cap10",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 12738,
+          "window_start": 901,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.2282707691192627,
+          "native_bf16_ce_loss": 3.234375,
+          "verl_loss": 3.234375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.006104230880737305
+        },
+        {
+          "dataset": "ota",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2610,
+          "window_start": 942,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.7679951190948486,
+          "native_bf16_ce_loss": 3.765625,
+          "verl_loss": 3.765625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.002370119094848633
+        },
+        {
+          "dataset": "ota",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3430,
+          "window_start": 938,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.414593696594238,
+          "native_bf16_ce_loss": 4.40625,
+          "verl_loss": 4.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.008343696594238281
+        },
+        {
+          "dataset": "tmax",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 10866,
+          "window_start": 1403,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.775228023529053,
+          "native_bf16_ce_loss": 4.78125,
+          "verl_loss": 4.78125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.006021976470947266
+        },
+        {
+          "dataset": "tmax",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3162,
+          "window_start": 1226,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.072772979736328,
+          "native_bf16_ce_loss": 4.0625,
+          "verl_loss": 4.0625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.010272979736328125
+        },
+        {
+          "dataset": "seta",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 4493,
+          "window_start": 671,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.4734981060028076,
+          "native_bf16_ce_loss": 3.484375,
+          "verl_loss": 3.484375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.010876893997192383
+        },
+        {
+          "dataset": "seta",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 6848,
+          "window_start": 606,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.893113374710083,
+          "native_bf16_ce_loss": 3.890625,
+          "verl_loss": 3.890625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.002488374710083008
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 16268,
+          "window_start": 1590,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.7004218101501465,
+          "native_bf16_ce_loss": 4.6875,
+          "verl_loss": 4.6875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.012921810150146484
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 8190,
+          "window_start": 1313,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.212547779083252,
+          "native_bf16_ce_loss": 4.21875,
+          "verl_loss": 4.21875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.006202220916748047
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5136,
+          "window_start": 1404,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.352198362350464,
+          "native_bf16_ce_loss": 3.359375,
+          "verl_loss": 3.359375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.007176637649536133
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 1970,
+          "window_start": 1166,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.948322296142578,
+          "native_bf16_ce_loss": 3.953125,
+          "verl_loss": 3.953125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.004802703857421875
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2722,
+          "window_start": 770,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.7126026153564453,
+          "native_bf16_ce_loss": 3.703125,
+          "verl_loss": 3.703125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.009477615356445312
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 16803,
+          "window_start": 843,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.086561679840088,
+          "native_bf16_ce_loss": 4.09375,
+          "verl_loss": 4.09375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.007188320159912109
+        },
+        {
+          "dataset": "terminalevo-audit-v18",
+          "split": "audit",
+          "source_row": 0,
+          "full_tokens": 2375,
+          "window_start": 863,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.437269687652588,
+          "native_bf16_ce_loss": 4.4375,
+          "verl_loss": 4.4375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.00023031234741210938
+        },
+        {
+          "dataset": "nemo",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 14481,
+          "window_start": 1115,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.2298455238342285,
+          "native_bf16_ce_loss": 4.21875,
+          "verl_loss": 4.21875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.011095523834228516
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_easy",
+          "source_row": 0,
+          "full_tokens": 9413,
+          "window_start": 1426,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.1986453533172607,
+          "native_bf16_ce_loss": 3.1875,
+          "verl_loss": 3.1875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.011145353317260742
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_medium",
+          "source_row": 0,
+          "full_tokens": 9830,
+          "window_start": 1764,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.4825637340545654,
+          "native_bf16_ce_loss": 3.484375,
+          "verl_loss": 3.484375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0018112659454345703
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_mixed",
+          "source_row": 0,
+          "full_tokens": 9853,
+          "window_start": 1622,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.262108564376831,
+          "native_bf16_ce_loss": 3.265625,
+          "verl_loss": 3.265625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0035164356231689453
+        },
+        {
+          "dataset": "nemo-adapters",
+          "split": "train_dataset_adapters",
+          "source_row": 0,
+          "full_tokens": 9185,
+          "window_start": 1362,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.102288722991943,
+          "native_bf16_ce_loss": 4.09375,
+          "verl_loss": 4.09375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.00853872299194336
+        }
+      ],
+      "dpo": [
+        {
+          "dataset": "dpo-v1",
+          "pair_id": "009c2efc30a92a69da2cb5f77984fdbbe794f6f9a93271b60c72bb94a25ab83f",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-v2",
+          "pair_id": "003e7fbebb48d21c51720b2a14adc7e4f73cf1dedb208f326320b10e8028ce25",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-smoke",
+          "pair_id": "05c391ff5be14c09e055672866e5e652abf4843577cb6d41e3b6bf9180661546",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        }
+      ],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForCausalLM",
+      "parameters": 7298011136,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 569.6606753962114
+    },
+    {
+      "model": "gemma4-e2b",
+      "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "rst-cap10",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 29247,
+          "window_start": 905,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 9.82958984375,
+          "native_bf16_ce_loss": 9.8125,
+          "verl_loss": 9.8125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.01708984375
+        },
+        {
+          "dataset": "rst-cap10",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 15470,
+          "window_start": 949,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 8.036211967468262,
+          "native_bf16_ce_loss": 8.0625,
+          "verl_loss": 8.0625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02628803253173828
+        },
+        {
+          "dataset": "ota",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2984,
+          "window_start": 996,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.77301549911499,
+          "native_bf16_ce_loss": 7.78125,
+          "verl_loss": 7.78125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.008234500885009766
+        },
+        {
+          "dataset": "ota",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 4019,
+          "window_start": 992,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.663297653198242,
+          "native_bf16_ce_loss": 7.65625,
+          "verl_loss": 7.65625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0070476531982421875
+        },
+        {
+          "dataset": "tmax",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 13313,
+          "window_start": 1534,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.110265731811523,
+          "native_bf16_ce_loss": 6.125,
+          "verl_loss": 6.125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.014734268188476562
+        },
+        {
+          "dataset": "tmax",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3593,
+          "window_start": 1341,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.451430797576904,
+          "native_bf16_ce_loss": 5.46875,
+          "verl_loss": 5.46875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.017319202423095703
+        },
+        {
+          "dataset": "seta",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5304,
+          "window_start": 739,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.982914447784424,
+          "native_bf16_ce_loss": 6.0,
+          "verl_loss": 6.0,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.017085552215576172
+        },
+        {
+          "dataset": "seta",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 8166,
+          "window_start": 644,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.445725917816162,
+          "native_bf16_ce_loss": 6.46875,
+          "verl_loss": 6.46875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02302408218383789
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 19106,
+          "window_start": 1705,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 8.200458526611328,
+          "native_bf16_ce_loss": 8.1875,
+          "verl_loss": 8.1875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.012958526611328125
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 9644,
+          "window_start": 1412,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.941603183746338,
+          "native_bf16_ce_loss": 7.96875,
+          "verl_loss": 7.96875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02714681625366211
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5886,
+          "window_start": 1481,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.817634582519531,
+          "native_bf16_ce_loss": 6.84375,
+          "verl_loss": 6.84375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02611541748046875
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 2214,
+          "window_start": 1231,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.460988998413086,
+          "native_bf16_ce_loss": 6.46875,
+          "verl_loss": 6.46875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0077610015869140625
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 3069,
+          "window_start": 803,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.425919055938721,
+          "native_bf16_ce_loss": 7.40625,
+          "verl_loss": 7.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.019669055938720703
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 19339,
+          "window_start": 878,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 8.191155433654785,
+          "native_bf16_ce_loss": 8.1875,
+          "verl_loss": 8.1875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0036554336547851562
+        },
+        {
+          "dataset": "terminalevo-audit-v18",
+          "split": "audit",
+          "source_row": 0,
+          "full_tokens": 2658,
+          "window_start": 908,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.5726399421691895,
+          "native_bf16_ce_loss": 7.59375,
+          "verl_loss": 7.59375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.021110057830810547
+        },
+        {
+          "dataset": "nemo",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 15620,
+          "window_start": 1169,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.614627361297607,
+          "native_bf16_ce_loss": 6.625,
+          "verl_loss": 6.625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.010372638702392578
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_easy",
+          "source_row": 0,
+          "full_tokens": 10984,
+          "window_start": 1570,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.5906219482421875,
+          "native_bf16_ce_loss": 5.59375,
+          "verl_loss": 5.59375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0031280517578125
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_medium",
+          "source_row": 0,
+          "full_tokens": 11630,
+          "window_start": 1988,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.314455509185791,
+          "native_bf16_ce_loss": 5.3125,
+          "verl_loss": 5.3125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0019555091857910156
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_mixed",
+          "source_row": 0,
+          "full_tokens": 11474,
+          "window_start": 1779,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.215103626251221,
+          "native_bf16_ce_loss": 6.21875,
+          "verl_loss": 6.21875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.003646373748779297
+        },
+        {
+          "dataset": "nemo-adapters",
+          "split": "train_dataset_adapters",
+          "source_row": 0,
+          "full_tokens": 10575,
+          "window_start": 1444,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.372324466705322,
+          "native_bf16_ce_loss": 7.375,
+          "verl_loss": 7.375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0026755332946777344
+        }
+      ],
+      "dpo": [
+        {
+          "dataset": "dpo-v1",
+          "pair_id": "009c2efc30a92a69da2cb5f77984fdbbe794f6f9a93271b60c72bb94a25ab83f",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-v2",
+          "pair_id": "003e7fbebb48d21c51720b2a14adc7e4f73cf1dedb208f326320b10e8028ce25",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-smoke",
+          "pair_id": "05c391ff5be14c09e055672866e5e652abf4843577cb6d41e3b6bf9180661546",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        }
+      ],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForImageTextToText",
+      "parameters": 5104297504,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 396.29229003796354
+    },
+    {
+      "model": "gemma4-e4b",
+      "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "rst-cap10",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 29247,
+          "window_start": 905,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.678350925445557,
+          "native_bf16_ce_loss": 5.65625,
+          "verl_loss": 5.65625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02210092544555664
+        },
+        {
+          "dataset": "rst-cap10",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 15470,
+          "window_start": 949,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.497557163238525,
+          "native_bf16_ce_loss": 5.5,
+          "verl_loss": 5.5,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0024428367614746094
+        },
+        {
+          "dataset": "ota",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 2984,
+          "window_start": 996,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.892714500427246,
+          "native_bf16_ce_loss": 4.90625,
+          "verl_loss": 4.90625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.013535499572753906
+        },
+        {
+          "dataset": "ota",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 4019,
+          "window_start": 992,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.486983776092529,
+          "native_bf16_ce_loss": 5.5,
+          "verl_loss": 5.5,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.013016223907470703
+        },
+        {
+          "dataset": "tmax",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 13313,
+          "window_start": 1534,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.8412017822265625,
+          "native_bf16_ce_loss": 4.84375,
+          "verl_loss": 4.84375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0025482177734375
+        },
+        {
+          "dataset": "tmax",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 3593,
+          "window_start": 1341,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.411375522613525,
+          "native_bf16_ce_loss": 4.40625,
+          "verl_loss": 4.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.005125522613525391
+        },
+        {
+          "dataset": "seta",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5304,
+          "window_start": 739,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.907870769500732,
+          "native_bf16_ce_loss": 4.90625,
+          "verl_loss": 4.90625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0016207695007324219
+        },
+        {
+          "dataset": "seta",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 8166,
+          "window_start": 644,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.708446025848389,
+          "native_bf16_ce_loss": 5.71875,
+          "verl_loss": 5.71875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.010303974151611328
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 19106,
+          "window_start": 1705,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.218017578125,
+          "native_bf16_ce_loss": 5.21875,
+          "verl_loss": 5.21875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.000732421875
+        },
+        {
+          "dataset": "terminal-lego-deepseek",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 9644,
+          "window_start": 1412,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.650961875915527,
+          "native_bf16_ce_loss": 4.65625,
+          "verl_loss": 4.65625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.005288124084472656
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 5886,
+          "window_start": 1481,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.322166919708252,
+          "native_bf16_ce_loss": 4.3125,
+          "verl_loss": 4.3125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.009666919708251953
+        },
+        {
+          "dataset": "terminal-lego-opus-unscored",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 2214,
+          "window_start": 1231,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.48978853225708,
+          "native_bf16_ce_loss": 4.46875,
+          "verl_loss": 4.46875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.021038532257080078
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 3069,
+          "window_start": 803,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.858608245849609,
+          "native_bf16_ce_loss": 4.84375,
+          "verl_loss": 4.84375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.014858245849609375
+        },
+        {
+          "dataset": "rst-v1",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 19339,
+          "window_start": 878,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.681455612182617,
+          "native_bf16_ce_loss": 5.65625,
+          "verl_loss": 5.65625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.025205612182617188
+        },
+        {
+          "dataset": "terminalevo-audit-v18",
+          "split": "audit",
+          "source_row": 0,
+          "full_tokens": 2658,
+          "window_start": 908,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.392175197601318,
+          "native_bf16_ce_loss": 5.375,
+          "verl_loss": 5.375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.01717519760131836
+        },
+        {
+          "dataset": "nemo",
+          "split": "holdout",
+          "source_row": 0,
+          "full_tokens": 15620,
+          "window_start": 1169,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 5.819549560546875,
+          "native_bf16_ce_loss": 5.84375,
+          "verl_loss": 5.84375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.024200439453125
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_easy",
+          "source_row": 0,
+          "full_tokens": 10984,
+          "window_start": 1570,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 3.7522900104522705,
+          "native_bf16_ce_loss": 3.75,
+          "verl_loss": 3.75,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.002290010452270508
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_medium",
+          "source_row": 0,
+          "full_tokens": 11630,
+          "window_start": 1988,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.632334232330322,
+          "native_bf16_ce_loss": 4.65625,
+          "verl_loss": 4.65625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.023915767669677734
+        },
+        {
+          "dataset": "nemo",
+          "split": "train_skill_based_mixed",
+          "source_row": 0,
+          "full_tokens": 11474,
+          "window_start": 1779,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.840907096862793,
+          "native_bf16_ce_loss": 4.84375,
+          "verl_loss": 4.84375,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0028429031372070312
+        },
+        {
+          "dataset": "nemo-adapters",
+          "split": "train_dataset_adapters",
+          "source_row": 0,
+          "full_tokens": 10575,
+          "window_start": 1444,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.408575534820557,
+          "native_bf16_ce_loss": 6.40625,
+          "verl_loss": 6.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.0023255348205566406
+        }
+      ],
+      "dpo": [
+        {
+          "dataset": "dpo-v1",
+          "pair_id": "009c2efc30a92a69da2cb5f77984fdbbe794f6f9a93271b60c72bb94a25ab83f",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-v2",
+          "pair_id": "003e7fbebb48d21c51720b2a14adc7e4f73cf1dedb208f326320b10e8028ce25",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        },
+        {
+          "dataset": "dpo-smoke",
+          "pair_id": "05c391ff5be14c09e055672866e5e652abf4843577cb6d41e3b6bf9180661546",
+          "loss": 0.6931471805599453,
+          "step_zero_reference_match": true,
+          "finite_head_gradient": true
+        }
+      ],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForImageTextToText",
+      "parameters": 7941100832,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 612.5559462560341
+    },
+    {
+      "model": "smollm3-3b",
+      "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "swegym-sft-source",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 16998,
+          "window_start": 2638,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 4.4228291511535645,
+          "native_bf16_ce_loss": 4.40625,
+          "verl_loss": 4.40625,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.016579151153564453
+        }
+      ],
+      "dpo": [],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForCausalLM",
+      "parameters": 3075098624,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 34.28879591822624
+    },
+    {
+      "model": "olmo3-7b",
+      "revision": "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "swegym-sft-source",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 16916,
+          "window_start": 2600,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.016334056854248,
+          "native_bf16_ce_loss": 6.03125,
+          "verl_loss": 6.03125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.014915943145751953
+        }
+      ],
+      "dpo": [],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForCausalLM",
+      "parameters": 7298011136,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 58.16372939012945
+    },
+    {
+      "model": "gemma4-e2b",
+      "revision": "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "swegym-sft-source",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 21787,
+          "window_start": 3048,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 7.827285289764404,
+          "native_bf16_ce_loss": 7.8125,
+          "verl_loss": 7.8125,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.014785289764404297
+        }
+      ],
+      "dpo": [],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForImageTextToText",
+      "parameters": 5104297504,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 48.77629560371861
+    },
+    {
+      "model": "gemma4-e4b",
+      "revision": "ee0ef6023621cff504d758262d4e04895a5af4a2",
+      "status": "passed",
+      "sft": [
+        {
+          "dataset": "swegym-sft-source",
+          "split": "train",
+          "source_row": 0,
+          "full_tokens": 21787,
+          "window_start": 3048,
+          "window_tokens": 64,
+          "native_fp32_ce_loss": 6.490792751312256,
+          "native_bf16_ce_loss": 6.46875,
+          "verl_loss": 6.46875,
+          "finite_head_gradient": true,
+          "fp32_ce_absolute_difference": 0.02204275131225586
+        }
+      ],
+      "dpo": [],
+      "scope": "official complete weights, CPU bf16; 64-token diagnostic windows, not 8K/32K or multi-rank training",
+      "auto_class": "AutoModelForImageTextToText",
+      "parameters": 7941100832,
+      "persisted_padding_matches_verl": true,
+      "torch_version": "2.13.0+cu130",
+      "parameter_update": true,
+      "seconds": 68.4312497349456
+    }
+  ],
+  "tiny_cuda_fsdp2": {
+    "scope": "tiny configs, 61 tokens, 64 vocabulary; one physical GPU, one-rank FSDP2 mesh; DPO sharding branch forced (not multi-rank validation)",
+    "torch": "2.13.0+cu130",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "process_memory_cap_bytes": 2147483648,
+    "results": [
+      {
+        "family": "SmolLM3",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 1.1447906226175903e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 1.1447906226175903e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.192511081695557,
+        "dpo_logprob_loss": 4.1925111024276065,
+        "max_gradient_absolute_error": 1.4901161193847656e-08,
+        "peak_allocated_bytes": 67675136,
+        "parameter_update": true
+      },
+      {
+        "family": "SmolLM3",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0028170139211266708,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 0.0028170139211266708,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.192391872406006,
+        "dpo_logprob_loss": 4.192391768745754,
+        "max_gradient_absolute_error": 0.00048828125,
+        "peak_allocated_bytes": 67604992,
+        "parameter_update": true
+      },
+      {
+        "family": "Olmo3",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 2.3032600702639783e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 2.3032600702639783e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.174831390380859,
+        "dpo_logprob_loss": 4.174831556237262,
+        "max_gradient_absolute_error": 3.3527612686157227e-08,
+        "peak_allocated_bytes": 67688448,
+        "parameter_update": true
+      },
+      {
+        "family": "Olmo3",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0020984077762112568,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 0.0020984077762112568,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.174983501434326,
+        "dpo_logprob_loss": 4.174983397774074,
+        "max_gradient_absolute_error": 0.00048828125,
+        "peak_allocated_bytes": 67619328,
+        "parameter_update": true
+      },
+      {
+        "family": "Gemma4",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 5.074313832538238e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 5.074313832538238e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.162871837615967,
+        "dpo_logprob_loss": 4.162871858348017,
+        "max_gradient_absolute_error": 4.172325134277344e-07,
+        "peak_allocated_bytes": 68058624,
+        "parameter_update": true
+      },
+      {
+        "family": "Gemma4",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0005815795010027046,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 0.0005815795010027046,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.162992000579834,
+        "dpo_logprob_loss": 4.1629918554554814,
+        "max_gradient_absolute_error": 0.0009765625,
+        "peak_allocated_bytes": 67926016,
+        "parameter_update": true
+      }
+    ]
+  },
+  "bug30_before": {
+    "scope": "matched FP32-buffer baseline, before BUG-30 fix",
+    "results": [
+      {
+        "family": "SmolLM3",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 1.1447906226175903e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 1.1447906226175903e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.192511081695557,
+        "dpo_logprob_loss": 4.1925111024276065,
+        "max_gradient_absolute_error": 1.4901161193847656e-08,
+        "peak_allocated_bytes": 67675136,
+        "parameter_update": true
+      },
+      {
+        "family": "SmolLM3",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0028170139211266708,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 0.0028170139211266708,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.192391872406006,
+        "dpo_logprob_loss": 4.192391768745754,
+        "max_gradient_absolute_error": 0.00048828125,
+        "peak_allocated_bytes": 67604992,
+        "parameter_update": true
+      },
+      {
+        "family": "Olmo3",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 2.3032600702639783e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 2.3032600702639783e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.174831390380859,
+        "dpo_logprob_loss": 4.174831556237262,
+        "max_gradient_absolute_error": 3.3527612686157227e-08,
+        "peak_allocated_bytes": 67688448,
+        "parameter_update": true
+      },
+      {
+        "family": "Olmo3",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0020984077762112568,
+        "pointwise_comparison_failures": [
+          "model.embed_tokens.weight",
+          "model.layers.0.self_attn.v_proj.weight",
+          "model.layers.0.self_attn.o_proj.weight",
+          "model.layers.1.self_attn.v_proj.weight",
+          "model.layers.1.self_attn.o_proj.weight"
+        ],
+        "fsdp_vs_native_relative_l2": 0.009824012977023901,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.009791820330737378,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.174983501434326,
+        "dpo_logprob_loss": 4.175009561621624,
+        "max_gradient_absolute_error": 0.00146484375,
+        "peak_allocated_bytes": 67621376,
+        "parameter_update": true
+      },
+      {
+        "family": "Gemma4",
+        "compute_dtype": "torch.float32",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 5.074313832538238e-07,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 5.074313832538238e-07,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "status": "passed",
+        "native_loss": 4.162871837615967,
+        "dpo_logprob_loss": 4.162871858348017,
+        "max_gradient_absolute_error": 4.172325134277344e-07,
+        "peak_allocated_bytes": 68058624,
+        "parameter_update": true
+      },
+      {
+        "family": "Gemma4",
+        "compute_dtype": "torch.bfloat16",
+        "baseline_precision": "BF16 parameters with original FP32 buffers, matching FSDP",
+        "unsharded_dpo_vs_native_relative_l2": 0.0005815795010027046,
+        "pointwise_comparison_failures": [],
+        "fsdp_vs_native_relative_l2": 0.0005815795010027046,
+        "fsdp_vs_unsharded_dpo_relative_l2": 0.0,
+        "relative_l2_tolerance": 0.015625,
+        "status": "passed",
+        "native_loss": 4.162992000579834,
+        "dpo_logprob_loss": 4.1629918554554814,
+        "max_gradient_absolute_error": 0.0009765625,
+        "peak_allocated_bytes": 67926016,
+        "parameter_update": true
+      }
+    ]
+  },
+  "tests": {
+    "cpu_passed": 496,
+    "cpu_skipped": 11,
+    "cpu_seconds": 27.74,
+    "skip_reasons": {
+      "verl_not_installed": 8,
+      "cuda_opt_in": 2,
+      "harbor_not_installed": 1
+    },
+    "real_verl_cpu_passed": 26,
+    "real_verl_cpu_skipped": 0,
+    "binding_followup_passed": 4,
+    "olmo_sft_dpo_cuda_regressions_passed": 1
+  },
+  "environment": {
+    "cpu_python": "3.13.11",
+    "cpu_torch": "2.14.0+cpu",
+    "backend_python": "3.13.15",
+    "backend_torch": "2.13.0+cu130",
+    "transformers": "5.15.0",
+    "verl": "0.9.0",
+    "gpu": "NVIDIA H100 80GB HBM3"
+  },
+  "artifacts": {
+    "sft-inventory.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/sft-inventory.json",
+      "sha256": "7f2ce0ed0e4822108f818524e69b9e5df94a1f82679ae1ee54ee9dc9bb2d6298"
+    },
+    "additional-inventory.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/additional-inventory.json",
+      "sha256": "a6bd28b7e2332a54dded494b26703290d67e104707d3b2f39a4f45bdfba92cd2"
+    },
+    "sft-audit/plan.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/sft-audit/plan.json",
+      "sha256": "c71719a3a1cda04940822d92260f0b44ac91842f9839572fbef5d3b21d3c9648"
+    },
+    "local-data-catalog.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/local-data-catalog.json",
+      "sha256": "73290ee1e84434c662e0298f6dd9efde925254cbbca0b362c14939acd361dc74"
+    },
+    "receipt-coverage.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/receipt-coverage.json",
+      "sha256": "a61682ecd3e66858b8a16cb2c5ea81c9f695cef9b5372b6a56e72e6ab02b2267"
+    },
+    "nemo-adapters-exclusions.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/nemo-adapters-exclusions.json",
+      "sha256": "78b2599eb9103fc68052bb1eb48fd98653d1c4affeda5c3a99783dd8c7f21979"
+    },
+    "gemma-content-marker-check.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/gemma-content-marker-check.json",
+      "sha256": "3dc6ffccd948af1810464f8bd4c3e27363dc4eee946ac94a7b28106dc0d33f13"
+    },
+    "sft-audit/result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/sft-audit/result.json",
+      "sha256": "d6d291c226a22b04912b83d1a390f54222cef4caad323d9c68fa31167ca14bd1"
+    },
+    "additional-audit/result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/additional-audit/result.json",
+      "sha256": "3ed3c882107935672b29c30e71e9922d201d5084fd802dd99f2ca37ac0de5a0c"
+    },
+    "full-weight-result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/full-weight-result.json",
+      "sha256": "b605bc45f0b389018cb8607e9476d65e07dafb5048d8f98a6be2a8481d814a38"
+    },
+    "swe-sft-probe/full-weight-result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/swe-sft-probe/full-weight-result.json",
+      "sha256": "2dbd3abea5976384f0344912f91c52629ce5f8a08a3609732601a1e0b058cf18"
+    },
+    "dpo-result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-result.json",
+      "sha256": "e132ad20b805a7835598804ac646ecb1cfc903c4e6159899c11d2421c4838796"
+    },
+    "dpo-split-checks.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/dpo-split-checks.json",
+      "sha256": "e15f32284b3b5225574642d31346097a41334a9b960e99df5c7dd4fa77cc37b3"
+    },
+    "foreign-token-rejection.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/foreign-token-rejection.json",
+      "sha256": "055214add4571a2723af9d49c8a024fdd85ea2c9818d06870133401cf6778dcd"
+    },
+    "tiny-fsdp-result.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/tiny-fsdp-result.json",
+      "sha256": "0875e3d2e7ef874560ee2a06596a705309773bdf3f137e8e819c886ead27e9df"
+    },
+    "tiny-fsdp-before-bug30.json": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/tiny-fsdp-before-bug30.json",
+      "sha256": "f411dae0a9083b390e76ae2daf990a1f2b9d14fbd57a6a786b4dadf9212c8798"
+    },
+    "final-cpu-tests.log": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/final-cpu-tests.log",
+      "sha256": "ad506dc2eec8c9603433365507ceb2cd6b378b2987318bad6481e5e7fe64f96a"
+    },
+    "real-verl-tests-final.log": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/real-verl-tests-final.log",
+      "sha256": "e34a7257529c7f1aeaa702b4f9807643c4b4c0cb19e3b42c173f5cd9bcbf733c"
+    },
+    "olmo-precision-cuda-final.log": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/olmo-precision-cuda-final.log",
+      "sha256": "9a416d5d69736b1ef3b3e8baecbd9c17275aec1dac10d881e7d6741a6ee93e83"
+    },
+    "precision-final-binding-tests.log": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/precision-final-binding-tests.log",
+      "sha256": "64c3608e82df0e4dba3aeae89575e6d8010dcd2315a14bada20f96ca6f923545"
+    },
+    "validate_dpo.py": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/validate_dpo.py",
+      "sha256": "492cba921a782e24d81d2227ff33b47863c7f7b41d2f06647607fabdddf1534d"
+    },
+    "full_weight_probe.py": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/full_weight_probe.py",
+      "sha256": "f748c489cdd03f53fe5b4939082d00e964be2d657333361e81d2c9f3abed780a"
+    },
+    "tiny_fsdp_probe.py": {
+      "path": "/home/lys/Desktop/RST-Train/outputs/model-validation-20260910/tiny_fsdp_probe.py",
+      "sha256": "50b05cbe424f8ede66b98d397f1d4ee4b26757ef077730eeb331f34c0d483189"
+    },
+    "rst_common/tokenization.py": {
+      "path": "/home/lys/Desktop/RST-Train/rst_common/tokenization.py",
+      "sha256": "6900db01a003f2f5b548d6b4aa34b027cd9516811fd603ed84dcffd7baa59028"
+    },
+    "rst_common/model_precision.py": {
+      "path": "/home/lys/Desktop/RST-Train/rst_common/model_precision.py",
+      "sha256": "16aa8555638260d32369104f4cc2e356822926248c075aaf653903613ad9ba51"
+    },
+    "scripts/16b_validate_model_datasets.py": {
+      "path": "/home/lys/Desktop/RST-Train/scripts/16b_validate_model_datasets.py",
+      "sha256": "bc115d55e8ba27937f12b663d56f56b4993f9a35651e03ad8b4d6b4c71986ca5"
+    },
+    "scripts/19_train_dpo.py": {
+      "path": "/home/lys/Desktop/RST-Train/scripts/19_train_dpo.py",
+      "sha256": "dff5d6e8434a48838693b0bb669fbc69d50f9475370c01290a0781f90f9c2ed0"
+    },
+    "verl_backend/model_precision.py": {
+      "path": "/home/lys/Desktop/RST-Train/verl_backend/model_precision.py",
+      "sha256": "7f9dfddeb57d9826dd9edea0b9773ef59145352d3cd89bec5cb52424b5fce0ca"
+    },
+    "verl_backend/rst_sft_dataset.py": {
+      "path": "/home/lys/Desktop/RST-Train/verl_backend/rst_sft_dataset.py",
+      "sha256": "0cf7cdbb03cb2515096aedc5267c560fd781bb45035b90e216e2141f73a1ac5e"
+    }
+  }
+}

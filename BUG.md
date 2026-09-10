@@ -1018,6 +1018,32 @@ and GPU checks must be reported separately from the ordinary CPU suite. Full-siz
 
 ---
 
+## BUG-30 — FSDP2 casts OLMo3 rotary tensors to BF16
+
+**Found during local cross-family validation (2026-09-10).** OLMo3 intentionally
+returns FP32 rotary cos/sin and applies them to BF16 queries/keys before casting
+back. The default FSDP2 `cast_forward_inputs=True` also casts these auxiliary
+decoder-layer inputs, changing native attention. In a tiny H100 probe, the old
+DPO sharding path differed from unsharded DPO by about 0.98% in gradient L2 norm.
+FP32 checks and ordinary tokenizer tests cannot expose this difference.
+
+`rst_common/model_precision.py` retains OLMo3's input precision while keeping the
+configured parameter and reduction dtypes. DPO applies this policy directly;
+the custom SFT dataset installs the corresponding wrapper before verl initializes
+its engine. Other architectures retain their existing policies. The SFT wrapper
+updates both the utility function and the engine's imported binding.
+
+Regression coverage: `tests/test_model_precision.py` checks policy selection,
+caller immutability, every DPO shard group, and actual verl hook installation.
+`tests/test_model_precision_cuda.py` exercises the real SFT wrapper and DPO
+grouping on one GPU, checking FP32 rotary inputs and BF16 gradients.
+CUDA numerical checks must preserve FP32 buffers in the unsharded baseline:
+`model.to(bfloat16)` would also round those buffers and create a different
+comparison, particularly for Gemma. This is a precision fix, not evidence of
+full-size 32K or multi-rank training acceptance.
+
+---
+
 # Open — not fixed, needs the cluster
 
 ### OPEN-1 · 4-node FSDP2 over TCP is likely throughput-bound

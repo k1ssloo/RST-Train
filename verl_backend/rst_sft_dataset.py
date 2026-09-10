@@ -58,8 +58,10 @@ if _HERE not in sys.path:
 import fsdp2_grad_accum  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from rst_common.tokenization import mask_type_for_model, validate_tokenized_parquet  # noqa: E402
+from verl_backend import model_precision  # noqa: E402
 
 fsdp2_grad_accum.apply()
+model_precision.apply()
 
 # --------------------------------------------------------------------------
 # Pure-python core, kept free of torch so it can be unit-tested anywhere.

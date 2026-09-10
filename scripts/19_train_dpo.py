@@ -247,6 +247,9 @@ def shard_model(model, *, param_dtype, world_size: int):
     if world_size == 1:
         return model
     policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=torch.float32)
+    from rst_common.model_precision import preserve_rope_precision
+
+    policy = preserve_rope_precision(model, policy)
     decoder = model.get_decoder()
     layers = getattr(decoder, "layers", None)
     if layers is None:
